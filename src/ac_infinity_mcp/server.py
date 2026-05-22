@@ -23,8 +23,70 @@ from ac_infinity_mcp.schema import (
     ACIReading,
 )
 
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+_VALID_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
+_log_level_raw = os.getenv("LOG_LEVEL", "INFO").upper()
+if _log_level_raw not in _VALID_LOG_LEVELS:
+    # Defensive: a malformed LOG_LEVEL would cause logging.basicConfig to raise
+    # ValueError at import, before any error handler can format the failure
+    # for the operator. Fall back to INFO and emit a warning once the logger
+    # is configured. P3-F007.
+    _log_level_effective = "INFO"
+    _log_level_fallback_warning = True
+else:
+    _log_level_effective = _log_level_raw
+    _log_level_fallback_warning = False
+
+logging.basicConfig(level=_log_level_effective)
 logger = logging.getLogger(__name__)
+if _log_level_fallback_warning:
+    logger.warning(
+        "LOG_LEVEL=%r is not a recognized level; falling back to INFO. "
+        "Valid: DEBUG, INFO, WARNING, ERROR, CRITICAL",
+        _log_level_raw,
+    )
+
+
+class _CredentialRedactingFilter(logging.Filter):
+    """Redact credential field values from formatted log records.
+
+    Defense in depth: every existing logger.* call site in this server has been
+    audited clean. The filter prevents future debug-logging additions from
+    accidentally emitting credentials or session tokens. P3-F006, P3-F019.
+
+    Catches three shapes:
+      - field=value      (positional log args, e.g. "token=abc123")
+      - 'field': 'value' (dict-formatted log args)
+      - "field": "value"
+    """
+
+    _PATTERNS = (
+        re.compile(
+            r"(appPasswordl|appPassword|AC_INFINITY_PASSWORD|appEmail|token|appId)"
+            r"(['\"]?\s*[:=]\s*['\"]?)([^\s'\",}]+)",
+            re.IGNORECASE,
+        ),
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        original = msg
+        for pat in self._PATTERNS:
+            msg = pat.sub(r"\1\2<redacted>", msg)
+        if msg != original:
+            record.msg = msg
+            record.args = ()
+        return True
+
+
+# Install the redactor on every handler attached to the root logger.
+# Filters on the root logger itself do NOT see records propagated from child
+# loggers — Python's logging design intentionally skips filter chains for
+# propagated records (logging docs, "Filter objects"). Attaching to handlers
+# means every record actually emitted to a sink (stderr, file, etc.) passes
+# through the redactor, regardless of which child logger originated it.
+_credential_filter = _CredentialRedactingFilter()
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_credential_filter)
 
 mcp_server = FastMCP(name="ac-infinity-mcp")
 

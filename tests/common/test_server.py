@@ -168,6 +168,46 @@ async def test_read_tools_do_not_echo_appEmail(mock_client, caplog, tool_name, a
         )
 
 
+# ============ Credential-redacting log filter (P3-F006, P3-F019) ============
+
+
+def test_credential_filter_redacts_known_fields():
+    """The filter must redact the value following known credential field markers."""
+    import logging
+    from ac_infinity_mcp.server import _CredentialRedactingFilter
+
+    flt = _CredentialRedactingFilter()
+    cases = [
+        ("token=abc123def456", "token=<redacted>"),
+        ("appPasswordl=hunter2", "appPasswordl=<redacted>"),
+        ("appEmail=user@example.com", "appEmail=<redacted>"),
+        ("{'appPassword': 'shouldnotleak'}", "{'appPassword': '<redacted>'}"),
+        ('{"token": "abc-123_XYZ.456"}', '{"token": "<redacted>"}'),
+        ("AC_INFINITY_PASSWORD=verysecret", "AC_INFINITY_PASSWORD=<redacted>"),
+    ]
+    for raw, expected in cases:
+        record = logging.LogRecord(
+            name="x", level=logging.DEBUG, pathname=__file__, lineno=1,
+            msg=raw, args=(), exc_info=None,
+        )
+        flt.filter(record)
+        assert record.getMessage() == expected, f"{raw} -> {record.getMessage()}"
+
+
+def test_credential_filter_leaves_clean_messages_alone():
+    import logging
+    from ac_infinity_mcp.server import _CredentialRedactingFilter
+
+    flt = _CredentialRedactingFilter()
+    clean = "Fetched 3 devices for user"
+    record = logging.LogRecord(
+        name="x", level=logging.INFO, pathname=__file__, lineno=1,
+        msg=clean, args=(), exc_info=None,
+    )
+    flt.filter(record)
+    assert record.getMessage() == clean
+
+
 def test_parse_device_data_drops_appEmail():
     """parse_device_data must not propagate appEmail to its returned dict (P2-F003)."""
     from ac_infinity_mcp.client import ACInfinityClient
