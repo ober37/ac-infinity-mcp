@@ -2300,73 +2300,83 @@ async def test_set_port_mode_generic_exception(mock_client):
 
 # ============ apply_grow_stage_template ============
 
-_STAGE_DRY = {"payload": {}, "dry_run": True, "controller_type": "legacy", "sent": False}
+
+def _stage_dry_response(payload: dict | None = None) -> dict:
+    """Return a fake set_port_mode dry-run result with the given payload."""
+    return {
+        "payload": payload or {},
+        "dry_run": True,
+        "controller_type": "legacy",
+        "sent": False,
+    }
+
+
 _STAGE_LIVE = {"payload": {}, "dry_run": False, "controller_type": "legacy", "sent": True}
 
 
 async def test_apply_grow_stage_template_dry_run(mock_client):
-    mock_client.set_port_mode.side_effect = [
-        {
-            "payload": {"atType": 8, "targetVpd": 13, "vpdSettingMode": 1, "targetVpdSwitch": 1},
-            "dry_run": True, "controller_type": "legacy", "sent": False,
-        },
-        {
-            "payload": {"atType": 3, "devLt": 20, "devHt": 28, "activeLt": 1, "activeHt": 1},
-            "dry_run": True, "controller_type": "legacy", "sent": False,
-        },
-        {
-            "payload": {"atType": 3, "devLh": 50, "devHh": 70, "activeLh": 1, "activeHh": 1},
-            "dry_run": True, "controller_type": "legacy", "sent": False,
-        },
-    ]
+    mock_client.set_port_mode.return_value = _stage_dry_response()
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await apply_grow_stage_template("C58ZA", 1, "veg", dry_run=True)
     data = json.loads(result)
     assert "error" not in data
     assert data["stage"] == "veg"
     assert data["dry_run"] is True
+    assert data["sent"] is False
+    assert data["controller_type"] == "legacy"
     assert data["vpd"]["target_kpa"] == 1.25
-    assert data["vpd"]["sent"] is False
-    assert "payload" in data["vpd"]
     assert data["temperature"]["min_c"] == 20.0
     assert data["temperature"]["max_c"] == 28.0
-    assert data["temperature"]["sent"] is False
-    assert "payload" in data["temperature"]
     assert data["humidity"]["min_rh"] == 50.0
     assert data["humidity"]["max_rh"] == 70.0
-    assert data["humidity"]["sent"] is False
-    assert "payload" in data["humidity"]
-    assert "partial_write" not in data
+    assert "payload" in data
+    # Single atomic write with atType=8 (VPD mode active)
+    assert mock_client.set_port_mode.call_count == 1
+    updates = mock_client.set_port_mode.call_args.args[2]
+    assert updates["atType"] == 8
+    assert updates["vpdSettingMode"] == 1
+    assert updates["targetVpd"] == 13  # veg midpoint 1.25 kPa × 10, round-half-up
+    assert updates["targetVpdSwitch"] == 1
+    # Thresholds stored on the controller (inactive in VPD mode; available on switch to AUTO)
+    assert updates["devLt"] == 20
+    assert updates["devHt"] == 28
+    assert updates["devLh"] == 50
+    assert updates["devHh"] == 70
+    assert updates["activeLt"] == 1
+    assert updates["activeHt"] == 1
+    assert updates["activeLh"] == 1
+    assert updates["activeHh"] == 1
 
 
 async def test_apply_grow_stage_template_live(mock_client):
-    mock_client.set_port_mode.side_effect = [_STAGE_LIVE, _STAGE_LIVE, _STAGE_LIVE]
+    mock_client.set_port_mode.return_value = _STAGE_LIVE
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await apply_grow_stage_template("C58ZA", 1, "veg", dry_run=False)
     data = json.loads(result)
     assert "error" not in data
     assert data["dry_run"] is False
-    assert data["vpd"]["sent"] is True
-    assert data["temperature"]["sent"] is True
-    assert data["humidity"]["sent"] is True
-    assert "payload" not in data["vpd"]
-    assert "payload" not in data["temperature"]
-    assert "payload" not in data["humidity"]
-    assert "partial_write" not in data
+    assert data["sent"] is True
+    assert "payload" not in data
+    assert mock_client.set_port_mode.call_count == 1
 
 
-@pytest.mark.parametrize("stage,expected_vpd,temp_min,temp_max,humi_min,humi_max", [
-    ("clones",       1.00, 22.0, 26.0, 70.0, 80.0),
-    ("seedling",     1.00, 22.0, 26.0, 65.0, 75.0),
-    ("veg",          1.25, 20.0, 28.0, 50.0, 70.0),
-    ("early_flower", 1.40, 20.0, 26.0, 40.0, 60.0),
-    ("mid_flower",   1.60, 18.0, 25.0, 35.0, 55.0),
-    ("late_flower",  1.50, 18.0, 24.0, 30.0, 50.0),
-])
+@pytest.mark.parametrize(
+    "stage,expected_vpd,expected_target_x10,temp_min,temp_max,humi_min,humi_max",
+    [
+        ("clones",       1.00, 10, 22.0, 26.0, 70.0, 80.0),
+        ("seedling",     1.00, 10, 22.0, 26.0, 65.0, 75.0),
+        ("veg",          1.25, 13, 20.0, 28.0, 50.0, 70.0),
+        ("early_flower", 1.40, 14, 20.0, 26.0, 40.0, 60.0),
+        ("mid_flower",   1.60, 16, 18.0, 25.0, 35.0, 55.0),
+        ("late_flower",  1.50, 15, 18.0, 24.0, 30.0, 50.0),
+    ],
+)
 async def test_apply_grow_stage_template_all_stages(
-    mock_client, stage, expected_vpd, temp_min, temp_max, humi_min, humi_max
+    mock_client, stage, expected_vpd, expected_target_x10,
+    temp_min, temp_max, humi_min, humi_max,
 ):
-    mock_client.set_port_mode.side_effect = [_STAGE_DRY, _STAGE_DRY, _STAGE_DRY]
+    """Each stage produces a single write with the correct encoded targetVpd (P2-F001)."""
+    mock_client.set_port_mode.return_value = _stage_dry_response()
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await apply_grow_stage_template("C58ZA", 1, stage, dry_run=True)
     data = json.loads(result)
@@ -2377,6 +2387,13 @@ async def test_apply_grow_stage_template_all_stages(
     assert data["temperature"]["max_c"] == temp_max
     assert data["humidity"]["min_rh"] == humi_min
     assert data["humidity"]["max_rh"] == humi_max
+    updates = mock_client.set_port_mode.call_args.args[2]
+    assert updates["atType"] == 8
+    assert updates["targetVpd"] == expected_target_x10
+    assert updates["devLt"] == int(temp_min + 0.5)
+    assert updates["devHt"] == int(temp_max + 0.5)
+    assert updates["devLh"] == int(humi_min + 0.5)
+    assert updates["devHh"] == int(humi_max + 0.5)
 
 
 async def test_apply_grow_stage_template_invalid_stage(mock_client):
@@ -2416,48 +2433,25 @@ async def test_apply_grow_stage_template_ai_plus_live(mock_client):
     data = json.loads(result)
     assert "error" in data
     assert "AI+" in data["error"]
-    assert mock_client.set_port_mode.call_count == 1  # bails after first unsupported response
+    assert mock_client.set_port_mode.call_count == 1
 
 
 async def test_apply_grow_stage_template_ai_plus_dry_run(mock_client):
-    mock_client.set_port_mode.side_effect = [_STAGE_DRY, _STAGE_DRY, _STAGE_DRY]
+    mock_client.set_port_mode.return_value = _stage_dry_response()
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await apply_grow_stage_template("C58ZA", 1, "veg", dry_run=True)
     data = json.loads(result)
     assert "error" not in data
-    assert data["vpd"]["sent"] is False
-    assert data["temperature"]["sent"] is False
-    assert data["humidity"]["sent"] is False
+    assert data["sent"] is False
 
 
-async def test_apply_grow_stage_template_partial_failure_vpd_ok_temp_fails(mock_client):
-    mock_client.set_port_mode.side_effect = [
-        {"payload": {}, "dry_run": False, "controller_type": "legacy", "sent": True},
-        ACInfinityAPIError("Data saving failed"),
-    ]
+async def test_apply_grow_stage_template_api_error_on_write(mock_client):
+    mock_client.set_port_mode.side_effect = ACInfinityAPIError("Data saving failed")
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await apply_grow_stage_template("C58ZA", 1, "veg", dry_run=False)
     data = json.loads(result)
-    assert data["vpd"]["sent"] is True
-    assert data["temperature"]["sent"] is False
-    assert "error" in data["temperature"]
-    assert "not attempted" in data["humidity"]["error"]
-    assert "temperature" in data["humidity"]["error"]
-    assert data.get("partial_write") is True
-    assert "recovery_note" in data
-    assert "vpd" in data["recovery_note"].lower()
-
-
-async def test_apply_grow_stage_template_api_error_first_write(mock_client):
-    mock_client.set_port_mode.side_effect = ACInfinityAPIError("fail")
-    with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        result = await apply_grow_stage_template("C58ZA", 1, "veg", dry_run=False)
-    data = json.loads(result)
-    assert data["vpd"]["sent"] is False
-    assert "error" in data["vpd"]
-    assert "not attempted" in data["temperature"]["error"]
-    assert "not attempted" in data["humidity"]["error"]
-    assert "partial_write" not in data
+    assert "error" in data
+    assert "Data saving failed" in data["error"]
 
 
 async def test_apply_grow_stage_template_auth_error(mock_client):
@@ -2465,8 +2459,8 @@ async def test_apply_grow_stage_template_auth_error(mock_client):
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await apply_grow_stage_template("C58ZA", 1, "veg", dry_run=False)
     data = json.loads(result)
-    assert data["vpd"]["sent"] is False
-    assert "error" in data["vpd"]
+    assert "error" in data
+    assert "expired" in data["error"]
 
 
 async def test_apply_grow_stage_template_get_devices_exception(mock_client):
@@ -2476,25 +2470,6 @@ async def test_apply_grow_stage_template_get_devices_exception(mock_client):
     data = json.loads(result)
     assert "error" in data
     assert mock_client.set_port_mode.call_count == 0
-
-
-async def test_apply_grow_stage_template_partial_failure_vpd_temp_ok_humi_fails(mock_client):
-    mock_client.set_port_mode.side_effect = [
-        {"payload": {}, "dry_run": False, "controller_type": "legacy", "sent": True},
-        {"payload": {}, "dry_run": False, "controller_type": "legacy", "sent": True},
-        ACInfinityAPIError("humidity write failed"),
-    ]
-    with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        result = await apply_grow_stage_template("C58ZA", 1, "veg", dry_run=False)
-    data = json.loads(result)
-    assert data["vpd"]["sent"] is True
-    assert data["temperature"]["sent"] is True
-    assert data["humidity"]["sent"] is False
-    assert "error" in data["humidity"]
-    assert data.get("partial_write") is True
-    assert "recovery_note" in data
-    assert "vpd" in data["recovery_note"].lower()
-    assert "temperature" in data["recovery_note"].lower()
 
 
 # ============ MCP Prompts ============

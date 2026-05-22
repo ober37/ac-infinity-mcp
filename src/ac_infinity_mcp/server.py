@@ -1045,14 +1045,6 @@ async def set_port_off(
 # ============ Automation Write Tools ============
 
 
-def _recovery_note(sent_writes: list[str]) -> str:
-    applied = ", ".join(sent_writes)
-    return (
-        f"{applied.capitalize()} automation was applied (sent=true). "
-        "To revert: call set_port_mode with mode=AUTO or set_port_speed to restore prior state."
-    )
-
-
 def _ai_plus_unsupported_error(device_id: str, port: int, controller_type: str) -> str:
     # dry_run is always False here: the AI+ guard in client._set_port_mode_inner fires
     # only on the live-write path (dry_run returns early before the guard is reached).
@@ -1437,8 +1429,10 @@ async def apply_grow_stage_template(
 ) -> str:
     """Apply a grow-stage automation template (VPD + temperature + humidity) in one call.
 
-    Sets VPD automation, temperature automation, and humidity automation in sequence
-    using the built-in sensors. Defaults to dry_run=True — set dry_run=False to write.
+    Issues a single atomic write that puts the port in VPD mode (atType=8) with the
+    stage's VPD midpoint as the active target, and simultaneously stores the stage's
+    temperature and humidity thresholds on the controller for fallback when the user
+    later switches modes. Defaults to dry_run=True — set dry_run=False to write.
 
     Stage targets (VPD midpoint used as single target):
 
@@ -1456,13 +1450,12 @@ async def apply_grow_stage_template(
         port: 1-based port number.
         stage: Growth stage name. One of: clones, seedling, veg, early_flower,
             mid_flower, late_flower.
-        dry_run: If True (default), returns payloads without writing.
+        dry_run: If True (default), returns the payload without writing.
 
     Returns:
-        JSON with per-write status for vpd, temperature, and humidity. Each entry
-        includes sent, controller_type, and payload (when dry_run=True). On partial
-        failure, partial_write=True and recovery_note lists what was applied so the
-        caller can revert if needed. On failure returns ``{"error": "..."}``.
+        JSON with action, device_id, port, stage, dry_run, controller_type, sent,
+        per-target summary (vpd/temperature/humidity), and payload (when dry_run=True).
+        On failure returns ``{"error": "..."}``.
     """
     if port < 1:
         return json.dumps({"error": "port must be a positive integer"})
@@ -1474,7 +1467,12 @@ async def apply_grow_stage_template(
     vpd_min, vpd_max = targets["vpd"]
     temp_min, temp_max = targets["temp_c"]
     humi_min, humi_max = targets["humidity"]
-    target_vpd = round((vpd_min + vpd_max) / 2, 2)
+    # Compute the 2-dp midpoint via integer math (round-half-up at 2 dp) so the
+    # displayed target reflects the stage's actual midpoint (e.g. veg → 1.25, not
+    # 1.30). Encoding is round-half-up at 1 dp (×10), matching the VPD field.
+    midpoint_x100 = int((vpd_min + vpd_max) * 50 + 0.5)
+    target_vpd = midpoint_x100 / 100
+    target_vpd_x10 = int(midpoint_x100 / 10 + 0.5)
 
     try:
         devices = await asyncio.to_thread(_client().get_devices)
@@ -1488,127 +1486,56 @@ async def apply_grow_stage_template(
     if not device:
         return json.dumps({"error": f"Device {device_id} not found"})
 
-    # Each write has its own try/except for partial-failure tracking.
-    # The outer structure (device lookup + response setup above) cannot raise.
+    # Single atomic write: VPD mode active, temp/humidity thresholds stored on the
+    # controller for fallback if the user later switches to AUTO mode. Earlier
+    # versions issued three separate writes; the temp and humidity writes carried
+    # atType=3 (AUTO), which clobbered the VPD mode set by the first write.
+    updates = {
+        "atType": 8,  # VPD mode active
+        "vpdSettingMode": 1,
+        "targetVpd": target_vpd_x10,
+        "targetVpdSwitch": 1,
+        "devLt": int(temp_min + 0.5),
+        "devHt": int(temp_max + 0.5),
+        "activeLt": 1,
+        "activeHt": 1,
+        "devLh": int(humi_min + 0.5),
+        "devHh": int(humi_max + 0.5),
+        "activeLh": 1,
+        "activeHh": 1,
+    }
+
+    try:
+        write_result = await asyncio.to_thread(
+            _client().set_port_mode, device, port, updates, dry_run
+        )
+    except (ACInfinityAuthError, ACInfinityAPIError, ACInfinityDeviceError) as e:
+        logger.warning(
+            "Error in apply_grow_stage_template (device=%s port=%s stage=%s): %s",
+            device_id, port, stage, e,
+        )
+        return json.dumps({"error": str(e)})
+    except Exception as e:
+        logger.error("Unexpected error in apply_grow_stage_template: %s", e)
+        return json.dumps({"error": str(e)})
+
+    if write_result.get("ai_plus_write_unsupported"):
+        return _ai_plus_unsupported_error(device_id, port, write_result["controller_type"])
+
     response: dict = {
         "action": "apply grow stage template",
         "device_id": device_id,
         "port": port,
         "stage": stage,
-        "dry_run": dry_run,
+        "dry_run": write_result["dry_run"],
+        "controller_type": write_result["controller_type"],
+        "sent": write_result["sent"],
+        "vpd": {"target_kpa": target_vpd},
+        "temperature": {"min_c": temp_min, "max_c": temp_max},
+        "humidity": {"min_rh": humi_min, "max_rh": humi_max},
     }
-    sent_writes: list[str] = []
-
-    # VPD write
-    vpd_updates = {
-        "atType": 8,
-        "vpdSettingMode": 1,
-        "targetVpd": int(target_vpd * 10 + 0.5),  # ×10; int(x+0.5) avoids banker's rounding
-        "targetVpdSwitch": 1,
-    }
-    try:
-        vpd_result = await asyncio.to_thread(
-            _client().set_port_mode, device, port, vpd_updates, dry_run
-        )
-        if vpd_result.get("ai_plus_write_unsupported"):
-            return _ai_plus_unsupported_error(device_id, port, vpd_result["controller_type"])
-        vpd_entry: dict = {
-            "target_kpa": target_vpd,
-            "sent": vpd_result["sent"],
-            "controller_type": vpd_result["controller_type"],
-        }
-        if vpd_result["dry_run"]:
-            vpd_entry["payload"] = vpd_result["payload"]
-        if vpd_result["sent"]:
-            sent_writes.append("vpd")
-        response["vpd"] = vpd_entry
-    except Exception as e:
-        logger.warning(
-            "VPD write failed in apply_grow_stage_template (device=%s port=%s): %s",
-            device_id, port, e,
-        )
-        response["vpd"] = {"target_kpa": target_vpd, "sent": False, "error": str(e)}
-        response["temperature"] = {
-            "min_c": temp_min, "max_c": temp_max, "sent": False,
-            "error": "not attempted — vpd write failed",
-        }
-        response["humidity"] = {
-            "min_rh": humi_min, "max_rh": humi_max, "sent": False,
-            "error": "not attempted — vpd write failed",
-        }
-        return json.dumps(response, indent=2)
-
-    # Temperature write
-    temp_updates = {
-        "atType": 3,
-        "devLt": round(temp_min),
-        "devHt": round(temp_max),
-        "activeLt": 1,
-        "activeHt": 1,
-    }
-    try:
-        temp_result = await asyncio.to_thread(
-            _client().set_port_mode, device, port, temp_updates, dry_run
-        )
-        temp_entry: dict = {
-            "min_c": temp_min,
-            "max_c": temp_max,
-            "sent": temp_result["sent"],
-            "controller_type": temp_result["controller_type"],
-        }
-        if temp_result["dry_run"]:
-            temp_entry["payload"] = temp_result["payload"]
-        if temp_result["sent"]:
-            sent_writes.append("temperature")
-        response["temperature"] = temp_entry
-    except Exception as e:
-        logger.warning(
-            "Temperature write failed in apply_grow_stage_template (device=%s port=%s): %s",
-            device_id, port, e,
-        )
-        response["temperature"] = {
-            "min_c": temp_min, "max_c": temp_max, "sent": False, "error": str(e),
-        }
-        response["humidity"] = {
-            "min_rh": humi_min, "max_rh": humi_max, "sent": False,
-            "error": "not attempted — temperature write failed",
-        }
-        response["partial_write"] = True
-        response["recovery_note"] = _recovery_note(sent_writes)
-        return json.dumps(response, indent=2)
-
-    # Humidity write
-    humi_updates = {
-        "atType": 3,
-        "devLh": round(humi_min),
-        "devHh": round(humi_max),
-        "activeLh": 1,
-        "activeHh": 1,
-    }
-    try:
-        humi_result = await asyncio.to_thread(
-            _client().set_port_mode, device, port, humi_updates, dry_run
-        )
-        humi_entry: dict = {
-            "min_rh": humi_min,
-            "max_rh": humi_max,
-            "sent": humi_result["sent"],
-            "controller_type": humi_result["controller_type"],
-        }
-        if humi_result["dry_run"]:
-            humi_entry["payload"] = humi_result["payload"]
-        response["humidity"] = humi_entry
-    except Exception as e:
-        logger.warning(
-            "Humidity write failed in apply_grow_stage_template (device=%s port=%s): %s",
-            device_id, port, e,
-        )
-        response["humidity"] = {
-            "min_rh": humi_min, "max_rh": humi_max, "sent": False, "error": str(e),
-        }
-        response["partial_write"] = True
-        response["recovery_note"] = _recovery_note(sent_writes)
-        return json.dumps(response, indent=2)
+    if write_result["dry_run"]:
+        response["payload"] = write_result["payload"]
 
     return json.dumps(response, indent=2)
 
