@@ -11,6 +11,20 @@ from ac_infinity_mcp.schema import ACInfinityAPIError, ACInfinityAuthError, ACIn
 
 logger = logging.getLogger(__name__)
 
+_SENSOR_TYPE_LABELS: dict[int, str] = {
+    10: "soil_moisture",
+    11: "co2",
+    12: "light",
+    13: "ph",
+    14: "ec_us_cm",
+    15: "ec_ms_cm",
+    16: "tds_ppm",
+    17: "tds_ppt",
+    18: "water_temp_c",
+    19: "water_temp_f",
+    20: "water_level",
+}
+
 
 class ACInfinityClient:
     """Client for AC Infinity cloud API"""
@@ -575,7 +589,11 @@ class ACInfinityClient:
                 external = [
                     {
                         "sensor_id": f"{s.get('accessPort')}.{s.get('sensorType')}",
-                        "value": s.get("sensorData", 0) / 100.0,
+                        "sensor_type": s.get("sensorType"),
+                        "sensor_type_label": _SENSOR_TYPE_LABELS.get(
+                            s.get("sensorType"), "unknown"
+                        ),
+                        "value": s.get("sensorData", 0) / (s.get("sensorPrecision") or 100),
                     }
                     for s in sensors
                 ]
@@ -667,6 +685,7 @@ class ACInfinityClient:
                 "temperature_f": round(record.get("fTemperature", 0) / 100.0, 1),
                 "humidity": round(record.get("humidity", 0) / 100.0, 1),
                 "vpd": round(record.get("vpdNums", 0) / 100.0, 2),
+                "leaf_temp_c": round(record.get("leafTemp", 0) / 10.0, 1),
                 "ports": ports,
             }
         except (TypeError, ValueError, AttributeError) as e:

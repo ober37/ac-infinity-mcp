@@ -122,6 +122,33 @@ async def test_discover_devices_client_not_initialized():
     assert "error" in data
 
 
+async def test_discover_devices_includes_device_metadata(mock_client):
+    """discover_devices must expose firmware_version, hardware_version, port_count, device_type."""
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await discover_devices()
+    data = json.loads(result)
+    device = data["devices"][0]
+    assert device["device_type"] == 11
+    assert device["port_count"] == 8
+    assert device["firmware_version"] == "3.5.28"
+    assert device["hardware_version"] == "1.0"
+
+
+async def test_discover_devices_metadata_absent_fields_are_none(mock_client):
+    """Fields absent from the API response come through as None, not KeyError."""
+    mock_client.get_devices.return_value = [
+        {"devCode": "X1", "devName": "Minimal", "online": True},
+    ]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await discover_devices()
+    data = json.loads(result)
+    device = data["devices"][0]
+    assert device["device_type"] is None
+    assert device["port_count"] is None
+    assert device["firmware_version"] is None
+    assert device["hardware_version"] is None
+
+
 # ============ appEmail PII filtering (P2-F003) ============
 #
 # docs/API.md warns that device list responses include the authenticated user's
@@ -3071,3 +3098,148 @@ def test_environment_alert_interpretation_prompt():
     assert "HIGH" in result
     assert "LOW" in result
     assert "90" in result  # grade A threshold
+
+
+# ============ parse_history_record — leaf_temp_c ============
+
+def test_parse_history_record_includes_leaf_temp():
+    """leafTemp=215 (tenths of a degree) → leaf_temp_c=21.5."""
+    from ac_infinity_mcp.client import ACInfinityClient
+    client = ACInfinityClient("test@example.com", "pw")
+    record = {
+        "createTime": 1714000000,
+        "temperature": 2400,
+        "fTemperature": 7520,
+        "humidity": 6000,
+        "vpdNums": 130,
+        "portSpead": 0,
+        "portStatus": 0,
+        "devPortCount": 2,
+        "leafTemp": 215,
+    }
+    parsed = client.parse_history_record(record)
+    assert parsed["leaf_temp_c"] == 21.5
+
+
+def test_parse_history_record_leaf_temp_zero():
+    """leafTemp=0 → leaf_temp_c=0.0."""
+    from ac_infinity_mcp.client import ACInfinityClient
+    client = ACInfinityClient("test@example.com", "pw")
+    record = {
+        "createTime": 1714000000,
+        "temperature": 2400,
+        "fTemperature": 7520,
+        "humidity": 6000,
+        "vpdNums": 130,
+        "portSpead": 0,
+        "portStatus": 0,
+        "devPortCount": 2,
+        "leafTemp": 0,
+    }
+    parsed = client.parse_history_record(record)
+    assert parsed["leaf_temp_c"] == 0.0
+
+
+def test_parse_history_record_leaf_temp_absent():
+    """Absent leafTemp key → leaf_temp_c=0.0 (not a KeyError)."""
+    from ac_infinity_mcp.client import ACInfinityClient
+    client = ACInfinityClient("test@example.com", "pw")
+    record = {
+        "createTime": 1714000000,
+        "temperature": 2400,
+        "fTemperature": 7520,
+        "humidity": 6000,
+        "vpdNums": 130,
+        "portSpead": 0,
+        "portStatus": 0,
+        "devPortCount": 2,
+    }
+    parsed = client.parse_history_record(record)
+    assert parsed["leaf_temp_c"] == 0.0
+
+
+# ============ parse_device_data — external sensor type labels and precision ============
+
+def _device_with_sensors(sensors: list[dict]) -> dict:
+    """Build a minimal device dict with the given sensors list."""
+    return {
+        "devCode": "C58ZA",
+        "devName": "Test Device",
+        "devType": 11,
+        "online": True,
+        "deviceInfo": {
+            "temperature": 2400,
+            "temperatureF": 7520,
+            "humidity": 6000,
+            "vpdnums": 130,
+            "ports": [],
+            "sensors": sensors,
+        },
+    }
+
+
+def test_external_sensor_type_label_co2():
+    """sensorType=11 → sensor_type_label='co2'."""
+    from ac_infinity_mcp.client import ACInfinityClient
+    client = ACInfinityClient("test@example.com", "pw")
+    device = _device_with_sensors([
+        {"accessPort": 1, "sensorType": 11, "sensorData": 1100, "sensorPrecision": 1},
+    ])
+    parsed = client.parse_device_data(device)
+    assert parsed["external_sensors"][0]["sensor_type_label"] == "co2"
+    assert parsed["external_sensors"][0]["sensor_type"] == 11
+
+
+def test_external_sensor_type_label_soil_moisture():
+    """sensorType=10 → sensor_type_label='soil_moisture'."""
+    from ac_infinity_mcp.client import ACInfinityClient
+    client = ACInfinityClient("test@example.com", "pw")
+    device = _device_with_sensors([
+        {"accessPort": 1, "sensorType": 10, "sensorData": 500, "sensorPrecision": 10},
+    ])
+    parsed = client.parse_device_data(device)
+    assert parsed["external_sensors"][0]["sensor_type_label"] == "soil_moisture"
+
+
+def test_external_sensor_type_label_unknown():
+    """Unknown sensorType → sensor_type_label='unknown'."""
+    from ac_infinity_mcp.client import ACInfinityClient
+    client = ACInfinityClient("test@example.com", "pw")
+    device = _device_with_sensors([
+        {"accessPort": 1, "sensorType": 99, "sensorData": 100, "sensorPrecision": 100},
+    ])
+    parsed = client.parse_device_data(device)
+    assert parsed["external_sensors"][0]["sensor_type_label"] == "unknown"
+
+
+def test_external_sensor_precision_used():
+    """value = sensorData / sensorPrecision (1150 / 1000 = 1.15)."""
+    from ac_infinity_mcp.client import ACInfinityClient
+    client = ACInfinityClient("test@example.com", "pw")
+    device = _device_with_sensors([
+        {"accessPort": 1, "sensorType": 11, "sensorData": 1150, "sensorPrecision": 1000},
+    ])
+    parsed = client.parse_device_data(device)
+    assert parsed["external_sensors"][0]["value"] == pytest.approx(1.15)
+
+
+def test_external_sensor_precision_zero_falls_back_to_100():
+    """sensorPrecision=0 → fallback divisor of 100 (guard against ZeroDivisionError)."""
+    from ac_infinity_mcp.client import ACInfinityClient
+    client = ACInfinityClient("test@example.com", "pw")
+    device = _device_with_sensors([
+        {"accessPort": 1, "sensorType": 11, "sensorData": 500, "sensorPrecision": 0},
+    ])
+    parsed = client.parse_device_data(device)
+    assert parsed["external_sensors"][0]["value"] == pytest.approx(5.0)
+
+
+def test_external_sensor_precision_absent_falls_back_to_100():
+    """Missing sensorPrecision key → fallback divisor of 100."""
+    from ac_infinity_mcp.client import ACInfinityClient
+    client = ACInfinityClient("test@example.com", "pw")
+    device = _device_with_sensors([
+        {"accessPort": 1, "sensorType": 11, "sensorData": 200},
+    ])
+    parsed = client.parse_device_data(device)
+    assert parsed["external_sensors"][0]["value"] == pytest.approx(2.0)
