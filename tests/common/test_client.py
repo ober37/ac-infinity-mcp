@@ -32,6 +32,25 @@ def client():
     return ACInfinityClient("test@example.com", "password123")
 
 
+def test_base_url_is_http_only():
+    """docs/API.md Quirk 8: upstream serves HTTP only. A well-meaning "fix" to
+    https would silently break compatibility because the upstream server does
+    not serve TLS. Guards the invariant so a regression fails CI (P2-F007).
+    """
+    assert ACInfinityClient.BASE_URL.startswith("http://")
+    assert not ACInfinityClient.BASE_URL.startswith("https://")
+    # Confirm derived endpoints inherit the scheme
+    for endpoint in (
+        ACInfinityClient.LOGIN_ENDPOINT,
+        ACInfinityClient.DEVICES_ENDPOINT,
+        ACInfinityClient.HISTORY_ENDPOINT,
+        ACInfinityClient.MODE_SETTINGS_ENDPOINT,
+        ACInfinityClient.ADD_DEV_MODE_ENDPOINT,
+        ACInfinityClient.MODE_AND_SETTING_ENDPOINT,
+    ):
+        assert endpoint.startswith("http://")
+
+
 @pytest.fixture
 def authed_client():
     c = ACInfinityClient("test@example.com", "password123")
