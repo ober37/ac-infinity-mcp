@@ -1,3 +1,4 @@
+import copy
 from unittest.mock import MagicMock
 
 import pytest
@@ -50,10 +51,16 @@ MOCK_DEVICE_AI_PLUS: dict = {
 
 @pytest.fixture
 def mock_client():
-    """MagicMock of ACInfinityClient with sensible defaults."""
+    """MagicMock of ACInfinityClient with sensible defaults.
+
+    Default return values are deep-copied so a test that mutates them
+    (e.g. ``mock_client.parse_device_data.return_value["vpd"] = 0.5``) does not
+    leak state to other tests. Without the copy, the shared module-level dict
+    would carry the mutation across test boundaries (P2-F016).
+    """
     client = MagicMock()
-    client.get_devices.return_value = [MOCK_DEVICE_LEGACY]
-    client.parse_device_data.return_value = {
+    client.get_devices.return_value = [copy.deepcopy(MOCK_DEVICE_LEGACY)]
+    client.parse_device_data.return_value = copy.deepcopy({
         "timestamp": "2026-01-01T00:00:00Z",
         "device_id": "C58ZA",
         "device_name": "Test 69 Pro",
@@ -63,5 +70,5 @@ def mock_client():
         "vpd": 1.24,
         "ports": [],
         "external_sensors": [],
-    }
+    })
     return client
