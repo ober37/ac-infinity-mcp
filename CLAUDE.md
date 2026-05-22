@@ -13,6 +13,18 @@ This file is the authoritative source for how Claude agents contribute to this r
 
 ---
 
+## Session Start Protocol
+
+At the start of every phase session, in order:
+
+1. Read this file (`CLAUDE.md`)
+2. Confirm the current Claude model name (for `Co-Authored-By` attribution)
+3. **Check for `.env`** — credentials live in `.env` at the repo root. Read it before
+   any live API call or Gate 5 smoke test. Never commit it; it is already in `.gitignore`.
+4. Begin the Phase Planning Session (see below) before writing any code
+
+---
+
 ## Phase Planning Session (mandatory before any code is written)
 
 Before starting implementation on each phase, run an interactive planning session with the user:
@@ -42,14 +54,22 @@ The session is complete when the user explicitly approves. If the user redirects
 
 **Gate 3 — Deep Security Review**
 - `.env` not committed, confirmed in `.gitignore`
-- `pip audit` — no known CVEs in dependencies
 - Docker image doesn't embed secrets
 - HTTP-only API exposure documented and accepted risk noted in `docs/API.md`
 
 **Gate 4 — Full Automated Tests Pass**
-- `ruff check src/ tests/` — zero warnings
-- `mypy src/ac_infinity_mcp/` — zero errors
-- `pytest tests/ -v` — all pass
+
+Run each command and confirm the expected output before checking the box:
+
+- [ ] `ruff check src/ tests/`
+      → Expected: `All checks passed.`
+- [ ] `mypy src/ac_infinity_mcp/`
+      → Expected: `Success: no issues found in N source files`
+- [ ] `python3 -m pytest tests/common/ tests/devices/ -v`
+      → Expected: all tests pass, 0 errors, 0 failures
+- [ ] `pip-audit`
+      → Expected: no known vulnerabilities (document any new CVEs; existing `mcp` upstream
+        noise is accepted risk — see Gate 3 notes in `docs/API.md`)
 
 **Gate 5 — Manual Smoke Test Proposal + Execution**
 - Write smoke test plan for the PR scope
