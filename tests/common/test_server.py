@@ -341,6 +341,7 @@ async def test_check_vpd_drift_ok(mock_client):
     data = json.loads(result)
     assert data["status"] == "OK"
     assert data["alert"] is None
+    assert data["deviation"] == 0.0
 
 
 async def test_check_vpd_drift_low(mock_client):
@@ -353,6 +354,7 @@ async def test_check_vpd_drift_low(mock_client):
     data = json.loads(result)
     assert data["status"] == "LOW"
     assert "below target" in data["alert"]
+    assert data["deviation"] == round(0.5 - 1.0, 2)  # -0.5: below lower bound
 
 
 async def test_check_vpd_drift_high(mock_client):
@@ -365,6 +367,7 @@ async def test_check_vpd_drift_high(mock_client):
     data = json.loads(result)
     assert data["status"] == "HIGH"
     assert "exceeds target" in data["alert"]
+    assert data["deviation"] == round(2.5 - 1.5, 2)  # 1.0: above upper bound
 
 
 async def test_check_vpd_drift_unknown_stage_returns_error(mock_client):
@@ -1757,6 +1760,15 @@ async def test_set_vpd_automation_payload_encoding(mock_client):
     assert call_updates["targetVpd"] == 14   # 1.4 × 10
     assert call_updates["vpdSettingMode"] == 1
     assert call_updates["targetVpdSwitch"] == 1
+
+
+async def test_set_vpd_automation_no_bankers_rounding(mock_client):
+    """1.25 kPa must encode as 13, not 12 (Python banker's rounding would give 12)."""
+    mock_client.set_port_mode.return_value = MOCK_VPD_DRY
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        await set_vpd_automation("C58ZA", 1, 1.25)
+    call_updates = mock_client.set_port_mode.call_args[0][2]
+    assert call_updates["targetVpd"] == 13   # int(12.5 + 0.5) = 13, not round(12.5) = 12
 
 
 async def test_set_vpd_automation_target_too_low(mock_client):

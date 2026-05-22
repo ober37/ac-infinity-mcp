@@ -299,7 +299,7 @@ def test_build_activity_report_avg_speed():
     assert result[0].avg_speed_when_running == 5.0
 
 
-def test_build_activity_report_peak_hour():
+def test_build_activity_report_peak_hour_utc():
     readings = []
     # Hour 14 has 3 on-readings; others have 1
     for h in [10, 14, 14, 14, 18]:
@@ -310,7 +310,7 @@ def test_build_activity_report_peak_hour():
             "ports": [_port(1, "Fan", 5, True)],
         })
     result = build_activity_report(readings)
-    assert result[0].peak_hour == 14
+    assert result[0].peak_hour_utc == 14
 
 
 def test_build_activity_report_multiple_ports():

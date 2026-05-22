@@ -50,7 +50,7 @@ class ActivityReport:
     transitions: int
     avg_speed_when_running: float
     uptime_pct: float
-    peak_hour: int
+    peak_hour_utc: int
 
 
 def _range_score(value: float, low: float, high: float) -> float:
@@ -276,7 +276,7 @@ def build_activity_report(readings: list[dict[str, Any]]) -> list[ActivityReport
         for h in pd["hours"]:
             if h is not None:
                 hour_counts[h] = hour_counts.get(h, 0) + 1
-        peak_hour = max(hour_counts, key=lambda k: hour_counts[k]) if hour_counts else 0
+        peak_hour_utc = max(hour_counts, key=lambda k: hour_counts[k]) if hour_counts else 0
 
         reports.append(
             ActivityReport(
@@ -287,7 +287,7 @@ def build_activity_report(readings: list[dict[str, Any]]) -> list[ActivityReport
                 transitions=pd["transitions"],
                 avg_speed_when_running=avg_speed,
                 uptime_pct=uptime_pct,
-                peak_hour=peak_hour,
+                peak_hour_utc=peak_hour_utc,
             )
         )
 

@@ -749,6 +749,338 @@ Both legacy and AI+ controllers return the same 142-field structure.
 
 ---
 
+## MCP Tool Reference
+
+This section documents the MCP tool interfaces — parameters, return schemas, and encoding
+notes. All tools return JSON strings. On failure every tool returns `{"error": "...", "detail": "..."}`.
+
+---
+
+### `get_port_activity_report(device_id, days=7)`
+
+Build a per-port runtime activity report from historical data. Calls `get_historical_readings`
+internally then runs pure analytics calculations — no additional API calls.
+
+**Parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `device_id` | `str` | Device code from `discover_devices` |
+| `days` | `int` | Number of days to analyze (1–30, default 7) |
+
+**Response:**
+```json
+{
+  "device_id": "C58ZA",
+  "days_analyzed": 7,
+  "readings_used": 1440,
+  "ports": [
+    {
+      "port": 1,
+      "name": "Inline Fan",
+      "on_hours": 12.5,
+      "off_hours": 11.5,
+      "transitions": 4,
+      "avg_speed_when_running": 5.2,
+      "uptime_pct": 52.1,
+      "peak_hour_utc": 14
+    }
+  ]
+}
+```
+
+**Field notes:**
+- `on_hours` / `off_hours` — calculated from raw historical records; total is `days * 24` when full data is available
+- `transitions` — number of on↔off state changes in the period
+- `avg_speed_when_running` — average `onSpead` value (1–10) across on-readings with non-zero speed
+- `uptime_pct` — `on_hours / (on_hours + off_hours) * 100`, rounded to 1 decimal
+- `peak_hour_utc` — UTC hour (0–23) with the most on-readings; `0` when no on-readings exist
+
+---
+
+### `get_port_status(device_id, port)`
+
+Get the live operational status of a single port. Reads real-time fields from
+`/api/user/devInfoListAll` that are not exposed by `get_device_reading`.
+
+**Parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `device_id` | `str` | Device code from `discover_devices` (e.g. `"C58ZA"`) |
+| `port` | `int` | 1-based port number |
+
+**Response:**
+```json
+{
+  "device_id": "C58ZA",
+  "port": 1,
+  "port_name": "Intake Fan",
+  "power_level": 5,
+  "load_detected": true,
+  "mode": "AUTO",
+  "remain_time_seconds": 0
+}
+```
+
+**Field notes:**
+- `power_level` — actual current power level 0–10 from `speak` API field
+- `load_detected` — `true` when a device is physically plugged into the port (`loadState=1`)
+- `mode` — one of: `OFF`, `ON`, `AUTO`, `VPD`, `TIMER_TO_ON`, `TIMER_TO_OFF`, `CYCLE`, `SCHEDULE`
+- `remain_time_seconds` — countdown timer seconds from `remainTime` field; `0` when no active timer
+
+---
+
+### `get_port_settings(device_id, port)`
+
+Get the full automation configuration for a port from `/api/dev/getdevModeSettingList`.
+
+**Parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `device_id` | `str` | Device code from `discover_devices` |
+| `port` | `int` | 1-based port number |
+
+**Response:**
+```json
+{
+  "device_id": "C58ZA",
+  "port": 1,
+  "mode": "VPD",
+  "speed_target": 5,
+  "vpd_target_kpa": 1.4,
+  "temp_range_c": null,
+  "humidity_range_pct": null,
+  "schedule_window": null,
+  "cycle_on_seconds": 0,
+  "cycle_off_seconds": 0,
+  "timer_on_seconds": 0,
+  "timer_off_seconds": 0
+}
+```
+
+**Field notes:**
+- `vpd_target_kpa` — non-null only when VPD automation active; decoded as `targetVpd ÷ 10` (Quirk 4 analogue)
+- `temp_range_c` — `{"min_c": N, "max_c": N}` when temp thresholds enabled; raw °C integers (no scaling)
+- `humidity_range_pct` — `{"min_pct": N, "max_pct": N}` when humidity thresholds enabled; raw % RH integers
+- `schedule_window` — `{"start": "HH:MM", "end": "HH:MM"}` in **device local time** (not UTC); `null` when disabled
+- `timer_on_seconds` / `timer_off_seconds` — from `acitveTimerOn` / `acitveTimerOff` (API typo: `acitve`)
+
+---
+
+### `set_port_speed(device_id, port, speed, dry_run=True)`
+
+Set fan or dimmer speed on a specific port. Uses read-before-write (legacy controllers).
+All 77 mode-setting fields are preserved; only `onSpead` is updated.
+
+**Parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `device_id` | `str` | Device code from `discover_devices` |
+| `port` | `int` | 1-based port number |
+| `speed` | `int` | Target speed 1–10 (10 = full speed) |
+| `dry_run` | `bool` | Default `True` — returns payload without writing |
+
+**Validation:** `speed` must be 1–10. Use `set_port_off` to set speed 0.
+
+**Response:**
+```json
+{
+  "action": "set port 2 speed to 5",
+  "device_id": "C58ZA",
+  "port": 2,
+  "speed": 5,
+  "dry_run": true,
+  "controller_type": "legacy",
+  "sent": false,
+  "payload": { "...": "77-field legacy payload" }
+}
+```
+
+**AI+ note:** `dry_run=True` is supported. `dry_run=False` returns an unsupported error — see Quirk 14.
+
+---
+
+### `set_port_on(device_id, port, dry_run=True)`
+
+Turn a port on at full speed (`onSpead=10`). Works for fan-type and on/off toggle devices.
+Uses read-before-write.
+
+**Parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `device_id` | `str` | Device code from `discover_devices` |
+| `port` | `int` | 1-based port number |
+| `dry_run` | `bool` | Default `True` — returns payload without writing |
+
+**Response:** Same structure as `set_port_speed` without the `speed` field; `action` is `"turn port N on"`.
+
+---
+
+### `set_port_off(device_id, port, dry_run=True)`
+
+Turn a port off (`onSpead=0`). Uses read-before-write.
+
+**Parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `device_id` | `str` | Device code from `discover_devices` |
+| `port` | `int` | 1-based port number |
+| `dry_run` | `bool` | Default `True` — returns payload without writing |
+
+**Response:** Same structure as `set_port_speed` without the `speed` field; `action` is `"turn port N off"`.
+
+---
+
+### `set_vpd_automation(device_id, port, target_vpd, dry_run=True)`
+
+Enable VPD automation using the built-in temperature and humidity sensors.
+Switches the port to VPD mode (`atType=8`) and sets the VPD target.
+
+**Parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `device_id` | `str` | Device code from `discover_devices` |
+| `port` | `int` | 1-based port number |
+| `target_vpd` | `float` | Target VPD in kPa, range 0.1–3.0 |
+| `dry_run` | `bool` | Default `True` — returns payload without writing |
+
+**Validation:** `target_vpd` must be 0.1–3.0. Sub-0.1 kPa and over-3.0 kPa are rejected.
+
+**Encoding:** `targetVpd = round(target_vpd × 10)` — e.g. 1.4 kPa → stored as 14 (Quirk 4 analogue for writes).
+Also sets `vpdSettingMode=1`, `targetVpdSwitch=1`, `atType=8`.
+
+**Response:**
+```json
+{
+  "action": "set port 1 VPD automation to 1.4 kPa",
+  "device_id": "C58ZA",
+  "port": 1,
+  "target_vpd_kpa": 1.4,
+  "dry_run": true,
+  "controller_type": "legacy",
+  "sent": false,
+  "payload": { "...": "77-field legacy payload" }
+}
+```
+
+---
+
+### `set_temperature_automation(device_id, port, min_c, max_c, dry_run=True)`
+
+Enable temperature automation using the built-in temperature sensor.
+Switches the port to AUTO mode (`atType=3`) and sets temperature thresholds.
+The controller speeds up when temperature exceeds `max_c` and slows below `min_c`.
+
+**Parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `device_id` | `str` | Device code from `discover_devices` |
+| `port` | `int` | 1-based port number |
+| `min_c` | `float` | Minimum threshold °C, range 0–50. Sub-degree values rounded to nearest int |
+| `max_c` | `float` | Maximum threshold °C, range 0–50. Must exceed `min_c` |
+| `dry_run` | `bool` | Default `True` — returns payload without writing |
+
+**Encoding:** `devLt = round(min_c)`, `devHt = round(max_c)` — raw °C integers, no ×100 scaling.
+Also sets `activeLt=1`, `activeHt=1`, `atType=3`.
+
+**Response:**
+```json
+{
+  "action": "set port 1 temperature automation 20–26°C",
+  "device_id": "C58ZA",
+  "port": 1,
+  "min_c": 20.0,
+  "max_c": 26.0,
+  "dry_run": true,
+  "controller_type": "legacy",
+  "sent": false,
+  "payload": { "...": "77-field legacy payload" }
+}
+```
+
+---
+
+### `set_humidity_automation(device_id, port, min_rh, max_rh, dry_run=True)`
+
+Enable humidity automation using the built-in humidity sensor.
+Switches the port to AUTO mode (`atType=3`) and sets humidity thresholds.
+The controller speeds up when humidity exceeds `max_rh` and slows below `min_rh`.
+
+**Parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `device_id` | `str` | Device code from `discover_devices` |
+| `port` | `int` | 1-based port number |
+| `min_rh` | `float` | Minimum threshold % RH, range 0–100. Sub-percent values rounded to nearest int |
+| `max_rh` | `float` | Maximum threshold % RH, range 0–100. Must exceed `min_rh` |
+| `dry_run` | `bool` | Default `True` — returns payload without writing |
+
+**Encoding:** `devLh = round(min_rh)`, `devHh = round(max_rh)` — raw % RH integers, no ×100 scaling.
+Also sets `activeLh=1`, `activeHh=1`, `atType=3`.
+
+**Response:**
+```json
+{
+  "action": "set port 1 humidity automation 40–60%",
+  "device_id": "C58ZA",
+  "port": 1,
+  "min_rh": 40.0,
+  "max_rh": 60.0,
+  "dry_run": true,
+  "controller_type": "legacy",
+  "sent": false,
+  "payload": { "...": "77-field legacy payload" }
+}
+```
+
+---
+
+### `set_port_mode(device_id, port, mode, dry_run=True, ...)`
+
+Switch a port to a specific automation mode. All 8 AC Infinity automation modes are
+supported. For setting automation targets alongside the mode, prefer the dedicated tools:
+`set_vpd_automation`, `set_temperature_automation`, `set_humidity_automation`.
+
+**Parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `device_id` | `str` | Device code from `discover_devices` |
+| `port` | `int` | 1-based port number |
+| `mode` | `str` | One of: `OFF`, `ON`, `AUTO`, `VPD`, `CYCLE`, `SCHEDULE`, `TIMER_TO_ON`, `TIMER_TO_OFF` |
+| `dry_run` | `bool` | Default `True` — returns payload without writing |
+| `cycle_on_seconds` | `int \| None` | Required for `CYCLE` — seconds port runs per cycle |
+| `cycle_off_seconds` | `int \| None` | Required for `CYCLE` — seconds port is off per cycle |
+| `schedule_start` | `str \| None` | Required for `SCHEDULE` — start time `"HH:MM"` in device local time |
+| `schedule_end` | `str \| None` | Required for `SCHEDULE` — end time `"HH:MM"` in device local time |
+| `timer_duration_seconds` | `int \| None` | Required for `TIMER_TO_ON` and `TIMER_TO_OFF` — countdown duration |
+
+**Mode → `atType` encoding:**
+| Mode | `atType` |
+|---|---|
+| `OFF` | 1 |
+| `ON` | 2 |
+| `AUTO` | 3 |
+| `TIMER_TO_ON` | 4 |
+| `TIMER_TO_OFF` | 5 |
+| `CYCLE` | 6 |
+| `SCHEDULE` | 7 |
+| `VPD` | 8 |
+
+**Response:**
+```json
+{
+  "action": "set port 1 mode to CYCLE",
+  "device_id": "C58ZA",
+  "port": 1,
+  "mode": "CYCLE",
+  "dry_run": true,
+  "controller_type": "legacy",
+  "sent": false,
+  "payload": { "...": "77-field legacy payload" }
+}
+```
+
+---
+
 ## MCP Intelligence Tool
 
 ### `apply_grow_stage_template(device_id, port, stage, dry_run=True)`

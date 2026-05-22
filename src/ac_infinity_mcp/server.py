@@ -329,10 +329,13 @@ async def check_vpd_drift(device_id: str, stage: str = "veg") -> str:
               "target_range": [1.0, 1.5],
               "stage": "veg",
               "status": "HIGH",
-              "alert": "VPD 1.58 exceeds target 1.00-1.50. Increase circulation."
+              "deviation": 0.08,
+              "alert": "VPD 1.58 exceeds target 1.00–1.50. Raise humidity or lower temperature."
             }
 
         ``status`` is one of ``"OK"``, ``"LOW"``, or ``"HIGH"``.
+        ``deviation`` is 0 when OK; positive when HIGH (kPa above upper bound);
+        negative when LOW (kPa below lower bound).
         ``alert`` is ``null`` when status is ``"OK"``.
         On failure returns ``{"error": "...", "detail": "..."}``.
     """
@@ -352,20 +355,23 @@ async def check_vpd_drift(device_id: str, stage: str = "veg") -> str:
 
         status = "OK"
         alert = None
+        deviation = 0.0
 
         if current_vpd < target_range[0]:
             status = "LOW"
+            deviation = round(current_vpd - target_range[0], 2)  # negative: below lower bound
             alert = (
                 f"VPD {current_vpd:.2f} is below target "
                 f"{target_range[0]:.2f}–{target_range[1]:.2f}. "
-                "Lower fan speed or increase humidity."
+                "Lower humidity or raise temperature to increase VPD."
             )
         elif current_vpd > target_range[1]:
             status = "HIGH"
+            deviation = round(current_vpd - target_range[1], 2)  # positive: above upper bound
             alert = (
                 f"VPD {current_vpd:.2f} exceeds target "
                 f"{target_range[0]:.2f}–{target_range[1]:.2f}. "
-                "Increase air circulation or reduce humidity."
+                "Raise humidity or lower temperature to reduce VPD."
             )
 
         return json.dumps({
@@ -374,6 +380,7 @@ async def check_vpd_drift(device_id: str, stage: str = "veg") -> str:
             "target_range": target_range,
             "stage": stage,
             "status": status,
+            "deviation": deviation,
             "alert": alert,
         }, indent=2)
 
@@ -550,7 +557,7 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
 
     Returns:
         JSON with per-port on_hours, off_hours, transitions, avg_speed_when_running,
-        uptime_pct, and peak_hour (UTC).
+        uptime_pct, and peak_hour_utc (UTC hour 0–23).
     """
     try:
         if not 1 <= days <= 30:
@@ -1103,7 +1110,7 @@ async def set_vpd_automation(
         updates = {
             "atType": 8,  # VPD mode
             "vpdSettingMode": 1,
-            "targetVpd": round(target_vpd * 10),  # API stores as ×10 (e.g. 1.4 kPa → 14)
+            "targetVpd": int(target_vpd * 10 + 0.5),  # ×10; int(x+0.5) avoids banker's rounding
             "targetVpdSwitch": 1,
         }
         write_result = await asyncio.to_thread(
@@ -1481,6 +1488,8 @@ async def apply_grow_stage_template(
     if not device:
         return json.dumps({"error": f"Device {device_id} not found"})
 
+    # Each write has its own try/except for partial-failure tracking.
+    # The outer structure (device lookup + response setup above) cannot raise.
     response: dict = {
         "action": "apply grow stage template",
         "device_id": device_id,
@@ -1494,7 +1503,7 @@ async def apply_grow_stage_template(
     vpd_updates = {
         "atType": 8,
         "vpdSettingMode": 1,
-        "targetVpd": round(target_vpd * 10),  # API stores as ×10 (e.g. 1.25 kPa → 13)
+        "targetVpd": int(target_vpd * 10 + 0.5),  # ×10; int(x+0.5) avoids banker's rounding
         "targetVpdSwitch": 1,
     }
     try:
@@ -1735,10 +1744,10 @@ means above the upper bound; negative means below the lower bound.
 | Grade | Score | Interpretation |
 |---|---|---|
 | A | 90–100 | Excellent — environment is dialled in |
-| B | 75–89 | Good — minor deviation, stable growth |
-| C | 60–74 | Fair — worth investigating; one metric is off |
-| D | 40–59 | Poor — environment stress likely; intervene soon |
-| F | 0–39 | Critical — significant stress; act immediately |
+| B | 80–89 | Good — minor deviation, stable growth |
+| C | 70–79 | Fair — worth investigating; one metric is off |
+| D | 60–69 | Poor — environment stress likely; intervene soon |
+| F | 0–59 | Critical — significant stress; act immediately |
 
 **Score weighting:** VPD 40% + Temperature 30% + Humidity 30%.
 

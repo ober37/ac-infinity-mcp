@@ -27,6 +27,8 @@ class ACInfinityClient:
         self.email = email
         self.password = password[:25]  # API silently truncates to 25 chars
         self.token: str | None = None
+        # Shared across asyncio.to_thread calls. urllib3 pool is thread-safe;
+        # cookie jar thread safety is moot because this API uses header tokens only.
         self.session = requests.Session()
         self._last_write_time: float = 0.0
         self._write_lock = threading.Lock()
