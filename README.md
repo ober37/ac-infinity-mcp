@@ -175,6 +175,14 @@ pytest tests/ -v
 pip-audit
 ```
 
+## Security
+
+Vulnerabilities should be reported via
+[GitHub Private Vulnerability Reporting](https://github.com/ober37/ac-infinity-mcp/security/advisories/new).
+See [SECURITY.md](SECURITY.md) for the full disclosure policy, scope, and known
+limitations (including the HTTP-only upstream API). Accepted dependency CVEs
+are tracked in [docs/SECURITY-RISKS.md](docs/SECURITY-RISKS.md).
+
 ## License
 
 MIT
