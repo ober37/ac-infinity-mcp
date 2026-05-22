@@ -282,10 +282,18 @@ def test_authenticate_success(client):
 
 @responses_lib.activate
 def test_authenticate_wrong_credentials(client):
+    """Real API returns code=400 (not 401) for bad credentials — see docs/API.md.
+
+    AUTH_FAILURE fixture mirrors that shape exactly so any future branch on
+    code==400 has accurate test data (P2-F008).
+    """
     responses_lib.add(responses_lib.POST, LOGIN_URL, json=AUTH_FAILURE, status=200)
     result = client.authenticate()
     assert result is False
     assert client.token is None
+    # Pin the fixture's documented shape so a regression to a thin mock fails.
+    assert AUTH_FAILURE["code"] == 400
+    assert "wrong" in AUTH_FAILURE["msg"].lower()
 
 
 @responses_lib.activate

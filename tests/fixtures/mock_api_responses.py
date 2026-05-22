@@ -1,7 +1,22 @@
 """Shared mock API response payloads for HTTP-level tests."""
 
-AUTH_SUCCESS = {"code": 200, "data": {"appId": "tok_test_abc123"}}
-AUTH_FAILURE = {"code": 401, "msg": "Invalid credentials"}
+# docs/API.md documents the real auth-success response shape: code=200, msg
+# present, and data.appEmail populated alongside data.appId. Fixture mirrors
+# the real shape so tests don't accidentally rely on a thinner mock.
+AUTH_SUCCESS = {
+    "code": 200,
+    "msg": "success",
+    "data": {"appId": "tok_test_abc123", "appEmail": "test@example.com"},
+}
+
+# Real API returns code 400 (not 401) for bad credentials — see docs/API.md
+# "Authentication failure" section. 401 is reserved for expired-token responses
+# on other endpoints. Keeping the failure code accurate so code-400-specific
+# branches (e.g. "wrong password" UX) are testable.
+AUTH_FAILURE = {"code": 400, "msg": "Email or password is wrong"}
+
+# Token-expiry 401 — used by tests that exercise the refresh-on-401 path.
+AUTH_401_TOKEN_EXPIRED = {"code": 401, "msg": "Token expired"}
 
 _MOCK_DEVICE_1 = {
     "devCode": "C58ZA",
