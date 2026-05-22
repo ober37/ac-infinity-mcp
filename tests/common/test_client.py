@@ -270,7 +270,9 @@ def test_authenticate_wrong_credentials(client):
 
 
 @responses_lib.activate
-def test_authenticate_connection_error(client):
+def test_authenticate_connection_error(client, monkeypatch):
+    """Persistent ConnectionError returns False only after tenacity exhausts retries."""
+    monkeypatch.setattr("tenacity.nap.time.sleep", lambda _: None)  # no real backoff
     responses_lib.add(
         responses_lib.POST,
         LOGIN_URL,
@@ -278,10 +280,14 @@ def test_authenticate_connection_error(client):
     )
     result = client.authenticate()
     assert result is False
+    # tenacity retries 3 times — proves the wrapper is in place (P1-F005)
+    assert len(responses_lib.calls) == 3
 
 
 @responses_lib.activate
-def test_authenticate_timeout(client):
+def test_authenticate_timeout(client, monkeypatch):
+    """Persistent Timeout returns False after retry exhaustion."""
+    monkeypatch.setattr("tenacity.nap.time.sleep", lambda _: None)
     responses_lib.add(
         responses_lib.POST,
         LOGIN_URL,
@@ -289,6 +295,26 @@ def test_authenticate_timeout(client):
     )
     result = client.authenticate()
     assert result is False
+    assert len(responses_lib.calls) == 3
+
+
+@responses_lib.activate
+def test_authenticate_recovers_from_transient_connection_error(client, monkeypatch):
+    """Transient ConnectionError is retried; eventual success returns True (P1-F005)."""
+    monkeypatch.setattr("tenacity.nap.time.sleep", lambda _: None)
+    responses_lib.add(
+        responses_lib.POST, LOGIN_URL,
+        body=requests.exceptions.ConnectionError("transient"),
+    )
+    responses_lib.add(
+        responses_lib.POST, LOGIN_URL,
+        body=requests.exceptions.ConnectionError("transient"),
+    )
+    responses_lib.add(responses_lib.POST, LOGIN_URL, json=AUTH_SUCCESS, status=200)
+    result = client.authenticate()
+    assert result is True
+    assert client.token == "tok_test_abc123"
+    assert len(responses_lib.calls) == 3
 
 
 @responses_lib.activate
@@ -957,6 +983,51 @@ def test_set_port_mode_exhausts_retries_and_raises(authed_client):
                 )
     write_calls = [c for c in responses_lib.calls if "addDevMode" in c.request.url]
     assert len(write_calls) == 3
+
+
+@responses_lib.activate
+def test_set_port_mode_retries_on_connection_error_then_succeeds(authed_client, monkeypatch):
+    """Transient ConnectionError on write POST is retried via tenacity (P1-F004).
+
+    ConnectionError fires before the request reaches the server, so retry is
+    safe. Timeout is intentionally excluded from retry — see client decorator.
+    """
+    monkeypatch.setattr("tenacity.nap.time.sleep", lambda _: None)
+    # Two MODE_SETTINGS responses because the retry re-runs the full inner.
+    responses_lib.add(
+        responses_lib.POST, MODE_SETTINGS_URL, json=MODE_SETTINGS_SUCCESS, status=200
+    )
+    responses_lib.add(
+        responses_lib.POST, ADD_DEV_MODE_URL,
+        body=requests.exceptions.ConnectionError("connection reset"),
+    )
+    responses_lib.add(
+        responses_lib.POST, MODE_SETTINGS_URL, json=MODE_SETTINGS_SUCCESS, status=200
+    )
+    responses_lib.add(responses_lib.POST, ADD_DEV_MODE_URL, json=ADD_MODE_SUCCESS, status=200)
+    with patch.object(authed_client, "_enforce_write_rate_limit"):
+        result = authed_client.set_port_mode(LEGACY_DEVICE_DATA, port=1, updates={}, dry_run=False)
+    assert result["sent"] is True
+    write_calls = [c for c in responses_lib.calls if "addDevMode" in c.request.url]
+    assert len(write_calls) == 2
+
+
+@responses_lib.activate
+def test_set_port_mode_does_not_retry_on_timeout(authed_client, monkeypatch):
+    """Timeout is NOT retried for writes — server may have already processed it (P1-F004)."""
+    monkeypatch.setattr("tenacity.nap.time.sleep", lambda _: None)
+    responses_lib.add(
+        responses_lib.POST, MODE_SETTINGS_URL, json=MODE_SETTINGS_SUCCESS, status=200
+    )
+    responses_lib.add(
+        responses_lib.POST, ADD_DEV_MODE_URL,
+        body=requests.exceptions.Timeout("read timeout"),
+    )
+    with patch.object(authed_client, "_enforce_write_rate_limit"):
+        with pytest.raises(requests.exceptions.Timeout):
+            authed_client.set_port_mode(LEGACY_DEVICE_DATA, port=1, updates={}, dry_run=False)
+    write_calls = [c for c in responses_lib.calls if "addDevMode" in c.request.url]
+    assert len(write_calls) == 1
 
 
 @responses_lib.activate

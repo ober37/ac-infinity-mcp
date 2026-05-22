@@ -72,37 +72,53 @@ class ACInfinityClient:
                 time.sleep(1.5 - elapsed)
             self._last_write_time = time.monotonic()
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(
+            (requests.exceptions.Timeout, requests.exceptions.ConnectionError)
+        ),
+        reraise=True,
+    )
+    def _authenticate_inner(self) -> None:
+        """Single login attempt; retried by tenacity on transient network errors."""
+        # NOTE: API parameter name has intentional typo — 'appPasswordl' with 'l' at end
+        data = {
+            "appEmail": self.email,
+            "appPasswordl": self.password,
+        }
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+            "User-Agent": "ACController/1.8.2 (com.acinfinity.humiture; build:489; iOS 16.5.1)",
+        }
+
+        resp = self.session.post(self.LOGIN_ENDPOINT, data=data, headers=headers, timeout=10)
+        resp.raise_for_status()
+
+        result = resp.json()
+        if result.get("code") != 200:
+            error_msg = result.get("msg", "Unknown error")
+            logger.error("AC Infinity login failed: %s", error_msg)
+            raise ACInfinityAuthError(f"Authentication failed: {error_msg}")
+
+        self.token = result["data"]["appId"]
+        logger.info("AC Infinity authentication successful")
+
     def authenticate(self) -> bool:
-        """Login and get API token"""
+        """Login and get API token.
+
+        Transient network errors (Timeout, ConnectionError) trigger a tenacity
+        retry inside _authenticate_inner; only after exhaustion does this method
+        fall back to returning False. Returns False on credential failure as well.
+        """
         try:
-            # NOTE: API parameter name has intentional typo — 'appPasswordl' with 'l' at end
-            data = {
-                "appEmail": self.email,
-                "appPasswordl": self.password,
-            }
-            headers = {
-                "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
-                "User-Agent": "ACController/1.8.2 (com.acinfinity.humiture; build:489; iOS 16.5.1)",
-            }
-
-            resp = self.session.post(self.LOGIN_ENDPOINT, data=data, headers=headers, timeout=10)
-            resp.raise_for_status()
-
-            result = resp.json()
-            if result.get("code") != 200:
-                error_msg = result.get("msg", "Unknown error")
-                logger.error("AC Infinity login failed: %s", error_msg)
-                raise ACInfinityAuthError(f"Authentication failed: {error_msg}")
-
-            self.token = result["data"]["appId"]
-            logger.info("AC Infinity authentication successful")
+            self._authenticate_inner()
             return True
-
         except requests.exceptions.Timeout:
-            logger.error("AC Infinity authentication timeout (10s)")
+            logger.error("AC Infinity authentication timeout (10s) after retries")
             return False
         except requests.exceptions.ConnectionError as e:
-            logger.error("Failed to connect to AC Infinity: %s", e)
+            logger.error("Failed to connect to AC Infinity after retries: %s", e)
             return False
         except ACInfinityAuthError:
             return False
@@ -351,6 +367,16 @@ class ACInfinityClient:
             device_data, port, updates, dry_run, require_variable_speed,
         )
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        # ConnectionError fires before the request reaches the server, so retry is
+        # safe — the write hasn't been applied. Timeout is intentionally excluded:
+        # a read timeout can mean the server already processed the write and the
+        # response was lost, so retrying would risk double-applying state.
+        retry=retry_if_exception_type(requests.exceptions.ConnectionError),
+        reraise=True,
+    )
     def _set_port_mode_inner(
         self,
         device_data: dict,
