@@ -579,7 +579,11 @@ class ACInfinityClient:
             else None
         )
 
-        # Decode port speeds from portSpead bitmask (4 bits per port)
+        # Decode port speeds from portSpead bitmask (4 bits per port). Quirk 6:
+        # portStatus is the "automation-triggered" flag, NOT the on/off state.
+        # The speed nibble alone is authoritative for on/off — a port can be
+        # automation-armed (status bit set) with nibble=0 (idle), which used
+        # to be reported as ON, overstating runtime in the activity report.
         port_spead = record.get("portSpead", 0) or 0
         port_status = record.get("portStatus", 0) or 0
         port_count = record.get("devPortCount") or 8
@@ -587,7 +591,8 @@ class ACInfinityClient:
         ports = []
         for i in range(port_count):
             nibble = (port_spead >> (i * 4)) & 0xF
-            on = bool((port_status >> i) & 1) or nibble > 0
+            on = nibble > 0
+            automation_triggered = bool((port_status >> i) & 1)
             speed = 1 if nibble == 0xF else nibble  # 0xF = ON for toggle devices
             name = (port_names or {}).get(i + 1, f"Port {i + 1}")
             ports.append({
@@ -595,6 +600,7 @@ class ACInfinityClient:
                 "name": name,
                 "speed": speed,
                 "on": on,
+                "automation_triggered": automation_triggered,
             })
 
         return {

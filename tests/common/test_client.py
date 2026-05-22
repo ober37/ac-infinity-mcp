@@ -198,6 +198,30 @@ def test_parse_history_record_port_names(client):
     assert result["ports"][1]["name"] == "Exhaust Fan"
 
 
+def test_parse_history_record_automation_flag_does_not_force_on(client):
+    """Quirk 6: portStatus is automation-triggered, NOT on/off (P1-F008).
+
+    Speed nibble alone must determine `on`. Previously, a port with portStatus
+    bit set but nibble=0 was reported as on=True, overstating activity. The
+    automation flag is now exposed as a separate `automation_triggered` field.
+    """
+    record = {
+        "createTime": 1714000000,
+        "temperature": 0,
+        "fTemperature": 0,
+        "humidity": 0,
+        "vpdNums": 0,
+        "portSpead": 0,           # all ports idle
+        "portStatus": 0b00000001, # automation armed on port 1, idle on others
+        "devPortCount": 2,
+    }
+    result = client.parse_history_record(record)
+    assert result["ports"][0]["on"] is False
+    assert result["ports"][0]["automation_triggered"] is True
+    assert result["ports"][1]["on"] is False
+    assert result["ports"][1]["automation_triggered"] is False
+
+
 @pytest.mark.parametrize("missing_devPortCount", [
     {},          # field absent entirely
     {"devPortCount": None},  # field present but null — Quirk 5 documents this
