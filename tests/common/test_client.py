@@ -235,28 +235,72 @@ def test_enforce_write_rate_limit_is_callable(client):
     assert callable(client._enforce_write_rate_limit)
 
 
-def test_enforce_write_rate_limit_sleeps_when_elapsed_less_than_1_5s(client):
-    """Two back-to-back calls must enforce >=1.5s between them."""
-    import time
+def test_enforce_write_rate_limit_sleeps_when_elapsed_less_than_1_5s(client, monkeypatch):
+    """Mock the clock so the gate's sleep duration is asserted without waiting real time.
+
+    Real-clock tests added ~1.5s per case and risked CI flake on loaded runners.
+    By patching time.monotonic and time.sleep in the client module, we assert the
+    behavioural contract (sleep when elapsed < 1.5s) without burning wall-clock (P2-F012).
+    """
+    fake_now = [100.0]
+    sleep_calls: list[float] = []
+
+    def fake_monotonic() -> float:
+        return fake_now[0]
+
+    def fake_sleep(duration: float) -> None:
+        sleep_calls.append(duration)
+        fake_now[0] += duration
+
+    monkeypatch.setattr("ac_infinity_mcp.client.time.monotonic", fake_monotonic)
+    monkeypatch.setattr("ac_infinity_mcp.client.time.sleep", fake_sleep)
+
+    # First call from cold — no sleep
     client._last_write_time = 0.0
-    client._enforce_write_rate_limit()  # primes _last_write_time
-    t0 = time.monotonic()
-    client._enforce_write_rate_limit()  # must sleep ~1.5s
-    elapsed = time.monotonic() - t0
-    assert elapsed >= 1.4  # allow small scheduling tolerance
+    client._enforce_write_rate_limit()
+    assert sleep_calls == []  # nothing slept on the first call
+
+    # Second call only 0.4s after the first — must sleep the remaining 1.1s
+    fake_now[0] += 0.4
+    client._enforce_write_rate_limit()
+    assert len(sleep_calls) == 1
+    assert sleep_calls[0] == pytest.approx(1.1, abs=0.01)
+
+    # Third call 2s after the second — already past the rate-limit window
+    fake_now[0] += 2.0
+    client._enforce_write_rate_limit()
+    assert len(sleep_calls) == 1  # no additional sleep
 
 
-def test_enforce_write_rate_limit_lock_serializes_concurrent_writes(client):
-    """Concurrent rate-limit calls must serialize via the lock."""
+def test_enforce_write_rate_limit_lock_serializes_concurrent_writes(client, monkeypatch):
+    """Concurrent rate-limit calls must serialize via the lock.
+
+    Uses a fake clock so the test does not burn ~3s of real wall-clock waiting
+    for the rate-limit gate. The serialization assertion comes from the lock
+    forcing sequential entry, not from real-clock observations (P2-F012).
+    """
     import threading
-    import time
 
-    client._last_write_time = time.monotonic() - 10.0  # cold start
-    timestamps: list[float] = []
+    fake_now = [100.0]
+    monotonic_lock = threading.Lock()
+
+    def fake_monotonic() -> float:
+        with monotonic_lock:
+            return fake_now[0]
+
+    def fake_sleep(duration: float) -> None:
+        with monotonic_lock:
+            fake_now[0] += duration
+
+    monkeypatch.setattr("ac_infinity_mcp.client.time.monotonic", fake_monotonic)
+    monkeypatch.setattr("ac_infinity_mcp.client.time.sleep", fake_sleep)
+
+    client._last_write_time = fake_now[0] - 10.0  # cold start
+    entry_times: list[float] = []
 
     def call_and_record() -> None:
         client._enforce_write_rate_limit()
-        timestamps.append(time.monotonic())
+        entry_times.append(client._last_write_time)
 
     threads = [threading.Thread(target=call_and_record) for _ in range(3)]
     for t in threads:
@@ -264,10 +308,11 @@ def test_enforce_write_rate_limit_lock_serializes_concurrent_writes(client):
     for t in threads:
         t.join()
 
-    timestamps.sort()
-    # First call passes immediately; subsequent calls must be >=1.5s apart
-    for i in range(1, len(timestamps)):
-        assert timestamps[i] - timestamps[i - 1] >= 1.4
+    entry_times.sort()
+    # Each call updates _last_write_time after enforcing the gate, so successive
+    # entries must be at least 1.5s apart in simulated time.
+    for i in range(1, len(entry_times)):
+        assert entry_times[i] - entry_times[i - 1] >= 1.5
 
 
 # ============ authenticate ============
