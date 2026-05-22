@@ -150,6 +150,7 @@ def _device_with_pii() -> dict:
 async def test_read_tools_do_not_echo_appEmail(mock_client, caplog, tool_name, args):
     """Read tools must not include the user's appEmail in their JSON output or logs."""
     import logging
+
     import ac_infinity_mcp.server as server_module
     tool = getattr(server_module, tool_name)
     mock_client.get_devices.return_value = [_device_with_pii()]
@@ -174,6 +175,7 @@ async def test_read_tools_do_not_echo_appEmail(mock_client, caplog, tool_name, a
 def test_credential_filter_redacts_known_fields():
     """The filter must redact the value following known credential field markers."""
     import logging
+
     from ac_infinity_mcp.server import _CredentialRedactingFilter
 
     flt = _CredentialRedactingFilter()
@@ -196,6 +198,7 @@ def test_credential_filter_redacts_known_fields():
 
 def test_credential_filter_leaves_clean_messages_alone():
     import logging
+
     from ac_infinity_mcp.server import _CredentialRedactingFilter
 
     flt = _CredentialRedactingFilter()
@@ -400,7 +403,7 @@ async def test_get_historical_readings_invalid_interval(mock_client):
 
 @pytest.mark.parametrize("bad_value", ["bad", "25:00", "12:60", "1200", "noon", ""])
 async def test_get_historical_readings_invalid_time_start(mock_client, bad_value):
-    """Invalid time_start returns a structured error rather than silently dropping every reading (P1-F006)."""
+    """Invalid time_start returns structured error instead of silent empty result (P1-F006)."""
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_historical_readings(
             "C58ZA", "2024-04-25", "2024-04-25", "1h", time_start=bad_value
@@ -1866,7 +1869,7 @@ async def test_get_port_settings_schedule_window_active(mock_client):
     (65535, 65535),  # both disabled — no window
 ])
 async def test_get_port_settings_schedule_window_partial_is_none(mock_client, start, end):
-    """A half-configured schedule must return schedule_window=None, not a half-populated dict (P2-F015)."""
+    """Half-configured schedule must return schedule_window=None, not a partial dict (P2-F015)."""
     settings = {**MOCK_MODE_SETTINGS_BASIC, "schedStartTime": start, "schedEndtTime": end}
     mock_client.get_mode_settings.return_value = settings
     with patch("ac_infinity_mcp.server.aci_client", mock_client):

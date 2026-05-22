@@ -113,7 +113,7 @@ def test_calculate_health_score_grade_mapping():
     (30.0, "F"),
 ])
 def test_grade_boundaries(score, expected):
-    """Pin the grade boundaries directly so a regression to old thresholds (Ph15-D002) fails fast (P2-F006)."""
+    """Pin grade boundaries so a regression to old thresholds (Ph15-D002) fails fast (P2-F006)."""
     assert _grade(score) == expected
 
 
