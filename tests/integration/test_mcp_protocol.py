@@ -326,14 +326,20 @@ async def test_protocol_call_set_port_off_dry_run_happy_path(
 
 
 async def test_protocol_missing_client_guard() -> None:
-    """With aci_client=None, tools return a JSON error — not an MCP-level error frame."""
+    """With aci_client=None, tools return a JSON error — not an MCP-level error frame.
+
+    The error message is generic by design (P3-F021) — the specific
+    "client not initialized" RuntimeError text only appears in server logs,
+    not in the LLM-facing response.
+    """
     with patch("ac_infinity_mcp.server.aci_client", None):
         async with create_connected_server_and_client_session(srv.mcp_server) as session:
             result = await session.call_tool("discover_devices", {})
     assert result.isError is False
     data = json.loads(result.content[0].text)
     assert "error" in data
-    assert "not initialized" in data["error"].lower()
+    assert data["error"] == "Unexpected error"
+    assert data.get("detail") == "see server logs"
 
 
 async def test_protocol_call_tool_with_wrong_argument_type(mock_client: MagicMock) -> None:
