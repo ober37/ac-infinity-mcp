@@ -76,6 +76,9 @@ async def test_discover_devices_empty(mock_client):
         result = await discover_devices()
     data = json.loads(result)
     assert data["devices"] == []
+    # The "No devices found" message is part of the documented contract;
+    # regression removing it would have been invisible before (P2-F024).
+    assert data["message"] == "No devices found"
 
 
 async def test_discover_devices_api_error(mock_client):
@@ -1146,6 +1149,27 @@ async def test_set_port_off_auth_error(mock_client):
     assert "error" in data
 
 
+@pytest.mark.parametrize("tool_name,args", [
+    ("set_port_on", ("C58ZA", 1)),
+    ("set_port_off", ("C58ZA", 1)),
+])
+async def test_set_port_on_off_does_not_pass_require_variable_speed(mock_client, tool_name, args):
+    """set_port_on/off must NOT set require_variable_speed=True — that's only for set_port_speed.
+
+    If they did, the loadType guard would reject on/off devices (loadType=4 or 128)
+    and prevent the user from turning them on/off (P2-F025).
+    """
+    import ac_infinity_mcp.server as server_module
+    tool = getattr(server_module, tool_name)
+    mock_client.set_port_mode.return_value = {
+        "payload": {}, "dry_run": True, "controller_type": "legacy", "sent": False,
+    }
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        await tool(*args)
+    kwargs = mock_client.set_port_mode.call_args.kwargs
+    assert kwargs.get("require_variable_speed", False) is False
+
+
 # ============ Guard rails — Phase 8 ============
 
 MOCK_AI_PLUS_UNSUPPORTED = {
@@ -1569,6 +1593,16 @@ def test_format_schedule_time_disabled():
 
 def test_format_schedule_time_none():
     assert _format_schedule_time(None) is None
+
+
+@pytest.mark.parametrize("s", ["00:00", "06:30", "08:00", "12:00", "20:00", "23:59"])
+def test_schedule_time_roundtrip(s):
+    """_format_schedule_time and _parse_schedule_time must be inverses (P2-F017).
+
+    Independent tests for each direction don't catch a regression that makes
+    one rounder or stricter than the other. Roundtrip pins them together.
+    """
+    assert _format_schedule_time(_parse_schedule_time(s)) == s
 
 
 @pytest.mark.parametrize("invalid_minutes", [1440, 1500, 65534, -1, -100])
@@ -2618,6 +2652,20 @@ async def test_apply_grow_stage_template_invalid_stage(mock_client):
     assert "error" in data
     assert "bloom" in data["error"]
     assert "veg" in data["error"]
+    mock_client.set_port_mode.assert_not_called()
+
+
+@pytest.mark.parametrize("stage", ["VEG", "Veg", "VEG ", "vEg"])
+async def test_apply_grow_stage_template_stage_is_case_sensitive(mock_client, stage):
+    """Stage names are case-sensitive — "VEG" returns an error, not VEG defaults.
+
+    Documenting and pinning this contract (P2-F019). If we ever decide to
+    normalize input, this test changes intent and the contract is explicit.
+    """
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await apply_grow_stage_template("C58ZA", 1, stage)
+    data = json.loads(result)
+    assert "error" in data
     mock_client.set_port_mode.assert_not_called()
 
 
