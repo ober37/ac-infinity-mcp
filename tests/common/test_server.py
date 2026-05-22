@@ -260,6 +260,48 @@ async def test_typed_exception_text_does_not_leak_to_mcp_response(
     assert data["detail"] == "see server logs"
 
 
+@pytest.mark.parametrize("tool_name,args,fail_target", [
+    ("set_port_speed", ("C58ZA", 1, 5), "set_port_mode"),
+    ("set_port_on", ("C58ZA", 1), "set_port_mode"),
+    ("set_port_off", ("C58ZA", 1), "set_port_mode"),
+    ("set_vpd_automation", ("C58ZA", 1, 1.2), "set_port_mode"),
+    ("set_temperature_automation", ("C58ZA", 1, 20.0, 28.0), "set_port_mode"),
+    ("set_humidity_automation", ("C58ZA", 1, 50.0, 70.0), "set_port_mode"),
+    ("set_port_mode", ("C58ZA", 1, "ON"), "set_port_mode"),
+])
+@pytest.mark.parametrize("exc_class,exc_msg", [
+    # P3-C3-F001: write tools used to return {"error": str(e)} for the typed
+    # exception triplet — leaking upstream API messages (which embed the
+    # uncontrolled API response `msg` field) into the LLM-facing JSON.
+    (ACInfinityAPIError, "API error 500: Reflected appEmail=leak@example.com"),
+    (ACInfinityAuthError, "Token rejected by API (code 401): appPasswordl=hunter2"),
+])
+async def test_write_tools_do_not_leak_auth_or_api_exception_text(
+    mock_client, tool_name, args, fail_target, exc_class, exc_msg,
+):
+    """Write tools must scrub ACInfinityAuthError/APIError text from the response (P3-C3-F001).
+
+    ACInfinityDeviceError is intentionally NOT in this parametrize set — its
+    messages (loadType=4/128, modeType=15) are self-constructed and actionable;
+    the LLM uses them to switch to the right tool. See test_set_port_speed_*
+    for the device-error path that pins those hints reach the LLM.
+    """
+    import ac_infinity_mcp.server as server_module
+    tool = getattr(server_module, tool_name)
+    getattr(mock_client, fail_target).side_effect = exc_class(exc_msg)
+
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await tool(*args)
+
+    assert "leak@example.com" not in result, f"{tool_name} leaked appEmail"
+    assert "hunter2" not in result, f"{tool_name} leaked password"
+    assert "appEmail=" not in result
+    assert "appPasswordl=" not in result
+    # The response must route the caller to logs for both error classes.
+    data = json.loads(result)
+    assert data.get("detail") == "see server logs"
+
+
 @pytest.mark.parametrize("raw,expected_level,expected_warn", [
     # Valid inputs pass through with no warning
     ("DEBUG", "DEBUG", False),

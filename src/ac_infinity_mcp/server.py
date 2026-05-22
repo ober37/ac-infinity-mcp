@@ -1091,8 +1091,19 @@ async def set_port_speed(
 
         return json.dumps(response, indent=2)
 
-    except (ACInfinityAuthError, ACInfinityAPIError, ACInfinityDeviceError) as e:
-        logger.warning("Error in set_port_speed (device=%s port=%s): %s", device_id, port, e)
+    except ACInfinityAuthError as e:
+        logger.warning("Auth error in set_port_speed (device=%s port=%s): %s", device_id, port, e)
+        return json.dumps({
+            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "detail": "see server logs",
+        })
+    except ACInfinityAPIError as e:
+        logger.error("API error in set_port_speed (device=%s port=%s): %s", device_id, port, e)
+        return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
+    except ACInfinityDeviceError as e:
+        # Device-guard text (loadType=4/128, modeType=15) is self-constructed
+        # and actionable — the LLM uses these hints to switch tools.
+        logger.warning("Device error in set_port_speed (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({"error": str(e)})
     except Exception as e:
         logger.error("Unexpected error in set_port_speed: %s", e, exc_info=True)
@@ -1162,8 +1173,19 @@ async def set_port_on(
 
         return json.dumps(response, indent=2)
 
-    except (ACInfinityAuthError, ACInfinityAPIError, ACInfinityDeviceError) as e:
-        logger.warning("Error in set_port_on (device=%s port=%s): %s", device_id, port, e)
+    except ACInfinityAuthError as e:
+        logger.warning("Auth error in set_port_on (device=%s port=%s): %s", device_id, port, e)
+        return json.dumps({
+            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "detail": "see server logs",
+        })
+    except ACInfinityAPIError as e:
+        logger.error("API error in set_port_on (device=%s port=%s): %s", device_id, port, e)
+        return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
+    except ACInfinityDeviceError as e:
+        # Device-guard text (loadType=4/128, modeType=15) is self-constructed
+        # and actionable — the LLM uses these hints to switch tools.
+        logger.warning("Device error in set_port_on (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({"error": str(e)})
     except Exception as e:
         logger.error("Unexpected error in set_port_on: %s", e, exc_info=True)
@@ -1239,8 +1261,19 @@ async def set_port_off(
 
         return json.dumps(response, indent=2)
 
-    except (ACInfinityAuthError, ACInfinityAPIError, ACInfinityDeviceError) as e:
-        logger.warning("Error in set_port_off (device=%s port=%s): %s", device_id, port, e)
+    except ACInfinityAuthError as e:
+        logger.warning("Auth error in set_port_off (device=%s port=%s): %s", device_id, port, e)
+        return json.dumps({
+            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "detail": "see server logs",
+        })
+    except ACInfinityAPIError as e:
+        logger.error("API error in set_port_off (device=%s port=%s): %s", device_id, port, e)
+        return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
+    except ACInfinityDeviceError as e:
+        # Device-guard text (loadType=4/128, modeType=15) is self-constructed
+        # and actionable — the LLM uses these hints to switch tools.
+        logger.warning("Device error in set_port_off (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({"error": str(e)})
     except Exception as e:
         logger.error("Unexpected error in set_port_off: %s", e, exc_info=True)
@@ -1333,8 +1366,28 @@ async def set_vpd_automation(
             response["payload"] = write_result["payload"]
         return json.dumps(response, indent=2)
 
-    except (ACInfinityAuthError, ACInfinityAPIError, ACInfinityDeviceError) as e:
-        logger.warning("Error in set_vpd_automation (device=%s port=%s): %s", device_id, port, e)
+    except ACInfinityAuthError as e:
+        logger.warning(
+            "Auth error in set_vpd_automation (device=%s port=%s): %s",
+            device_id, port, e,
+        )
+        return json.dumps({
+            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "detail": "see server logs",
+        })
+    except ACInfinityAPIError as e:
+        logger.error(
+            "API error in set_vpd_automation (device=%s port=%s): %s",
+            device_id, port, e,
+        )
+        return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
+    except ACInfinityDeviceError as e:
+        # Device-guard text (loadType=4/128, modeType=15) is self-constructed
+        # and actionable — the LLM uses these hints to switch tools.
+        logger.warning(
+            "Device error in set_vpd_automation (device=%s port=%s): %s",
+            device_id, port, e,
+        )
         return json.dumps({"error": str(e)})
     except Exception as e:
         logger.error("Unexpected error in set_vpd_automation: %s", e, exc_info=True)
@@ -1417,9 +1470,27 @@ async def set_temperature_automation(
             response["payload"] = write_result["payload"]
         return json.dumps(response, indent=2)
 
-    except (ACInfinityAuthError, ACInfinityAPIError, ACInfinityDeviceError) as e:
+    except ACInfinityAuthError as e:
         logger.warning(
-            "Error in set_temperature_automation (device=%s port=%s): %s", device_id, port, e
+            "Auth error in set_temperature_automation (device=%s port=%s): %s",
+            device_id, port, e,
+        )
+        return json.dumps({
+            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "detail": "see server logs",
+        })
+    except ACInfinityAPIError as e:
+        logger.error(
+            "API error in set_temperature_automation (device=%s port=%s): %s",
+            device_id, port, e,
+        )
+        return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
+    except ACInfinityDeviceError as e:
+        # Device-guard text (loadType=4/128, modeType=15) is self-constructed
+        # and actionable — the LLM uses these hints to switch tools.
+        logger.warning(
+            "Device error in set_temperature_automation (device=%s port=%s): %s",
+            device_id, port, e,
         )
         return json.dumps({"error": str(e)})
     except Exception as e:
@@ -1502,9 +1573,27 @@ async def set_humidity_automation(
             response["payload"] = write_result["payload"]
         return json.dumps(response, indent=2)
 
-    except (ACInfinityAuthError, ACInfinityAPIError, ACInfinityDeviceError) as e:
+    except ACInfinityAuthError as e:
         logger.warning(
-            "Error in set_humidity_automation (device=%s port=%s): %s", device_id, port, e
+            "Auth error in set_humidity_automation (device=%s port=%s): %s",
+            device_id, port, e,
+        )
+        return json.dumps({
+            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "detail": "see server logs",
+        })
+    except ACInfinityAPIError as e:
+        logger.error(
+            "API error in set_humidity_automation (device=%s port=%s): %s",
+            device_id, port, e,
+        )
+        return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
+    except ACInfinityDeviceError as e:
+        # Device-guard text (loadType=4/128, modeType=15) is self-constructed
+        # and actionable — the LLM uses these hints to switch tools.
+        logger.warning(
+            "Device error in set_humidity_automation (device=%s port=%s): %s",
+            device_id, port, e,
         )
         return json.dumps({"error": str(e)})
     except Exception as e:
@@ -1641,8 +1730,19 @@ async def set_port_mode(
             response["payload"] = write_result["payload"]
         return json.dumps(response, indent=2)
 
-    except (ACInfinityAuthError, ACInfinityAPIError, ACInfinityDeviceError) as e:
-        logger.warning("Error in set_port_mode (device=%s port=%s): %s", device_id, port, e)
+    except ACInfinityAuthError as e:
+        logger.warning("Auth error in set_port_mode (device=%s port=%s): %s", device_id, port, e)
+        return json.dumps({
+            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "detail": "see server logs",
+        })
+    except ACInfinityAPIError as e:
+        logger.error("API error in set_port_mode (device=%s port=%s): %s", device_id, port, e)
+        return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
+    except ACInfinityDeviceError as e:
+        # Device-guard text (loadType=4/128, modeType=15) is self-constructed
+        # and actionable — the LLM uses these hints to switch tools.
+        logger.warning("Device error in set_port_mode (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({"error": str(e)})
     except Exception as e:
         logger.error("Unexpected error in set_port_mode: %s", e, exc_info=True)
