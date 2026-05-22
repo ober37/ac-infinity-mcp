@@ -6,6 +6,7 @@ from ac_infinity_mcp.analytics import (
     STAGE_TARGETS,
     HealthScore,
     TrendReport,
+    _grade,
     build_activity_report,
     calculate_health_score,
     detect_trends,
@@ -90,6 +91,30 @@ def test_calculate_health_score_grade_mapping():
     # vpd in-range, temp/hum also in-range → "A"
     result_a = calculate_health_score(_reading(temp_c=24.0, humidity=60.0, vpd=1.24), "veg")
     assert result_a.grade == "A"
+
+
+@pytest.mark.parametrize("score,expected", [
+    # At-boundary (inclusive lower bound)
+    (100.0, "A"),
+    (90.0, "A"),
+    (89.99, "B"),
+    (80.0, "B"),
+    (79.99, "C"),
+    (70.0, "C"),
+    (69.99, "D"),
+    (60.0, "D"),
+    (59.99, "F"),
+    (0.0, "F"),
+    # Mid-band
+    (95.0, "A"),
+    (85.0, "B"),
+    (75.0, "C"),
+    (65.0, "D"),
+    (30.0, "F"),
+])
+def test_grade_boundaries(score, expected):
+    """Pin the grade boundaries directly so a regression to old thresholds (Ph15-D002) fails fast (P2-F006)."""
+    assert _grade(score) == expected
 
 
 def test_calculate_health_score_recommendation_all_ok():
