@@ -198,28 +198,33 @@ def test_parse_history_record_port_names(client):
     assert result["ports"][1]["name"] == "Exhaust Fan"
 
 
-def test_parse_history_record_raises_typed_error_on_malformed_input(client):
-    """Type errors in the upstream record convert to ACInfinityAPIError (P3-F011)."""
-    bad_record = {
-        "createTime": 1714000000,
-        "portSpead": "not-an-int",  # string where int expected
-        "portStatus": 0,
-        "devPortCount": 2,
-    }
+@pytest.mark.parametrize("bad_record", [
+    # P3-F011 (Cycle 1): TypeError path — portSpead is a string
+    {"createTime": 1714000000, "portSpead": "not-an-int", "portStatus": 0, "devPortCount": 2},
+    # P2-C2-F007: ValueError path — createTime is non-numeric string
+    {"createTime": "not-a-number", "temperature": 0, "fTemperature": 0,
+     "humidity": 0, "vpdNums": 0, "portSpead": 0, "portStatus": 0, "devPortCount": 1},
+])
+def test_parse_history_record_raises_typed_error_on_malformed_input(client, bad_record):
+    """Structural errors in the upstream record convert to ACInfinityAPIError (P3-F011, P2-C2-F007)."""
     with pytest.raises(ACInfinityAPIError, match="malformed history record"):
         client.parse_history_record(bad_record)
 
 
-def test_parse_device_data_raises_typed_error_on_malformed_input(client):
-    """Type errors in the upstream device dict convert to ACInfinityAPIError (P3-F011)."""
-    bad_device = {
-        "devCode": "C58ZA",
-        "devName": "Test",
-        "deviceInfo": {
-            "temperature": "not-an-int",  # string where int expected
-            "ports": [],
-        },
-    }
+@pytest.mark.parametrize("bad_device", [
+    # P3-F011 (Cycle 1): TypeError path — temperature is a string
+    {"devCode": "C58ZA", "devName": "Test", "deviceInfo": {
+        "temperature": "not-an-int", "ports": [],
+    }},
+    # P2-C2-F007: AttributeError path — deviceInfo is not a dict
+    {"devCode": "C58ZA", "devName": "Test", "deviceInfo": "not-a-dict"},
+    # P2-C2-F007: AttributeError path — sensors is a string (not iterable of dicts)
+    {"devCode": "C58ZA", "devName": "Test", "deviceInfo": {
+        "temperature": 2300, "ports": [], "sensors": "garbage",
+    }},
+])
+def test_parse_device_data_raises_typed_error_on_malformed_input(client, bad_device):
+    """Structural errors in the upstream device dict convert to ACInfinityAPIError (P3-F011, P2-C2-F007)."""
     with pytest.raises(ACInfinityAPIError, match="malformed device data"):
         client.parse_device_data(bad_device)
 

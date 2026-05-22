@@ -305,6 +305,30 @@ def test_parse_device_data_drops_appEmail():
     assert "appEmail" not in parsed
 
 
+@pytest.mark.parametrize("tool_name,args", [
+    # P2-C2-F005: extend PII filter coverage to the rest of the read-side tools
+    ("get_historical_readings", ("C58ZA", "2024-04-25", "2024-04-25")),
+    ("check_vpd_drift", ("C58ZA", "veg")),
+    ("get_environment_health", ("C58ZA", "veg")),
+])
+async def test_more_read_tools_do_not_echo_appEmail(mock_client, caplog, tool_name, args):
+    """Extends the appEmail filter coverage to historical/analytics tools."""
+    import logging
+    import ac_infinity_mcp.server as server_module
+    tool = getattr(server_module, tool_name)
+    mock_client.get_devices.return_value = [_device_with_pii()]
+    # Stub historical-data fetch so the tool runs end-to-end.
+    mock_client.get_historical_data.return_value = []
+
+    with caplog.at_level(logging.DEBUG, logger="ac_infinity_mcp"):
+        with patch("ac_infinity_mcp.server.aci_client", mock_client):
+            result = await tool(*args)
+
+    assert _PII_EMAIL not in result, f"{tool_name} leaked appEmail in its response"
+    for record in caplog.records:
+        assert _PII_EMAIL not in record.getMessage()
+
+
 # ============ Edge-input device_id and port handling (P2-F014) ============
 #
 # LLMs occasionally hallucinate inputs like "" (empty), "  " (whitespace),
@@ -524,6 +548,33 @@ async def test_get_historical_readings_no_records(mock_client):
     assert "No readings" in data["error"]
 
 
+async def test_get_historical_readings_surfaces_dropped_count(mock_client):
+    """P2-C2-F004: dropped_readings and drop_reason must appear in the tool response.
+
+    The helper-level drop count is tested separately; this test pins that the
+    server wiring exposes both fields in the JSON output.
+    """
+    base_ts = 1714000000
+    # parse_history_record is called once per raw record; return a mix of
+    # well-formed and bad-timestamp readings so the time filter drops two.
+    mock_client.get_historical_data.return_value = [{"createTime": base_ts}] * 3
+    mock_client.parse_history_record.side_effect = [
+        {"timestamp": "2024-04-25T10:00:00Z", "temperature_c": 24.0,
+         "temperature_f": 75.2, "humidity": 60.0, "vpd": 1.2, "ports": []},
+        {"timestamp": "NOT_VALID", "temperature_c": 25.0,
+         "temperature_f": 77.0, "humidity": 61.0, "vpd": 1.3, "ports": []},
+        {"timestamp": "", "temperature_c": 26.0,
+         "temperature_f": 78.8, "humidity": 62.0, "vpd": 1.4, "ports": []},
+    ]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_historical_readings(
+            "C58ZA", "2024-04-25", "2024-04-25", "raw", time_start="00:00",
+        )
+    data = json.loads(result)
+    assert data["dropped_readings"] == 2
+    assert data["drop_reason"] == "malformed timestamp"
+
+
 async def test_get_historical_readings_sampling_1h(mock_client):
     base_ts = 1714000000
     # 3 records within the same 1h bucket
@@ -691,7 +742,12 @@ def test_filter_readings_by_time_both():
 
 
 def test_filter_readings_bad_timestamp_drops_and_counts():
-    """Malformed timestamps are dropped and surfaced via the drop count (P3-F017)."""
+    """Malformed timestamps are dropped and surfaced via the drop count (P3-F017).
+
+    Asserts which record survives (P2-C2-F010) — a regression that swapped the
+    include condition (keeping bad records, dropping good) would still satisfy
+    the count alone.
+    """
     readings = [
         _make_history_record("2024-04-25T12:00:00Z"),
         {"timestamp": "NOT_A_TIMESTAMP", "temperature_c": 24.0},
@@ -700,21 +756,36 @@ def test_filter_readings_bad_timestamp_drops_and_counts():
     result, dropped = _filter_readings_by_time(readings, time_start="10:00")
     assert len(result) == 1
     assert dropped == 2
+    assert result[0]["timestamp"] == "2024-04-25T12:00:00Z"
 
 
-def test_filter_readings_overnight_window():
-    """time_start > time_end means an overnight window (e.g. 22:00–06:00) — OR of halves."""
-    readings = [
-        _make_history_record("2024-04-25T05:00:00Z"),   # 05:00 — in window
-        _make_history_record("2024-04-25T12:00:00Z"),   # 12:00 — out
-        _make_history_record("2024-04-25T22:30:00Z"),   # 22:30 — in window
-    ]
-    result, _ = _filter_readings_by_time(readings, time_start="22:00", time_end="06:00")
-    times = sorted(r["timestamp"] for r in result)
-    assert times == [
-        "2024-04-25T05:00:00Z",
-        "2024-04-25T22:30:00Z",
-    ]
+@pytest.mark.parametrize(
+    "time_start,time_end,timestamp,should_match",
+    [
+        # Standard overnight 22:00-06:00: OR of two halves
+        ("22:00", "06:00", "2024-04-25T05:00:00Z", True),    # in lower half
+        ("22:00", "06:00", "2024-04-25T22:30:00Z", True),    # in upper half
+        ("22:00", "06:00", "2024-04-25T12:00:00Z", False),   # midday out
+        # Boundary inclusivity in overnight window
+        ("22:00", "06:00", "2024-04-25T22:00:00Z", True),    # exact start
+        ("22:00", "06:00", "2024-04-25T06:00:00Z", True),    # exact end
+        # Equal times (same-day branch): only that exact minute matches
+        ("12:00", "12:00", "2024-04-25T12:00:00Z", True),
+        ("12:00", "12:00", "2024-04-25T11:59:00Z", False),
+        ("12:00", "12:00", "2024-04-25T12:01:00Z", False),
+        # Near-full-day same-day window
+        ("00:00", "23:59", "2024-04-25T12:00:00Z", True),
+        ("00:00", "23:59", "2024-04-25T23:59:00Z", True),
+    ],
+)
+def test_filter_readings_window_boundaries(time_start, time_end, timestamp, should_match):
+    """Overnight + same-day window edge cases including equal-times (P2-C2-F008)."""
+    readings = [_make_history_record(timestamp)]
+    result, _ = _filter_readings_by_time(readings, time_start=time_start, time_end=time_end)
+    if should_match:
+        assert len(result) == 1
+    else:
+        assert len(result) == 0
 
 
 # ============ apply_sampling ============
