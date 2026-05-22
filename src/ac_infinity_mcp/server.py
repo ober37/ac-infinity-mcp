@@ -173,7 +173,7 @@ def _get_device_lock(device_id: str) -> asyncio.Lock:
     return _device_locks[device_id]
 
 
-_AUTOMATION_ID_RE = re.compile(r"^\d{1,20}$")
+_AUTOMATION_ID_RE = re.compile(r"^[1-9]\d{0,19}$")
 
 
 def _validate_automation_id(automation_id: str) -> int | None:
@@ -945,7 +945,7 @@ async def _build_advance_conflict_response(
         raw = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
         automations = _group_automations(raw)
         governing = next(
-            (a for a in automations if a.get("enabled") or a.get("currently_running")),
+            (a for a in automations if a.get("enabled") or a.get("run_state")),
             automations[0] if automations else None,
         )
     except Exception as exc:
@@ -2555,6 +2555,10 @@ async def create_advance_automation(
             return json.dumps({"error": "begin_time must be 0–1439 or 255 (no schedule)"})
         if not (0 <= end_time <= 1439 or end_time == 255):
             return json.dumps({"error": "end_time must be 0–1439 or 255 (no schedule)"})
+        if begin_time != 255 and end_time != 255 and begin_time > end_time:
+            return json.dumps(
+                {"error": "begin_time must be <= end_time (or both 255 for no schedule)"}
+            )
 
         devices = await asyncio.to_thread(_client().get_devices)
         device = next((d for d in devices if d.get("devCode") == device_id), None)
@@ -2771,7 +2775,10 @@ async def break_out_of_automation(
 
     1. Checks that the port is actually under automation (idempotent: no-ops if not).
     2. Finds the governing automation.
-    3. Identifies all other ports also governed by that automation (co-ports).
+    3. Identifies all other ports currently in ADVANCE mode on this device (co-ports).
+       Note: This locks *all* ADVANCE-mode ports on the device, not only those belonging
+       to the governing automation. On devices with multiple active automations all
+       ADVANCE-mode ports will be locked to manual control.
     4. On dry_run=False:
        a. Disables the automation.
        b. Locks each co-port to its current manual speed (prevents unexpected speed changes).
@@ -2816,7 +2823,8 @@ async def break_out_of_automation(
         # Get port info from device data for display names.
         ports_data = device.get("deviceInfo", {}).get("ports", [])
         port_info = next((p for p in ports_data if p.get("port") == port), None)
-        port_name = port_info.get("portName", f"Port {port}") if port_info else f"Port {port}"
+        raw_port_name = port_info.get("portName") if port_info else None
+        port_name = _sanitize_api_string(raw_port_name, 64) if raw_port_name else f"Port {port}"
 
         if mode_type != _ADVANCE_MODE_TYPE:
             return json.dumps({
@@ -2858,7 +2866,8 @@ async def break_out_of_automation(
                 continue
             p_settings = await asyncio.to_thread(_client().get_mode_settings, dev_id, p_num)
             if p_settings.get("modeType") == _ADVANCE_MODE_TYPE:
-                p_name = p_data.get("portName", f"Port {p_num}")
+                raw_p_name = p_data.get("portName")
+                p_name = _sanitize_api_string(raw_p_name, 64) if raw_p_name else f"Port {p_num}"
                 current_speed = p_data.get("speak", 0)
                 co_ports.append({
                     "port": p_num,
@@ -2918,6 +2927,9 @@ async def break_out_of_automation(
                     f"you intend to disable automation '{auto_name}'."
                 ),
             })
+
+        if len(confirm_automation_name) > 256:
+            return json.dumps({"error": "confirm_automation_name is too long (max 256 characters)"})
 
         if confirm_automation_name.casefold() != auto_name.casefold():
             safe_confirm = _sanitize_api_string(confirm_automation_name or "", 64)
