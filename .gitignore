@@ -203,9 +203,14 @@ cython_debug/
 # Temporary file for partial code execution
 tempCodeRunnerFile.py
 
-# Claude Code settings (plan files in .claude/ are tracked intentionally)
+# Claude Code settings (per-user; never published)
 .claude/settings*.json
 .claude/projects/
+
+# Local-only working artifacts — project plan, review findings, project
+# report, and any other "internal" docs that should not ship to GitHub.
+# Put new local-only docs here rather than adding more .gitignore entries.
+.claude/internal/
 
 # Throwaway scripts (API sniffers, one-shot utils)
 scripts/
@@ -223,9 +228,3 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
-
-# Local project report (not published to GitHub)
-PROJECT_REPORT.md
-
-# Local review findings (uncommitted; tracks per-cycle persona findings)
-.claude/REVIEW_FINDINGS.md

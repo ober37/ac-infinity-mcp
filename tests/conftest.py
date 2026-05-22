@@ -52,7 +52,8 @@ MOCK_DEVICE_AI_PLUS: dict = {
 # tests/common/conftest.py and tests/devices/conftest.py — explicitly NOT here.
 # Putting it at the tests/ root would apply to tests/integration/test_live.py,
 # which depends on the REAL AC_INFINITY_EMAIL / AC_INFINITY_PASSWORD captured
-# from the developer's environment. See P2-F011 in REVIEW_FINDINGS.md.
+# from the developer's environment. See P2-F011 in
+# .claude/internal/REVIEW_FINDINGS.md (gitignored).
 
 
 @pytest.fixture

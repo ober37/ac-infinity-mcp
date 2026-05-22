@@ -93,18 +93,19 @@ cold subagent personas in parallel — Senior Python Developer, QA Engineer,
 Cyber Security Engineer — each with a discipline-specific checklist. The
 personas don't see each other's findings until consolidation, which is
 what catches the long-tail bugs a single reviewer can't see (Phase 16
-found 80+ unique findings doing this; Lesson 11 in PROJECT_REPORT.md
-explains why).
+found 80+ unique findings doing this; Lesson 11 in
+`.claude/internal/PROJECT_REPORT.md` explains why).
 
 Run a Quality Cycle when:
 - The PR introduces > 1000 LOC of new code, OR
 - 5 phases have passed since the last Quality Cycle, OR
 - A user-facing release is being prepared.
 
-The Quality Cycle workflow is in `.claude/plans/i-would-like-to-nested-donut.md`
-(the Phase 16 plan file) and tracks findings in `.claude/REVIEW_FINDINGS.md`
-(gitignored). Re-run the three personas until convergence (Cycle N returns
-0 findings). The plan caps at 3 cycles; user escalation if more are needed.
+The Quality Cycle workflow is documented in the Phase 16 plan file and
+tracks findings in `.claude/internal/REVIEW_FINDINGS.md` (local-only — the
+entire `.claude/internal/` directory is gitignored). Re-run the three
+personas until convergence (Cycle N returns 0 findings). The plan caps at
+3 cycles; user escalation if more are needed.
 
 ---
 
@@ -138,8 +139,8 @@ error responses everywhere"), grep for the **symptom** (any `str(e)` in a
 JSON response that crosses a tool boundary) rather than the **source-text
 pattern** you started with. Phase 16 found three cycles of the same leak
 because each pass only caught the syntactic shape of the previous pass's
-target, missing analogues with different wrappers. See PROJECT_REPORT.md
-Lesson 12.
+target, missing analogues with different wrappers. See
+`.claude/internal/PROJECT_REPORT.md` Lesson 12.
 
 ---
 
@@ -162,5 +163,9 @@ Confirm the current model name at the start of each phase session and substitute
 
 ## Closing Requirements (per phase)
 
-See the **Closing Requirements** section in `.claude/ac-infinity-mcp-v1-implementation.md`
-for the full closing checklist (lessons learned format, defect log, status update).
+See the **Closing Requirements** section in
+`.claude/internal/ac-infinity-mcp-v1-implementation.md` for the full
+closing checklist (lessons learned format, defect log, status update).
+The entire `.claude/internal/` directory is gitignored — it's the home
+for local-only working artifacts (the project plan, review findings,
+project report, and any other docs that should not ship to GitHub).
