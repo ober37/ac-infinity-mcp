@@ -2201,6 +2201,9 @@ async def test_set_port_mode_on(mock_client):
     assert data["mode"] == "ON"
     call_updates = mock_client.set_port_mode.call_args[0][2]
     assert call_updates["atType"] == 2
+    # ON must set a default nonzero speed so the port actually runs (P1-F003).
+    # Without onSpead, a port whose prior onSpead was 0 would stay at speed 0.
+    assert call_updates["onSpead"] == 10
 
 
 async def test_set_port_mode_auto(mock_client):

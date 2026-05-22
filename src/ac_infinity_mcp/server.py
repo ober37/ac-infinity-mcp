@@ -1383,7 +1383,14 @@ async def set_port_mode(
         at_type = _MODE_AT_TYPES[mode_upper]
         updates: dict = {"atType": at_type}
 
-        if mode_upper == "CYCLE":
+        if mode_upper == "ON":
+            # The bare atType=2 (ON) preserves whatever onSpead was previously set.
+            # If the port was last left at onSpead=0 (e.g. via a prior set_port_off
+            # or a fresh port), switching to ON mode would leave the port running
+            # at speed 0 — functionally still off. Match set_port_on by setting a
+            # default nonzero speed so "ON" actually turns the port on.
+            updates["onSpead"] = 10
+        elif mode_upper == "CYCLE":
             updates["activeCycleOn"] = cycle_on_seconds
             updates["activeCycleOff"] = cycle_off_seconds
         elif mode_upper == "SCHEDULE":
