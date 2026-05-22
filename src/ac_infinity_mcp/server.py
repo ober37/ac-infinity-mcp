@@ -889,7 +889,21 @@ async def get_port_settings(device_id: str, port: int) -> str:
 
         vpd_target = None
         if settings.get("targetVpdSwitch"):
-            vpd_target = round(settings.get("targetVpd", 0) / 10, 2)
+            raw = settings.get("targetVpd", 0)
+            # Clamp out-of-range / corrupted values. Realistic VPD targets are
+            # 0–3 kPa; anything outside [0, 50] (i.e. 0..500 raw) suggests a
+            # corrupt or unset field rather than a plant-bearable target. Return
+            # None instead of feeding nonsense to the LLM (P3-F020).
+            try:
+                vpd_target = round(int(raw) / 10, 2)
+                if not (0 <= vpd_target <= 50):
+                    logger.warning(
+                        "targetVpd out of range (%s) — returning null", vpd_target
+                    )
+                    vpd_target = None
+            except (TypeError, ValueError):
+                logger.warning("targetVpd is non-numeric (%r) — returning null", raw)
+                vpd_target = None
 
         temp_range = None
         if settings.get("activeLt") or settings.get("activeHt"):

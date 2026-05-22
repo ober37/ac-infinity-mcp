@@ -1818,6 +1818,17 @@ async def test_get_port_settings_vpd_target_active(mock_client):
     assert data["vpd_target_kpa"] == 1.4
 
 
+@pytest.mark.parametrize("raw_target_vpd", [-1, -1_000_000, 1000, 99999, "garbage", None])
+async def test_get_port_settings_vpd_target_out_of_range_is_none(mock_client, raw_target_vpd):
+    """Corrupted/out-of-range targetVpd from upstream parses to null, not nonsense (P3-F020)."""
+    settings = {**MOCK_MODE_SETTINGS_BASIC, "targetVpdSwitch": 1, "targetVpd": raw_target_vpd}
+    mock_client.get_mode_settings.return_value = settings
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_settings("C58ZA", 1)
+    data = json.loads(result)
+    assert data["vpd_target_kpa"] is None
+
+
 async def test_get_port_settings_temp_range_active(mock_client):
     """activeLt=1 and activeHt=1 → temp_range_c populated (raw Celsius, no scaling)."""
     settings = {**MOCK_MODE_SETTINGS_BASIC, "activeLt": 1, "activeHt": 1,
