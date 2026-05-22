@@ -1859,7 +1859,12 @@ def apply_sampling(readings: list, interval: str) -> list:
         try:
             ts_dt = datetime.fromisoformat(timestamp_str.rstrip("Z"))
             unix_ts = int(ts_dt.replace(tzinfo=UTC).timestamp())
-        except Exception:
+        except (ValueError, AttributeError, TypeError) as e:
+            # Narrow exception set: only timestamp-parse failures (bad string,
+            # None, unexpected type) should drop a reading. Anything else
+            # should propagate — silently swallowing every Exception masks
+            # real bugs in the parser layer (P1-F014).
+            logger.debug("apply_sampling skipping bad timestamp %r: %s", timestamp_str, e)
             continue
         bucket_key = (unix_ts // bucket_secs) * bucket_secs
         sampled.setdefault(bucket_key, []).append(reading)

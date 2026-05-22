@@ -526,6 +526,16 @@ class ACInfinityClient:
 
             logger.error("Write failed for devId=%s port=%s: %s", dev_id, port, error_msg)
             self._raise_for_api_code(code, error_msg, "Write")
+        else:  # pragma: no cover — defensive; current control flow always break/raise first
+            # Defensive guard (P1-F017): the loop above must either break on
+            # a 200 response or raise via _raise_for_api_code. If a future
+            # refactor breaks that invariant (e.g. reorders the retry guard),
+            # this else clause prevents the function from silently falling
+            # through and reporting sent=True for a write that never succeeded.
+            raise ACInfinityAPIError(
+                f"Write loop exited without success or explicit failure for "
+                f"devId={dev_id} port={port} — internal invariant violated"
+            )
 
         logger.info("Wrote mode settings for devId=%s port=%s", dev_id, port)
         result["sent"] = True
