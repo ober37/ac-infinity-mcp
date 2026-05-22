@@ -1961,6 +1961,33 @@ async def test_set_temperature_automation_generic_exception(mock_client):
     assert "error" in json.loads(result)
 
 
+@pytest.mark.parametrize(
+    "min_c,max_c,expected_devLt,expected_devHt",
+    [
+        # Half-integer boundaries — banker's rounding (round()) would silently
+        # disagree with the docstring's documented round-half-up at every .5
+        # input. int(x + 0.5) is round-half-up.
+        (0.5, 1.5, 1, 2),
+        (1.5, 2.5, 2, 3),
+        (20.5, 24.5, 21, 25),
+        (49.5, 50.0, 50, 50),
+        # Non-half fractions should still round in the conventional direction
+        (20.4, 24.6, 20, 25),
+        (20.6, 24.4, 21, 24),
+    ],
+)
+async def test_set_temperature_automation_no_bankers_rounding(
+    mock_client, min_c, max_c, expected_devLt, expected_devHt,
+):
+    """Half-integer inputs round half-up, matching the docstring contract (P1-F002)."""
+    mock_client.set_port_mode.return_value = MOCK_TEMP_DRY
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        await set_temperature_automation("C58ZA", 1, min_c, max_c)
+    updates = mock_client.set_port_mode.call_args[0][2]
+    assert updates["devLt"] == expected_devLt
+    assert updates["devHt"] == expected_devHt
+
+
 # ============ set_humidity_automation ============
 
 MOCK_HUMI_DRY = {
@@ -2057,6 +2084,32 @@ async def test_set_humidity_automation_generic_exception(mock_client):
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await set_humidity_automation("C58ZA", 1, 50.0, 70.0)
     assert "error" in json.loads(result)
+
+
+@pytest.mark.parametrize(
+    "min_rh,max_rh,expected_devLh,expected_devHh",
+    [
+        # Half-percent boundaries — banker's rounding (round()) would silently
+        # disagree with the docstring's documented round-half-up at every .5
+        # input. int(x + 0.5) is round-half-up.
+        (0.5, 1.5, 1, 2),
+        (50.5, 70.5, 51, 71),
+        (99.5, 100.0, 100, 100),
+        # Non-half fractions still round in the conventional direction
+        (50.4, 70.6, 50, 71),
+        (50.6, 70.4, 51, 70),
+    ],
+)
+async def test_set_humidity_automation_no_bankers_rounding(
+    mock_client, min_rh, max_rh, expected_devLh, expected_devHh,
+):
+    """Half-percent inputs round half-up, matching the docstring contract (P1-F002)."""
+    mock_client.set_port_mode.return_value = MOCK_HUMI_DRY
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        await set_humidity_automation("C58ZA", 1, min_rh, max_rh)
+    updates = mock_client.set_port_mode.call_args[0][2]
+    assert updates["devLh"] == expected_devLh
+    assert updates["devHh"] == expected_devHh
 
 
 # ============ set_port_mode ============

@@ -1177,8 +1177,11 @@ async def set_temperature_automation(
 
         updates = {
             "atType": 3,  # AUTO mode
-            "devLt": round(min_c),  # raw °C integer — no ×100 scaling
-            "devHt": round(max_c),
+            # raw °C integer — no ×100 scaling. int(x + 0.5) is round-half-up;
+            # round() uses banker's rounding and would silently disagree with
+            # the docstring at half-integer inputs (e.g. round(20.5) == 20).
+            "devLt": int(min_c + 0.5),
+            "devHt": int(max_c + 0.5),
             "activeLt": 1,
             "activeHt": 1,
         }
@@ -1257,8 +1260,10 @@ async def set_humidity_automation(
 
         updates = {
             "atType": 3,  # AUTO mode
-            "devLh": round(min_rh),  # raw % RH integer — no ×100 scaling
-            "devHh": round(max_rh),
+            # raw % RH integer — no ×100 scaling. int(x + 0.5) is round-half-up;
+            # see set_temperature_automation for rationale.
+            "devLh": int(min_rh + 0.5),
+            "devHh": int(max_rh + 0.5),
             "activeLh": 1,
             "activeHh": 1,
         }
