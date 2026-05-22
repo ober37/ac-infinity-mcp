@@ -3,6 +3,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tests.fixtures.advance_automation_fixtures import MOCK_ADVANCE_AUTOMATIONS_LIST
+
 MOCK_DEVICE_LEGACY: dict = {
     "devCode": "C58ZA",
     "devName": "Test 69 Pro",
@@ -81,4 +83,10 @@ def mock_client():
         "ports": [],
         "external_sensors": [],
     })
+    # Advance Automation defaults.
+    client.get_advance_automations.return_value = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST)
+    client.enable_advance_automation.return_value = {"code": 200}
+    client.disable_advance_automation.return_value = {"code": 200}
+    client.create_advance_automation.return_value = {"advId": 2302819}
+    client.delete_advance_automation.return_value = {"code": 200}
     return client

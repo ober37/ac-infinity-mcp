@@ -42,6 +42,14 @@ class ACInfinityClient:
     ADD_DEV_MODE_ENDPOINT = f"{BASE_URL}/dev/addDevMode"
     MODE_AND_SETTING_ENDPOINT = f"{BASE_URL}/dev/modeAndSetting"
 
+    # v2.0 Automation management endpoints. The path prefix embeds the version
+    # string as a literal path segment, which is an unusual but confirmed API design.
+    V2_BASE_URL = "http://www.acinfinityserver.com"
+    V2_GET_GROUPS_ENDPOINT = f"{V2_BASE_URL}/api/version=2.0/dev/getGroups"
+    V2_ADD_GROUPS_ENDPOINT = f"{V2_BASE_URL}/api/version=2.0/dev/addGroups"
+    V2_UPDATE_GROUPS_IS_ON_ENDPOINT = f"{V2_BASE_URL}/api/version=2.0/dev/updateGroupsIsOn"
+    V2_DEL_BY_ID_ENDPOINT = f"{V2_BASE_URL}/api/version=2.0/dev/delByid"
+
     def __init__(self, email: str, password: str):
         self.email = email
         self.password = password[:25]  # API silently truncates to 25 chars
@@ -558,6 +566,261 @@ class ACInfinityClient:
 
         logger.info("Wrote mode settings for devId=%s port=%s", dev_id, port)
         result["sent"] = True
+        return result
+
+    # ============ v2.0 Automation Management Methods ============
+
+    def _v2_headers(self) -> dict:
+        """Build the additional headers required for v2.0 API endpoints.
+
+        The v2.0 API validates several app-identity headers that the legacy API
+        does not require. The `sign` header is omitted — the server accepts requests
+        without it (confirmed in Phase 17 network capture).
+        """
+        return {
+            "token": self.token or "",
+            "Host": "www.acinfinityserver.com",
+            "User-Agent": "okhttp/3.10.0",
+            "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+            "version": "555",
+            "phoneType": "1",
+            "devType": "18",
+            "appVersion": "2.0.4",
+            "requestId": str(int(time.time() * 1000)),
+            "languageType": "en-US",
+            "languageVersion": "idongle_pro_3",
+        }
+
+    def get_advance_automations(self, dev_id: str) -> list[dict]:
+        """Fetch all automation group entries for a device (with transparent 401 refresh).
+
+        Returns a flat list of raw automation entries from the getGroups endpoint.
+        One user-visible automation may map to multiple entries with different advId
+        values (one per port-speed group) but the same advName.
+
+        Args:
+            dev_id: Numeric device ID string (devId field from devInfoListAll).
+
+        Returns:
+            List of raw automation entry dicts. Empty list if no automations.
+
+        Raises:
+            ACInfinityAuthError: If not authenticated or token refresh fails.
+            ACInfinityAPIError: If the API returns a non-200, non-401 code.
+        """
+        return self._call_with_token_refresh(self._get_advance_automations_inner, dev_id)
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(requests.exceptions.ConnectionError),
+        reraise=True,
+    )
+    def _get_advance_automations_inner(self, dev_id: str) -> list[dict]:
+        """POST /api/version=2.0/dev/getGroups — returns data array."""
+        if not self.token:
+            raise ACInfinityAuthError("Not authenticated — call authenticate() first")
+
+        resp = self.session.post(
+            self.V2_GET_GROUPS_ENDPOINT,
+            data={"devId": dev_id},
+            headers=self._v2_headers(),
+            timeout=10,
+        )
+        resp.raise_for_status()
+
+        result = resp.json()
+        if result.get("code") != 200:
+            error_msg = result.get("msg", "Unknown error")
+            code = result.get("code")
+            logger.error("Failed to get advance automations (devId=%s): %s", dev_id, error_msg)
+            self._raise_for_api_code(code, error_msg, "GetGroups")
+
+        data = result.get("data") or []
+        logger.info("Fetched %d automation entries for devId=%s", len(data), dev_id)
+        return data
+
+    def enable_advance_automation(self, dev_id: str, adv_id: int) -> dict:
+        """Toggle automation to enabled state (with transparent 401 refresh).
+
+        IMPORTANT: updateGroupsIsOn TOGGLES the current isOn state server-side.
+        The caller must verify the current state is disabled before calling this
+        method, to ensure the toggle results in enabled state.
+
+        Args:
+            dev_id: Numeric device ID string.
+            adv_id: Automation entry ID to toggle.
+
+        Returns:
+            API response dict.
+        """
+        return self._call_with_token_refresh(
+            self._enable_advance_automation_inner, dev_id, adv_id
+        )
+
+    def _enable_advance_automation_inner(self, dev_id: str, adv_id: int) -> dict:
+        """POST /api/version=2.0/dev/updateGroupsIsOn — toggles isOn state."""
+        if not self.token:
+            raise ACInfinityAuthError("Not authenticated — call authenticate() first")
+
+        self._enforce_write_rate_limit()
+        try:
+            resp = self.session.post(
+                self.V2_UPDATE_GROUPS_IS_ON_ENDPOINT,
+                data={"advId": adv_id, "isDel": 0, "isflag": 1},
+                headers=self._v2_headers(),
+                timeout=10,
+            )
+        finally:
+            self._mark_write_completed()
+        resp.raise_for_status()
+
+        result = resp.json()
+        if result.get("code") != 200:
+            error_msg = result.get("msg", "Unknown error")
+            code = result.get("code")
+            logger.error(
+                "Failed to enable automation advId=%s (devId=%s): %s", adv_id, dev_id, error_msg
+            )
+            self._raise_for_api_code(code, error_msg, "EnableAutomation")
+
+        logger.info("Toggled automation advId=%s to enabled (devId=%s)", adv_id, dev_id)
+        return result
+
+    def disable_advance_automation(self, dev_id: str, adv_id: int) -> dict:
+        """Toggle automation to disabled state (with transparent 401 refresh).
+
+        IMPORTANT: updateGroupsIsOn TOGGLES the current isOn state server-side.
+        The caller must verify the current state is enabled before calling this
+        method, to ensure the toggle results in disabled state.
+
+        Args:
+            dev_id: Numeric device ID string.
+            adv_id: Automation entry ID to toggle.
+
+        Returns:
+            API response dict.
+        """
+        return self._call_with_token_refresh(
+            self._disable_advance_automation_inner, dev_id, adv_id
+        )
+
+    def _disable_advance_automation_inner(self, dev_id: str, adv_id: int) -> dict:
+        """POST /api/version=2.0/dev/updateGroupsIsOn — toggles isOn state (same body as enable)."""
+        if not self.token:
+            raise ACInfinityAuthError("Not authenticated — call authenticate() first")
+
+        self._enforce_write_rate_limit()
+        try:
+            resp = self.session.post(
+                self.V2_UPDATE_GROUPS_IS_ON_ENDPOINT,
+                data={"advId": adv_id, "isDel": 0, "isflag": 1},
+                headers=self._v2_headers(),
+                timeout=10,
+            )
+        finally:
+            self._mark_write_completed()
+        resp.raise_for_status()
+
+        result = resp.json()
+        if result.get("code") != 200:
+            error_msg = result.get("msg", "Unknown error")
+            code = result.get("code")
+            logger.error(
+                "Failed to disable automation advId=%s (devId=%s): %s", adv_id, dev_id, error_msg
+            )
+            self._raise_for_api_code(code, error_msg, "DisableAutomation")
+
+        logger.info("Toggled automation advId=%s to disabled (devId=%s)", adv_id, dev_id)
+        return result
+
+    def create_advance_automation(self, dev_id: str, payload: dict) -> dict:
+        """Create a new advance automation group (with transparent 401 refresh).
+
+        Args:
+            dev_id: Numeric device ID string.
+            payload: Complete form payload for addGroups. Must include at minimum
+                advName, devId, onSpeed. The caller is responsible for constructing
+                the full ~50-field payload with safe defaults.
+
+        Returns:
+            Created automation object with server-assigned advId.
+        """
+        return self._call_with_token_refresh(
+            self._create_advance_automation_inner, dev_id, payload
+        )
+
+    def _create_advance_automation_inner(self, dev_id: str, payload: dict) -> dict:
+        """POST /api/version=2.0/dev/addGroups — creates automation, returns created object."""
+        if not self.token:
+            raise ACInfinityAuthError("Not authenticated — call authenticate() first")
+
+        form_data = {**payload, "devId": dev_id}
+
+        self._enforce_write_rate_limit()
+        try:
+            resp = self.session.post(
+                self.V2_ADD_GROUPS_ENDPOINT,
+                data=form_data,
+                headers=self._v2_headers(),
+                timeout=10,
+            )
+        finally:
+            self._mark_write_completed()
+        resp.raise_for_status()
+
+        result = resp.json()
+        if result.get("code") != 200:
+            error_msg = result.get("msg", "Unknown error")
+            code = result.get("code")
+            logger.error("Failed to create automation (devId=%s): %s", dev_id, error_msg)
+            self._raise_for_api_code(code, error_msg, "CreateAutomation")
+
+        data = result.get("data") or {}
+        logger.info("Created automation for devId=%s, advId=%s", dev_id, data.get("advId"))
+        return data
+
+    def delete_advance_automation(self, dev_id: str, adv_id: int) -> dict:
+        """Delete an advance automation group entry (with transparent 401 refresh).
+
+        Args:
+            dev_id: Numeric device ID string.
+            adv_id: Automation entry ID to delete.
+
+        Returns:
+            API response dict.
+        """
+        return self._call_with_token_refresh(
+            self._delete_advance_automation_inner, dev_id, adv_id
+        )
+
+    def _delete_advance_automation_inner(self, dev_id: str, adv_id: int) -> dict:
+        """POST /api/version=2.0/dev/delByid — deletes automation entry."""
+        if not self.token:
+            raise ACInfinityAuthError("Not authenticated — call authenticate() first")
+
+        self._enforce_write_rate_limit()
+        try:
+            resp = self.session.post(
+                self.V2_DEL_BY_ID_ENDPOINT,
+                data={"advId": adv_id, "isDel": 1, "isflag": 1},
+                headers=self._v2_headers(),
+                timeout=10,
+            )
+        finally:
+            self._mark_write_completed()
+        resp.raise_for_status()
+
+        result = resp.json()
+        if result.get("code") != 200:
+            error_msg = result.get("msg", "Unknown error")
+            code = result.get("code")
+            logger.error(
+                "Failed to delete automation advId=%s (devId=%s): %s", adv_id, dev_id, error_msg
+            )
+            self._raise_for_api_code(code, error_msg, "DeleteAutomation")
+
+        logger.info("Deleted automation advId=%s (devId=%s)", adv_id, dev_id)
         return result
 
     def parse_device_data(self, device_data: dict, role: str | None = None) -> dict:

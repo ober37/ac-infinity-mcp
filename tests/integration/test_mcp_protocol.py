@@ -38,6 +38,14 @@ EXPECTED_TOOLS = {
     "set_humidity_automation",
     "set_port_mode",
     "apply_grow_stage_template",
+    # Phase 17 Part 2 — Advance Automation management
+    "list_advance_automations",
+    "get_advance_automation",
+    "enable_advance_automation",
+    "disable_advance_automation",
+    "create_advance_automation",
+    "delete_advance_automation",
+    "break_out_of_automation",
 }
 
 SCHEMA_CASES: list[tuple[str, list[str], list[str]]] = [
@@ -70,6 +78,34 @@ SCHEMA_CASES: list[tuple[str, list[str], list[str]]] = [
         ],
     ),
     ("apply_grow_stage_template", ["device_id", "port", "stage"], ["dry_run"]),
+    # Phase 17 Part 2 — Advance Automation
+    ("list_advance_automations", ["device_id"], []),
+    ("get_advance_automation", ["device_id", "automation_id"], []),
+    (
+        "enable_advance_automation",
+        ["device_id", "automation_id"],
+        ["dry_run"],
+    ),
+    (
+        "disable_advance_automation",
+        ["device_id", "automation_id"],
+        ["dry_run"],
+    ),
+    (
+        "create_advance_automation",
+        ["device_id", "name", "on_speed"],
+        ["off_speed", "begin_time", "end_time", "dry_run"],
+    ),
+    (
+        "delete_advance_automation",
+        ["device_id", "automation_id"],
+        ["dry_run"],
+    ),
+    (
+        "break_out_of_automation",
+        ["device_id", "port"],
+        ["dry_run", "confirm_automation_name"],
+    ),
 ]
 
 # Env without AC Infinity credentials — built at import time so subprocess
@@ -114,13 +150,13 @@ def _get_tool_schema(name: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def test_all_18_tools_registered() -> None:
+def test_all_25_tools_registered() -> None:
     registered = {t.name for t in mcp_server._tool_manager.list_tools()}  # type: ignore[attr-defined]
     assert registered == EXPECTED_TOOLS
 
 
-def test_tool_count_is_exactly_18() -> None:
-    assert len(mcp_server._tool_manager.list_tools()) == 18  # type: ignore[attr-defined]
+def test_tool_count_is_exactly_25() -> None:
+    assert len(mcp_server._tool_manager.list_tools()) == 25  # type: ignore[attr-defined]
 
 
 def test_mcp_server_name_is_ac_infinity() -> None:
@@ -176,12 +212,12 @@ def test_get_historical_readings_defaults() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_protocol_list_tools_returns_all_18(mock_client: MagicMock) -> None:
+async def test_protocol_list_tools_returns_all_25(mock_client: MagicMock) -> None:
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         async with create_connected_server_and_client_session(srv.mcp_server) as session:
             result = await session.list_tools()
             names = {t.name for t in result.tools}
-            assert len(result.tools) == 18
+            assert len(result.tools) == 25
             assert names == EXPECTED_TOOLS
 
 

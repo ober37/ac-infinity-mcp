@@ -60,6 +60,21 @@ class ACIReading:
         }
 
 
+# ============ Advance Automation Constants ============
+
+# modeType value that indicates a port is under Advance Automation control.
+# Writing to a port in this mode returns API code 999999.
+_ADVANCE_MODE_TYPE: int = 15
+
+# Tracks whether the revert-on-disable behaviour of Advance Automations has
+# been confirmed against the live API. Set to True once a live test confirms
+# that disabling an automation does NOT revert ports to a previous state.
+# Used in disable_advance_automation and break_out_of_automation tool responses
+# to surface the uncertainty to the operator.
+# TODO(gate-6): update to True after live test confirms revert behavior.
+ADVANCE_REVERT_BEHAVIOR_CONFIRMED: bool = False
+
+
 def calculate_vpd(temp_c: float, humidity: float) -> float:
     """Calculate VPD using Magnus formula"""
     a = 17.27

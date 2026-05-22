@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from ac_infinity_mcp.schema import (
+    _ADVANCE_MODE_TYPE,
     ACInfinityAdvanceConflictError,
     ACInfinityAPIError,
     ACInfinityAuthError,
@@ -16,16 +17,24 @@ from ac_infinity_mcp.server import (
     _decode_mode,
     _filter_readings_by_time,
     _format_schedule_time,
+    _group_automations,
     _parse_duration_seconds,
     _parse_schedule_time,
     _sanitize_api_string,
+    _validate_automation_id,
     apply_grow_stage_template,
     apply_sampling,
     average_readings,
+    break_out_of_automation,
     check_vpd_drift,
+    create_advance_automation,
+    delete_advance_automation,
     detect_environment_trends,
+    disable_advance_automation,
     discover_devices,
+    enable_advance_automation,
     environment_alert_interpretation,
+    get_advance_automation,
     get_all_device_readings,
     get_device_reading,
     get_environment_health,
@@ -33,6 +42,7 @@ from ac_infinity_mcp.server import (
     get_port_activity_report,
     get_port_settings,
     get_port_status,
+    list_advance_automations,
     mcp_server,
     new_grower_setup,
     set_humidity_automation,
@@ -45,6 +55,10 @@ from ac_infinity_mcp.server import (
     vpd_troubleshooting,
 )
 from tests.conftest import MOCK_DEVICE_LEGACY
+from tests.fixtures.advance_automation_fixtures import (
+    MOCK_ADVANCE_AUTOMATIONS_LIST,
+    MOCK_ADVANCE_AUTOMATIONS_SINGLE,
+)
 
 
 def _make_history_record(ts: str, temp_c: float = 24.0, humidity: float = 55.0,
@@ -3563,3 +3577,396 @@ def test_external_sensor_precision_absent_falls_back_to_100():
     ])
     parsed = client.parse_device_data(device)
     assert parsed["external_sensors"][0]["value"] == pytest.approx(2.0)
+
+
+# ============ Advance Automation helper unit tests ============
+
+def test_validate_automation_id_valid():
+    assert _validate_automation_id("1342758") == 1342758
+    assert _validate_automation_id("1") == 1
+
+
+def test_validate_automation_id_invalid():
+    assert _validate_automation_id("abc") is None
+    assert _validate_automation_id("1.5") is None
+    assert _validate_automation_id("-1") is None
+    assert _validate_automation_id("") is None
+
+
+def test_group_automations_groups_by_name():
+    """Two entries with same advName → one automation with both adv_ids."""
+    grouped = _group_automations(MOCK_ADVANCE_AUTOMATIONS_LIST)
+    names = [g["name"] for g in grouped]
+    assert "Moderate Airflow" in names
+    assert "Pollenation Airflow" in names
+    # Should be 2 groups, not 3 entries
+    assert len(grouped) == 2
+
+    moderate = next(g for g in grouped if g["name"] == "Moderate Airflow")
+    assert moderate["automation_id"] == 1342758  # first entry's advId
+    assert set(moderate["adv_ids"]) == {1342758, 2179295}
+    assert moderate["enabled"] is True
+    assert moderate["run_state"] is True
+    assert len(moderate["port_groups"]) == 2
+
+
+def test_group_automations_empty():
+    assert _group_automations([]) == []
+
+
+# ============ list_advance_automations ============
+
+async def test_list_advance_automations_groups_by_name(mock_client):
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await list_advance_automations("C58ZA")
+    data = json.loads(result)
+    assert "automations" in data
+    # 3 raw entries → 2 grouped automations
+    assert len(data["automations"]) == 2
+    names = {a["name"] for a in data["automations"]}
+    assert "Moderate Airflow" in names
+    assert "Pollenation Airflow" in names
+
+
+async def test_list_advance_automations_empty(mock_client):
+    mock_client.get_advance_automations.return_value = []
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await list_advance_automations("C58ZA")
+    data = json.loads(result)
+    assert data["automations"] == []
+    assert data["device_id"] == "C58ZA"
+
+
+async def test_list_advance_automations_device_not_found(mock_client):
+    mock_client.get_devices.return_value = []
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await list_advance_automations("NOTFOUND")
+    data = json.loads(result)
+    assert "error" in data
+
+
+async def test_list_advance_automations_api_error(mock_client):
+    mock_client.get_advance_automations.side_effect = ACInfinityAPIError("fail")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await list_advance_automations("C58ZA")
+    data = json.loads(result)
+    assert data["error"] == "API error"
+    assert "detail" in data
+
+
+# ============ get_advance_automation ============
+
+async def test_get_advance_automation_found(mock_client):
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_advance_automation("C58ZA", "1342758")
+    data = json.loads(result)
+    assert data["automation_id"] == 1342758
+    assert data["name"] == "Moderate Airflow"
+    assert data["enabled"] is True
+    assert "human_summary" in data
+    assert isinstance(data["human_summary"], str)
+    assert len(data["human_summary"]) > 0
+
+
+async def test_get_advance_automation_single_group_human_summary(mock_client):
+    """Single port-group → human_summary includes speed and schedule info."""
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_SINGLE
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_advance_automation("C58ZA", "999001")
+    data = json.loads(result)
+    assert "Pollenation Airflow" in data["human_summary"]
+    assert "speed 3" in data["human_summary"]
+    # beginTime=540 → "09:00", endTime=1020 → "17:00"
+    assert "09:00" in data["human_summary"]
+    assert "17:00" in data["human_summary"]
+
+
+async def test_get_advance_automation_not_found(mock_client):
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_advance_automation("C58ZA", "9999999")
+    data = json.loads(result)
+    assert "error" in data
+    assert "not found" in data["error"]
+
+
+async def test_get_advance_automation_invalid_id(mock_client):
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_advance_automation("C58ZA", "not-an-id")
+    data = json.loads(result)
+    assert "error" in data
+    assert "Invalid automation_id" in data["error"]
+
+
+# ============ enable_advance_automation ============
+
+async def test_enable_advance_automation_dry_run(mock_client):
+    """Automation is disabled → dry run returns sent=False."""
+    import copy
+    automations = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST)
+    # Set Pollenation Airflow (999001) as disabled
+    for e in automations:
+        if e["advId"] == 999001:
+            e["isOn"] = 0
+    mock_client.get_advance_automations.return_value = automations
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await enable_advance_automation("C58ZA", "999001", dry_run=True)
+    data = json.loads(result)
+    assert data["dry_run"] is True
+    assert data["sent"] is False
+    assert data["action"] == "enable"
+    mock_client.enable_advance_automation.assert_not_called()
+
+
+async def test_enable_advance_automation_already_enabled(mock_client):
+    """Automation is already enabled → info response, no HTTP call."""
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        # Moderate Airflow (1342758) is enabled (isOn=1)
+        result = await enable_advance_automation("C58ZA", "1342758", dry_run=False)
+    data = json.loads(result)
+    assert "info" in data
+    assert "already enabled" in data["info"]
+    mock_client.enable_advance_automation.assert_not_called()
+
+
+async def test_enable_advance_automation_invalid_id(mock_client):
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await enable_advance_automation("C58ZA", "bad-id")
+    data = json.loads(result)
+    assert "error" in data
+
+
+# ============ disable_advance_automation ============
+
+async def test_disable_advance_automation_dry_run(mock_client):
+    """Automation is enabled → dry run returns revert_behavior_confirmed and to_restore."""
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await disable_advance_automation("C58ZA", "1342758", dry_run=True)
+    data = json.loads(result)
+    assert data["dry_run"] is True
+    assert data["sent"] is False
+    assert data["action"] == "disable"
+    assert "revert_behavior_confirmed" in data
+    assert data["revert_behavior_confirmed"] is False
+    assert "to_restore" in data
+    mock_client.disable_advance_automation.assert_not_called()
+
+
+async def test_disable_advance_automation_already_disabled(mock_client):
+    """Automation is already disabled → info response."""
+    import copy
+    automations = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST)
+    for e in automations:
+        e["isOn"] = 0  # disable all
+    mock_client.get_advance_automations.return_value = automations
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await disable_advance_automation("C58ZA", "1342758", dry_run=False)
+    data = json.loads(result)
+    assert "info" in data
+    assert "already disabled" in data["info"]
+    mock_client.disable_advance_automation.assert_not_called()
+
+
+async def test_disable_advance_automation_invalid_id(mock_client):
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await disable_advance_automation("C58ZA", "xyz")
+    data = json.loads(result)
+    assert "error" in data
+
+
+# ============ create_advance_automation ============
+
+async def test_create_advance_automation_dry_run(mock_client):
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Night Cycle", on_speed=3, dry_run=True
+        )
+    data = json.loads(result)
+    assert data["dry_run"] is True
+    assert data["sent"] is False
+    assert data["action"] == "create"
+    assert data["name"] == "Night Cycle"
+    mock_client.create_advance_automation.assert_not_called()
+
+
+async def test_create_advance_automation_invalid_speed(mock_client):
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation("C58ZA", "Test", on_speed=11, dry_run=True)
+    data = json.loads(result)
+    assert "error" in data
+    assert "on_speed" in data["error"]
+
+
+async def test_create_advance_automation_speed_zero(mock_client):
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation("C58ZA", "Test", on_speed=0, dry_run=True)
+    data = json.loads(result)
+    assert "error" in data
+
+
+async def test_create_advance_automation_empty_name(mock_client):
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation("C58ZA", "", on_speed=5, dry_run=True)
+    data = json.loads(result)
+    assert "error" in data
+
+
+async def test_create_advance_automation_control_char_name_stripped(mock_client):
+    """Control chars in name are stripped before validation."""
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Valid\x00Name", on_speed=5, dry_run=True
+        )
+    data = json.loads(result)
+    assert data["name"] == "ValidName"
+
+
+# ============ delete_advance_automation ============
+
+async def test_delete_advance_automation_dry_run(mock_client):
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await delete_advance_automation("C58ZA", "999001", dry_run=True)
+    data = json.loads(result)
+    assert data["dry_run"] is True
+    assert data["sent"] is False
+    assert data["action"] == "delete"
+    mock_client.delete_advance_automation.assert_not_called()
+
+
+async def test_delete_advance_automation_not_found(mock_client):
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await delete_advance_automation("C58ZA", "7777777", dry_run=True)
+    data = json.loads(result)
+    assert "error" in data
+    assert "not found" in data["error"]
+
+
+async def test_delete_advance_automation_invalid_id(mock_client):
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await delete_advance_automation("C58ZA", "bad-id")
+    data = json.loads(result)
+    assert "error" in data
+
+
+# ============ break_out_of_automation ============
+
+async def test_break_out_not_advance_port(mock_client):
+    """Port not under automation (modeType != 15) → idempotent info response."""
+    mock_client.get_mode_settings.return_value = {"modeType": 3, "onSpead": 5}
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await break_out_of_automation("C58ZA", port=1, dry_run=True)
+    data = json.loads(result)
+    assert "info" in data
+    assert "not currently under automation" in data["info"]
+    mock_client.get_advance_automations.assert_not_called()
+
+
+async def test_break_out_dry_run(mock_client):
+    """Port under automation → dry run returns plan, zero HTTP writes."""
+    mock_client.get_mode_settings.return_value = {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 2}
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await break_out_of_automation("C58ZA", port=1, dry_run=True)
+    data = json.loads(result)
+    assert data["action"] == "break_out"
+    assert data["dry_run"] is True
+    assert "sequence" in data
+    assert "automation_name" in data
+    assert "estimated_duration_seconds" in data
+    assert "revert_behavior_confirmed" in data
+    # No writes on dry run
+    mock_client.disable_advance_automation.assert_not_called()
+    mock_client.set_port_mode.assert_not_called()
+
+
+async def test_break_out_confirm_name_required(mock_client):
+    """dry_run=False without confirm_automation_name → error."""
+    mock_client.get_mode_settings.return_value = {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 2}
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await break_out_of_automation(
+            "C58ZA", port=1, dry_run=False, confirm_automation_name=None
+        )
+    data = json.loads(result)
+    assert "error" in data
+    assert "confirm_automation_name" in data["error"]
+
+
+async def test_break_out_confirm_name_mismatch(mock_client):
+    """Wrong confirm_automation_name → error."""
+    mock_client.get_mode_settings.return_value = {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 2}
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await break_out_of_automation(
+            "C58ZA", port=1, dry_run=False,
+            confirm_automation_name="Wrong Name"
+        )
+    data = json.loads(result)
+    assert "error" in data
+    assert "does not match" in data["error"]
+
+
+async def test_break_out_confirm_name_case_insensitive(mock_client):
+    """Case-insensitive match for confirm_automation_name."""
+    # Port 1 is under automation; port 2 is under automation too (co-port)
+    def mode_settings_side_effect(dev_id, port):
+        return {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 2}
+
+    mock_client.get_mode_settings.side_effect = mode_settings_side_effect
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    mock_client.disable_advance_automation.return_value = {"code": 200}
+    mock_client.set_port_mode.return_value = {
+        "dry_run": False, "sent": True, "controller_type": "legacy", "payload": {}
+    }
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await break_out_of_automation(
+            "C58ZA", port=1, dry_run=False,
+            confirm_automation_name="MODERATE AIRFLOW"  # uppercase should match
+        )
+    data = json.loads(result)
+    # Should succeed (not an error from name mismatch)
+    assert "error" not in data or "does not match" not in data.get("error", "")
+
+
+# ============ dry_run_never_writes parametrize ============
+
+@pytest.mark.parametrize("tool_fn,kwargs", [
+    (enable_advance_automation,
+     {"device_id": "C58ZA", "automation_id": "999001", "dry_run": True}),
+    (disable_advance_automation,
+     {"device_id": "C58ZA", "automation_id": "1342758", "dry_run": True}),
+    (create_advance_automation,
+     {"device_id": "C58ZA", "name": "Test", "on_speed": 5, "dry_run": True}),
+    (delete_advance_automation,
+     {"device_id": "C58ZA", "automation_id": "999001", "dry_run": True}),
+    (break_out_of_automation,
+     {"device_id": "C58ZA", "port": 1, "dry_run": True}),
+])
+async def test_dry_run_never_writes(tool_fn, kwargs, mock_client):
+    """All write tools with dry_run=True must make zero HTTP write method calls."""
+    import copy
+    automations = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST)
+    # Ensure Pollenation Airflow is disabled (for enable test)
+    for e in automations:
+        if e["advId"] == 999001:
+            e["isOn"] = 0
+
+    mock_client.get_advance_automations.return_value = automations
+    mock_client.get_mode_settings.return_value = {
+        "modeType": _ADVANCE_MODE_TYPE, "onSpead": 2
+    }
+
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        await tool_fn(**kwargs)
+
+    mock_client.enable_advance_automation.assert_not_called()
+    mock_client.disable_advance_automation.assert_not_called()
+    mock_client.create_advance_automation.assert_not_called()
+    mock_client.delete_advance_automation.assert_not_called()
+    mock_client.set_port_mode.assert_not_called()
