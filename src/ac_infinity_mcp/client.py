@@ -542,48 +542,64 @@ class ACInfinityClient:
         return result
 
     def parse_device_data(self, device_data: dict, role: str | None = None) -> dict:
-        """Extract readable values from AC Infinity device response"""
-        info = device_data.get("deviceInfo", {})
+        """Extract readable values from AC Infinity device response.
 
-        # API returns values * 100 — divide to get actual readings
-        temp_c = info.get("temperature", 0) / 100.0
-        temp_f = info.get("temperatureF", 0) / 100.0
-        humidity = info.get("humidity", 0) / 100.0
-        vpd = round(info.get("vpdnums", 0) / 100.0, 2)
+        Type errors in the upstream response (a field arriving as a string
+        where the parser expects an int, etc.) are converted to a typed
+        ACInfinityAPIError so tool-level handlers log the structural issue
+        clearly rather than re-raising raw TypeError text to the LLM (P3-F011).
+        """
+        try:
+            info = device_data.get("deviceInfo", {})
 
-        raw_ports = info.get("ports", [])
-        ports = [
-            {
-                "port": p.get("port"),
-                "name": p.get("portName", f"Port {p.get('port')}"),
-                "speed": p.get("speak", 0),  # 0-10 scale from API
-                "load": p.get("portsLoad", 0),
-            }
-            for p in raw_ports
-        ]
+            # API returns values * 100 — divide to get actual readings
+            temp_c = info.get("temperature", 0) / 100.0
+            temp_f = info.get("temperatureF", 0) / 100.0
+            humidity = info.get("humidity", 0) / 100.0
+            vpd = round(info.get("vpdnums", 0) / 100.0, 2)
 
-        sensors = info.get("sensors")
-        external = []
-        if sensors:
-            external = [
+            raw_ports = info.get("ports", [])
+            ports = [
                 {
-                    "sensor_id": f"{s.get('accessPort')}.{s.get('sensorType')}",
-                    "value": s.get("sensorData", 0) / 100.0,
+                    "port": p.get("port"),
+                    "name": p.get("portName", f"Port {p.get('port')}"),
+                    "speed": p.get("speak", 0),  # 0-10 scale from API
+                    "load": p.get("portsLoad", 0),
                 }
-                for s in sensors
+                for p in raw_ports
             ]
 
-        return {
-            "timestamp": datetime.now(UTC).replace(tzinfo=None).isoformat() + "Z",
-            "device_id": device_data.get("devCode"),
-            "device_name": device_data.get("devName", "Unknown"),
-            "temperature_c": round(temp_c, 1),
-            "temperature_f": round(temp_f, 1),
-            "humidity": round(humidity, 1),
-            "vpd": vpd,
-            "ports": ports,
-            "external_sensors": external,
-        }
+            sensors = info.get("sensors")
+            external = []
+            if sensors:
+                external = [
+                    {
+                        "sensor_id": f"{s.get('accessPort')}.{s.get('sensorType')}",
+                        "value": s.get("sensorData", 0) / 100.0,
+                    }
+                    for s in sensors
+                ]
+
+            return {
+                "timestamp": datetime.now(UTC).replace(tzinfo=None).isoformat() + "Z",
+                "device_id": device_data.get("devCode"),
+                "device_name": device_data.get("devName", "Unknown"),
+                "temperature_c": round(temp_c, 1),
+                "temperature_f": round(temp_f, 1),
+                "humidity": round(humidity, 1),
+                "vpd": vpd,
+                "ports": ports,
+                "external_sensors": external,
+            }
+        except (TypeError, ValueError, AttributeError) as e:
+            logger.warning(
+                "Malformed device data for devCode=%s: %s",
+                device_data.get("devCode") if isinstance(device_data, dict) else "<non-dict>",
+                e,
+            )
+            raise ACInfinityAPIError(
+                "AC Infinity API returned malformed device data"
+            ) from e
 
     def parse_history_record(
         self, record: dict, port_names: dict[int, str] | None = None
@@ -604,44 +620,57 @@ class ACInfinityClient:
                 each decoded port entry.
 
         Returns:
-            Dict with parsed timestamp, temperature, humidity, VPD, and port data
+            Dict with parsed timestamp, temperature, humidity, VPD, and port data.
+
+        Raises:
+            ACInfinityAPIError: when the upstream record is malformed (wrong
+                field types — e.g. portSpead as a string rather than int).
+                Defense in depth so a poisoned response cannot surface raw
+                TypeError text to the LLM via the tool-level handlers (P3-F011).
         """
-        create_time = record.get("createTime", 0)
-        timestamp = (
-            datetime.fromtimestamp(int(create_time), UTC).replace(tzinfo=None).isoformat() + "Z"
-            if create_time
-            else None
-        )
+        try:
+            create_time = record.get("createTime", 0)
+            timestamp = (
+                datetime.fromtimestamp(int(create_time), UTC).replace(tzinfo=None).isoformat()
+                + "Z"
+                if create_time
+                else None
+            )
 
-        # Decode port speeds from portSpead bitmask (4 bits per port). Quirk 6:
-        # portStatus is the "automation-triggered" flag, NOT the on/off state.
-        # The speed nibble alone is authoritative for on/off — a port can be
-        # automation-armed (status bit set) with nibble=0 (idle), which used
-        # to be reported as ON, overstating runtime in the activity report.
-        port_spead = record.get("portSpead", 0) or 0
-        port_status = record.get("portStatus", 0) or 0
-        port_count = record.get("devPortCount") or 8
+            # Decode port speeds from portSpead bitmask (4 bits per port). Quirk 6:
+            # portStatus is the "automation-triggered" flag, NOT the on/off state.
+            # The speed nibble alone is authoritative for on/off — a port can be
+            # automation-armed (status bit set) with nibble=0 (idle), which used
+            # to be reported as ON, overstating runtime in the activity report.
+            port_spead = record.get("portSpead", 0) or 0
+            port_status = record.get("portStatus", 0) or 0
+            port_count = record.get("devPortCount") or 8
 
-        ports = []
-        for i in range(port_count):
-            nibble = (port_spead >> (i * 4)) & 0xF
-            on = nibble > 0
-            automation_triggered = bool((port_status >> i) & 1)
-            speed = 1 if nibble == 0xF else nibble  # 0xF = ON for toggle devices
-            name = (port_names or {}).get(i + 1, f"Port {i + 1}")
-            ports.append({
-                "port": i + 1,
-                "name": name,
-                "speed": speed,
-                "on": on,
-                "automation_triggered": automation_triggered,
-            })
+            ports = []
+            for i in range(port_count):
+                nibble = (port_spead >> (i * 4)) & 0xF
+                on = nibble > 0
+                automation_triggered = bool((port_status >> i) & 1)
+                speed = 1 if nibble == 0xF else nibble  # 0xF = ON for toggle devices
+                name = (port_names or {}).get(i + 1, f"Port {i + 1}")
+                ports.append({
+                    "port": i + 1,
+                    "name": name,
+                    "speed": speed,
+                    "on": on,
+                    "automation_triggered": automation_triggered,
+                })
 
-        return {
-            "timestamp": timestamp,
-            "temperature_c": round(record.get("temperature", 0) / 100.0, 1),
-            "temperature_f": round(record.get("fTemperature", 0) / 100.0, 1),
-            "humidity": round(record.get("humidity", 0) / 100.0, 1),
-            "vpd": round(record.get("vpdNums", 0) / 100.0, 2),
-            "ports": ports,
-        }
+            return {
+                "timestamp": timestamp,
+                "temperature_c": round(record.get("temperature", 0) / 100.0, 1),
+                "temperature_f": round(record.get("fTemperature", 0) / 100.0, 1),
+                "humidity": round(record.get("humidity", 0) / 100.0, 1),
+                "vpd": round(record.get("vpdNums", 0) / 100.0, 2),
+                "ports": ports,
+            }
+        except (TypeError, ValueError, AttributeError) as e:
+            logger.warning("Malformed history record: %s", e)
+            raise ACInfinityAPIError(
+                "AC Infinity API returned malformed history record"
+            ) from e

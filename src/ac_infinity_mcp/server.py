@@ -149,8 +149,11 @@ async def discover_devices() -> str:
         logger.error("API error in discover_devices: %s", e)
         return json.dumps({"error": "AC Infinity API error", "detail": str(e)})
     except Exception as e:
-        logger.error("Unexpected error in discover_devices: %s", e)
-        return json.dumps({"error": str(e)})
+        logger.error("Unexpected error in discover_devices: %s", e, exc_info=True)
+        return json.dumps({
+            "error": "Unexpected error",
+            "detail": "see server logs",
+        })
 
 
 @mcp_server.tool()
@@ -204,8 +207,11 @@ async def get_device_reading(device_id: str) -> str:
         logger.error("API error in get_device_reading: %s", e)
         return json.dumps({"error": "AC Infinity API error", "detail": str(e)})
     except Exception as e:
-        logger.error("Unexpected error in get_device_reading: %s", e)
-        return json.dumps({"error": str(e)})
+        logger.error("Unexpected error in get_device_reading: %s", e, exc_info=True)
+        return json.dumps({
+            "error": "Unexpected error",
+            "detail": "see server logs",
+        })
 
 
 @mcp_server.tool()
@@ -400,8 +406,11 @@ async def get_historical_readings(
         logger.error("API error in get_historical_readings: %s", e)
         return json.dumps({"error": "AC Infinity API error", "detail": str(e)})
     except Exception as e:
-        logger.error("Unexpected error in get_historical_readings: %s", e)
-        return json.dumps({"error": str(e)})
+        logger.error("Unexpected error in get_historical_readings: %s", e, exc_info=True)
+        return json.dumps({
+            "error": "Unexpected error",
+            "detail": "see server logs",
+        })
 
 
 @mcp_server.tool()
@@ -487,8 +496,11 @@ async def check_vpd_drift(device_id: str, stage: str = "veg") -> str:
         logger.error("API error in check_vpd_drift: %s", e)
         return json.dumps({"error": "AC Infinity API error", "detail": str(e)})
     except Exception as e:
-        logger.error("Unexpected error in check_vpd_drift: %s", e)
-        return json.dumps({"error": str(e)})
+        logger.error("Unexpected error in check_vpd_drift: %s", e, exc_info=True)
+        return json.dumps({
+            "error": "Unexpected error",
+            "detail": "see server logs",
+        })
 
 
 @mcp_server.tool()
@@ -537,8 +549,11 @@ async def get_all_device_readings() -> str:
         logger.error("API error in get_all_device_readings: %s", e)
         return json.dumps({"error": "AC Infinity API error", "detail": str(e)})
     except Exception as e:
-        logger.error("Unexpected error in get_all_device_readings: %s", e)
-        return json.dumps({"error": str(e)})
+        logger.error("Unexpected error in get_all_device_readings: %s", e, exc_info=True)
+        return json.dumps({
+            "error": "Unexpected error",
+            "detail": "see server logs",
+        })
 
 
 @mcp_server.tool()
@@ -581,8 +596,11 @@ async def get_environment_health(device_id: str, stage: str = "veg") -> str:
         logger.error("API error in get_environment_health: %s", e)
         return json.dumps({"error": "AC Infinity API error", "detail": str(e)})
     except Exception as e:
-        logger.error("Unexpected error in get_environment_health: %s", e)
-        return json.dumps({"error": str(e)})
+        logger.error("Unexpected error in get_environment_health: %s", e, exc_info=True)
+        return json.dumps({
+            "error": "Unexpected error",
+            "detail": "see server logs",
+        })
 
 
 @mcp_server.tool()
@@ -635,8 +653,11 @@ async def detect_environment_trends(device_id: str, days: int = 7) -> str:
         logger.error("API error in detect_environment_trends: %s", e)
         return json.dumps({"error": "AC Infinity API error", "detail": str(e)})
     except Exception as e:
-        logger.error("Unexpected error in detect_environment_trends: %s", e)
-        return json.dumps({"error": str(e)})
+        logger.error("Unexpected error in detect_environment_trends: %s", e, exc_info=True)
+        return json.dumps({
+            "error": "Unexpected error",
+            "detail": "see server logs",
+        })
 
 
 @mcp_server.tool()
@@ -685,8 +706,11 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         logger.error("API error in get_port_activity_report: %s", e)
         return json.dumps({"error": "AC Infinity API error", "detail": str(e)})
     except Exception as e:
-        logger.error("Unexpected error in get_port_activity_report: %s", e)
-        return json.dumps({"error": str(e)})
+        logger.error("Unexpected error in get_port_activity_report: %s", e, exc_info=True)
+        return json.dumps({
+            "error": "Unexpected error",
+            "detail": "see server logs",
+        })
 
 
 # ============ New Read Tools ============
@@ -805,8 +829,11 @@ async def get_port_status(device_id: str, port: int) -> str:
         logger.error("API error in get_port_status: %s", e)
         return json.dumps({"error": "AC Infinity API error", "detail": str(e)})
     except Exception as e:
-        logger.error("Unexpected error in get_port_status: %s", e)
-        return json.dumps({"error": str(e)})
+        logger.error("Unexpected error in get_port_status: %s", e, exc_info=True)
+        return json.dumps({
+            "error": "Unexpected error",
+            "detail": "see server logs",
+        })
 
 
 @mcp_server.tool()
@@ -914,8 +941,11 @@ async def get_port_settings(device_id: str, port: int) -> str:
         logger.error("API error in get_port_settings: %s", e)
         return json.dumps({"error": "AC Infinity API error", "detail": str(e)})
     except Exception as e:
-        logger.error("Unexpected error in get_port_settings: %s", e)
-        return json.dumps({"error": str(e)})
+        logger.error("Unexpected error in get_port_settings: %s", e, exc_info=True)
+        return json.dumps({
+            "error": "Unexpected error",
+            "detail": "see server logs",
+        })
 
 
 # ============ Write Tools ============
@@ -1006,8 +1036,11 @@ async def set_port_speed(
         logger.warning("Error in set_port_speed (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({"error": str(e)})
     except Exception as e:
-        logger.error("Unexpected error in set_port_speed: %s", e)
-        return json.dumps({"error": str(e)})
+        logger.error("Unexpected error in set_port_speed: %s", e, exc_info=True)
+        return json.dumps({
+            "error": "Unexpected error",
+            "detail": "see server logs",
+        })
 
 
 @mcp_server.tool()
@@ -1074,8 +1107,11 @@ async def set_port_on(
         logger.warning("Error in set_port_on (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({"error": str(e)})
     except Exception as e:
-        logger.error("Unexpected error in set_port_on: %s", e)
-        return json.dumps({"error": str(e)})
+        logger.error("Unexpected error in set_port_on: %s", e, exc_info=True)
+        return json.dumps({
+            "error": "Unexpected error",
+            "detail": "see server logs",
+        })
 
 
 @mcp_server.tool()
@@ -1148,8 +1184,11 @@ async def set_port_off(
         logger.warning("Error in set_port_off (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({"error": str(e)})
     except Exception as e:
-        logger.error("Unexpected error in set_port_off: %s", e)
-        return json.dumps({"error": str(e)})
+        logger.error("Unexpected error in set_port_off: %s", e, exc_info=True)
+        return json.dumps({
+            "error": "Unexpected error",
+            "detail": "see server logs",
+        })
 
 
 # ============ Automation Write Tools ============
@@ -1239,8 +1278,11 @@ async def set_vpd_automation(
         logger.warning("Error in set_vpd_automation (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({"error": str(e)})
     except Exception as e:
-        logger.error("Unexpected error in set_vpd_automation: %s", e)
-        return json.dumps({"error": str(e)})
+        logger.error("Unexpected error in set_vpd_automation: %s", e, exc_info=True)
+        return json.dumps({
+            "error": "Unexpected error",
+            "detail": "see server logs",
+        })
 
 
 @mcp_server.tool()
@@ -1322,8 +1364,11 @@ async def set_temperature_automation(
         )
         return json.dumps({"error": str(e)})
     except Exception as e:
-        logger.error("Unexpected error in set_temperature_automation: %s", e)
-        return json.dumps({"error": str(e)})
+        logger.error("Unexpected error in set_temperature_automation: %s", e, exc_info=True)
+        return json.dumps({
+            "error": "Unexpected error",
+            "detail": "see server logs",
+        })
 
 
 @mcp_server.tool()
@@ -1404,8 +1449,11 @@ async def set_humidity_automation(
         )
         return json.dumps({"error": str(e)})
     except Exception as e:
-        logger.error("Unexpected error in set_humidity_automation: %s", e)
-        return json.dumps({"error": str(e)})
+        logger.error("Unexpected error in set_humidity_automation: %s", e, exc_info=True)
+        return json.dumps({
+            "error": "Unexpected error",
+            "detail": "see server logs",
+        })
 
 
 _VALID_MODES = frozenset(_MODE_AT_TYPES)
@@ -1538,8 +1586,11 @@ async def set_port_mode(
         logger.warning("Error in set_port_mode (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({"error": str(e)})
     except Exception as e:
-        logger.error("Unexpected error in set_port_mode: %s", e)
-        return json.dumps({"error": str(e)})
+        logger.error("Unexpected error in set_port_mode: %s", e, exc_info=True)
+        return json.dumps({
+            "error": "Unexpected error",
+            "detail": "see server logs",
+        })
 
 
 @mcp_server.tool()
@@ -1638,8 +1689,11 @@ async def apply_grow_stage_template(
         )
         return json.dumps({"error": str(e)})
     except Exception as e:
-        logger.error("Unexpected error in apply_grow_stage_template: %s", e)
-        return json.dumps({"error": str(e)})
+        logger.error("Unexpected error in apply_grow_stage_template: %s", e, exc_info=True)
+        return json.dumps({
+            "error": "Unexpected error",
+            "detail": "see server logs",
+        })
 
     if write_result.get("ai_plus_write_unsupported"):
         return _ai_plus_unsupported_error(device_id, port, write_result["controller_type"])

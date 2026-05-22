@@ -198,6 +198,32 @@ def test_parse_history_record_port_names(client):
     assert result["ports"][1]["name"] == "Exhaust Fan"
 
 
+def test_parse_history_record_raises_typed_error_on_malformed_input(client):
+    """Type errors in the upstream record convert to ACInfinityAPIError (P3-F011)."""
+    bad_record = {
+        "createTime": 1714000000,
+        "portSpead": "not-an-int",  # string where int expected
+        "portStatus": 0,
+        "devPortCount": 2,
+    }
+    with pytest.raises(ACInfinityAPIError, match="malformed history record"):
+        client.parse_history_record(bad_record)
+
+
+def test_parse_device_data_raises_typed_error_on_malformed_input(client):
+    """Type errors in the upstream device dict convert to ACInfinityAPIError (P3-F011)."""
+    bad_device = {
+        "devCode": "C58ZA",
+        "devName": "Test",
+        "deviceInfo": {
+            "temperature": "not-an-int",  # string where int expected
+            "ports": [],
+        },
+    }
+    with pytest.raises(ACInfinityAPIError, match="malformed device data"):
+        client.parse_device_data(bad_device)
+
+
 def test_parse_history_record_automation_flag_does_not_force_on(client):
     """Quirk 6: portStatus is automation-triggered, NOT on/off (P1-F008).
 
