@@ -1022,7 +1022,13 @@ async def set_port_off(
     port: int,
     dry_run: bool = True,
 ) -> str:
-    """Turn a port off (onSpead=0).
+    """Zero a port's speed (onSpead=0).
+
+    Sends onSpead=0 only — the port's active automation mode (atType) is left
+    unchanged. If the port is in AUTO or VPD mode, the controller's automation
+    logic may re-engage the port when its trigger condition is next met. To
+    keep the port off until manually re-enabled, switch the mode to OFF first
+    via ``set_port_mode(device_id, port, mode="OFF")``.
 
     Uses read-before-write. Defaults to dry_run=True — set dry_run=False to
     write to the device.
@@ -1918,8 +1924,12 @@ def main() -> None:  # pragma: no cover
     password = os.getenv("AC_INFINITY_PASSWORD")
 
     if not email or not password:
+        # The server reads env vars directly; it does not auto-load .env.
+        # Set via your MCP client's env config (Claude Desktop / Cline / Codex
+        # config block) or export them in your shell before launching.
         logger.error(
-            "Missing AC_INFINITY_EMAIL or AC_INFINITY_PASSWORD — set in .env"
+            "Missing AC_INFINITY_EMAIL or AC_INFINITY_PASSWORD — "
+            "set them in your MCP client config or shell environment"
         )
         sys.exit(1)
 

@@ -533,10 +533,15 @@ advance the `time` field past the last returned `createTime`:
 
 ```
 # Request 1: time=T0, endTime=T1, pageSize=2000
-# Response: records [R1...R2000] (newest to oldest)
+# Response: records [R1...R2000] (oldest to newest within the page)
 # Request 2: time=R2000.createTime + 1, endTime=T1, pageSize=2000
 # Repeat until response has fewer than pageSize records
 ```
+
+Records within a page are returned oldest-first; advancing `time` past the
+newest `createTime` in the current page moves the cursor forward through
+history. The client's pagination test in `tests/common/test_client.py`
+exercises this ordering explicitly.
 
 ---
 
