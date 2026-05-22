@@ -319,6 +319,28 @@ async def test_get_historical_readings_invalid_interval(mock_client):
     assert "sample_interval" in data["error"].lower() or "2x" in data["error"]
 
 
+@pytest.mark.parametrize("bad_value", ["bad", "25:00", "12:60", "1200", "noon", ""])
+async def test_get_historical_readings_invalid_time_start(mock_client, bad_value):
+    """Invalid time_start returns a structured error rather than silently dropping every reading (P1-F006)."""
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_historical_readings(
+            "C58ZA", "2024-04-25", "2024-04-25", "1h", time_start=bad_value
+        )
+    data = json.loads(result)
+    assert "error" in data
+    assert "time_start" in data["error"]
+
+
+async def test_get_historical_readings_invalid_time_end(mock_client):
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_historical_readings(
+            "C58ZA", "2024-04-25", "2024-04-25", "1h", time_end="bogus"
+        )
+    data = json.loads(result)
+    assert "error" in data
+    assert "time_end" in data["error"]
+
+
 async def test_get_historical_readings_no_device(mock_client):
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_historical_readings("NOTEXIST", "2024-04-25", "2024-04-25")
@@ -477,34 +499,55 @@ _READINGS = [
 
 
 def test_filter_readings_by_time_no_filter():
-    result = _filter_readings_by_time(_READINGS)
+    result, dropped = _filter_readings_by_time(_READINGS)
     assert len(result) == 4
+    assert dropped == 0
 
 
 def test_filter_readings_by_time_start_only():
-    result = _filter_readings_by_time(_READINGS, time_start="12:00")
+    result, dropped = _filter_readings_by_time(_READINGS, time_start="12:00")
     assert len(result) == 3
     assert result[0]["timestamp"] == "2024-04-25T12:00:00Z"
+    assert dropped == 0
 
 
 def test_filter_readings_by_time_end_only():
-    result = _filter_readings_by_time(_READINGS, time_end="16:00")
+    result, dropped = _filter_readings_by_time(_READINGS, time_end="16:00")
     assert len(result) == 3
     assert result[-1]["timestamp"] == "2024-04-25T16:00:00Z"
+    assert dropped == 0
 
 
 def test_filter_readings_by_time_both():
-    result = _filter_readings_by_time(_READINGS, time_start="12:00", time_end="16:00")
+    result, _ = _filter_readings_by_time(_READINGS, time_start="12:00", time_end="16:00")
     assert len(result) == 2
 
 
-def test_filter_readings_bad_timestamp_skipped():
+def test_filter_readings_bad_timestamp_drops_and_counts():
+    """Malformed timestamps are dropped and surfaced via the drop count (P3-F017)."""
     readings = [
         _make_history_record("2024-04-25T12:00:00Z"),
         {"timestamp": "NOT_A_TIMESTAMP", "temperature_c": 24.0},
+        {"timestamp": "", "temperature_c": 25.0},
     ]
-    result = _filter_readings_by_time(readings, time_start="10:00")
+    result, dropped = _filter_readings_by_time(readings, time_start="10:00")
     assert len(result) == 1
+    assert dropped == 2
+
+
+def test_filter_readings_overnight_window():
+    """time_start > time_end means an overnight window (e.g. 22:00–06:00) — OR of halves."""
+    readings = [
+        _make_history_record("2024-04-25T05:00:00Z"),   # 05:00 — in window
+        _make_history_record("2024-04-25T12:00:00Z"),   # 12:00 — out
+        _make_history_record("2024-04-25T22:30:00Z"),   # 22:30 — in window
+    ]
+    result, _ = _filter_readings_by_time(readings, time_start="22:00", time_end="06:00")
+    times = sorted(r["timestamp"] for r in result)
+    assert times == [
+        "2024-04-25T05:00:00Z",
+        "2024-04-25T22:30:00Z",
+    ]
 
 
 # ============ apply_sampling ============

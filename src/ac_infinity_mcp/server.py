@@ -168,13 +168,22 @@ async def get_historical_readings(
             Default: "1h" (one averaged reading per hour).
         time_start: Optional UTC time filter in HH:MM format (e.g., "16:00").
             If provided, only readings at or after this time are returned.
+            Invalid HH:MM strings return a structured error.
         time_end: Optional UTC time filter in HH:MM format (e.g., "16:15").
             If provided, only readings at or before this time are returned.
+            Invalid HH:MM strings return a structured error.
+
+            When both bounds are set and time_start > time_end (e.g. "22:00"–"06:00"),
+            the window crosses midnight: the OR of [time_start, 24:00) and
+            [00:00, time_end] is returned.
 
     Returns:
         JSON with ``"readings"`` list and ``"statistics"`` summary. Each reading contains
         timestamp, temperature_c/f, humidity, vpd, and ports list. Statistics include
-        min/avg/max per metric across the returned window. See docs/API.md for full shape.
+        min/avg/max per metric across the returned window. If any readings were dropped
+        because their timestamps could not be parsed, the response also includes
+        ``"dropped_readings"`` (count) and ``"drop_reason"``. See docs/API.md for full
+        shape.
 
         On failure returns ``{"error": "...", "detail": "..."}``.
     """
@@ -193,6 +202,21 @@ async def get_historical_readings(
                 _parse_duration_seconds(sample_interval)
             except ValueError as exc:
                 return json.dumps({"error": str(exc)})
+
+        # Validate time_start / time_end as HH:MM. Without this, garbage input
+        # (e.g. "bad") silently excluded every reading from the result via
+        # lexicographic compare and the tool returned "No data available after
+        # sampling" with no hint that the filter was at fault.
+        for label, value in (("time_start", time_start), ("time_end", time_end)):
+            if value is not None:
+                try:
+                    _parse_schedule_time(value)
+                except ValueError:
+                    return json.dumps({
+                        "error": (
+                            f"Invalid {label} {value!r}: expected 'HH:MM' (00:00–23:59)"
+                        ),
+                    })
 
         devices = await asyncio.to_thread(_client().get_devices)
 
@@ -237,8 +261,11 @@ async def get_historical_readings(
 
         sampled = apply_sampling(readings, sample_interval)
 
+        dropped_readings = 0
         if time_start or time_end:
-            sampled = _filter_readings_by_time(sampled, time_start, time_end)
+            sampled, dropped_readings = _filter_readings_by_time(
+                sampled, time_start, time_end
+            )
 
         if sampled:
             temps_c = [r.get("temperature_c", 0) for r in sampled if "temperature_c" in r]
@@ -291,11 +318,15 @@ async def get_historical_readings(
         else:
             stats = {"error": "No data available after sampling"}
 
-        return json.dumps({
+        response: dict = {
             "device_id": device_id,
             "readings": sampled,
             "statistics": stats,
-        }, indent=2)
+        }
+        if dropped_readings:
+            response["dropped_readings"] = dropped_readings
+            response["drop_reason"] = "malformed timestamp"
+        return json.dumps(response, indent=2)
 
     except ACInfinityAuthError as e:
         logger.warning("Auth error in get_historical_readings: %s", e)
@@ -1744,32 +1775,52 @@ def _parse_duration_seconds(interval: str) -> int:
 
 def _filter_readings_by_time(
     readings: list, time_start: str | None = None, time_end: str | None = None
-) -> list:
-    """Filter readings to only include those within a UTC time window (HH:MM format)."""
-    if not time_start and not time_end:
-        return readings
+) -> tuple[list, int]:
+    """Filter readings to only include those within a UTC time window (HH:MM format).
 
+    Returns:
+        (filtered_readings, dropped_count) where dropped_count is the number of
+        readings whose timestamps could not be parsed (and were therefore excluded
+        from the result). The caller is expected to surface a non-zero drop count
+        in the response so the user knows data was dropped.
+
+    Overnight windows: when time_start > time_end (e.g. "22:00"-"06:00"), the
+    filter is the OR of [time_start, 24:00) and [00:00, time_end] — i.e. the
+    window crosses midnight. Same-day windows use the inclusive intersection.
+    """
+    if not time_start and not time_end:
+        return readings, 0
+
+    overnight = (
+        time_start is not None and time_end is not None and time_start > time_end
+    )
     filtered = []
+    dropped = 0
     for reading in readings:
         timestamp_str = reading.get("timestamp", "")
         try:
             ts_dt = datetime.fromisoformat(timestamp_str.rstrip("Z").replace("+00:00", ""))
             ts_dt = ts_dt.replace(tzinfo=UTC)
             reading_time = ts_dt.strftime("%H:%M")
-
-            include = True
-            if time_start and reading_time < time_start:
-                include = False
-            if time_end and reading_time > time_end:
-                include = False
-
-            if include:
-                filtered.append(reading)
-        except Exception as e:
+        except (ValueError, AttributeError, TypeError) as e:
             logger.warning("Could not parse timestamp %s: %s", timestamp_str, e)
+            dropped += 1
             continue
 
-    return filtered
+        if time_start and time_end:
+            if overnight:
+                include = reading_time >= time_start or reading_time <= time_end
+            else:
+                include = time_start <= reading_time <= time_end
+        elif time_start:
+            include = reading_time >= time_start
+        else:  # time_end only
+            include = reading_time <= time_end  # type: ignore[operator]
+
+        if include:
+            filtered.append(reading)
+
+    return filtered, dropped
 
 
 def apply_sampling(readings: list, interval: str) -> list:
