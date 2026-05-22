@@ -802,32 +802,110 @@ to decode the automation name or ID from this field. Document in a follow-up iss
 
 ---
 
-### Quirk 18 — Advance Automation API endpoints not yet confirmed
+### Quirk 18 — Advance Automation API: v2.0 endpoints confirmed via network capture
 
 The AC Infinity app manages Advance Automations (named programs that govern multiple
-ports) via API endpoints that have not been identified through REST probing.
+ports) via versioned API endpoints under the path prefix `/api/version=2.0/dev/`.
+These were confirmed via mobile app network capture (Phase 17, 2026-05-22) after
+REST probing of 200+ legacy-path variants returned only HTTP 404.
 
-**Probing summary (Phase 17, 2026-05-22):** Over 200 endpoint guesses tried across
-8 probe scripts: `/dev/getAutoList`, `/dev/getAdvanceList`, `/dev/advanceList`,
-`/dev/sceneList`, `/dev/workModeList`, and 200+ variants with different HTTP methods,
-Content-Type headers, path prefixes (`/v2/`, `/advanced/`, etc.), `devCode`- and
-`appId`-based payloads, and alternative subdomain attempts. All returned HTTP 404.
+**Confirmed automation management endpoints (v2.0 path prefix):**
 
-**What IS accessible without a dedicated endpoint:**
-- Whether a port is under automation: `isOpenAutomation` field in `devInfoListAll`
-- Automation "mode" confirmation: `modeType=15` in `getdevModeSettingList`
-- Automation grouping hint: `portParamData` shared value (see Quirk 17)
-- Current `speak` (effective power level): from `devInfoListAll`
+| Endpoint | Method | Body | Notes |
+|---|---|---|---|
+| `/api/version=2.0/dev/getGroups` | POST | `devId=...` | Returns all automation groups for device |
+| `/api/version=2.0/dev/addGroups` | POST | Full form fields (~50 fields) | Creates automation; server assigns `advId` in response |
+| `/api/version=2.0/dev/updateGroupsIsOn` | POST | `advId=...&isDel=0&isflag=1` | **TOGGLES** current `isOn` state — server inverts; no explicit `isOn` field |
+| `/api/version=2.0/dev/delByid` | POST | `advId=...&isDel=1&isflag=1` | Deletes automation |
 
-**What requires a network capture from the AC Infinity app:**
-- Automation name (e.g. "Moderate Airflow")
-- Automation ID (for enable/disable/delete API calls)
-- List of automations per device
-- Enable/disable/create/delete endpoint URLs and payloads
+**Confirmed alarm management endpoints (v2.0 path prefix):**
 
-**Follow-up:** Capture app traffic (iOS/Android proxy via Charles/mitmproxy) while
-listing, enabling, and disabling automations in the AC Infinity app. Document new
-endpoint(s) here and in `docs/SECURITY-RISKS.md`.
+| Endpoint | Method | Body | Notes |
+|---|---|---|---|
+| `/api/version=2.0/dev/getAlarms` | POST | `devId=...` | Returns alarm configurations for device |
+| `/api/version=2.0/dev/addAlarms` | POST | Full form fields (~35 fields) | Creates alarm; `returnData=1` causes server to return created object |
+| `/api/version=2.0/dev/updateAlarmsById` | POST | Full alarm object with `advId`, `advCode=1`, explicit `isOn` | Enable, disable, or edit alarm — `isOn` is explicit (NOT a toggle) |
+| `/api/version=2.0/dev/delAlarmsByid` | POST | Full alarm object | Deletes alarm |
+
+**Key behavioral asymmetry:**
+- `updateGroupsIsOn` (automation): **TOGGLES** — must call `getGroups` first to know
+  current state before deciding whether to call it.
+- `updateAlarmsById` (alarm): **explicit** — send `isOn=0` to disable, `isOn=1` to enable.
+
+**`addGroups` body fields (observed):**
+`advName`, `devId`, `grouptDevType`, `currentMode`, `isOn`, `onSpeed`, `offSpeed`,
+`beginTime`, `endTime`, `groupNums`, `sortType`, `subNumber`, `returnData=1`, ~50 total.
+Server response includes the created object with server-assigned `advId`.
+
+**`addAlarms` body fields (observed):**
+`advName`, `devId`, `currentMode`, `isOn=1`, `advCode=0`, `highVpd`, `highVpdSwitch`,
+`lowVpd`, `lowVpdSwitch`, `alertSound`, `setPort`, `switchHt`, `switchLh`, `switchHt`,
+`switchLh`, `returnData=1`, ~35 total.
+
+**`grouptDevType` values observed:**
+| Value | Device type |
+|---|---|
+| `4` | Inline fan / exhaust |
+| `8` | Clip fan |
+| `48` | Mixed speed group |
+
+**`advCode` lifecycle:**
+Send `advCode=0` on create (`addGroups` / `addAlarms`); server returns `advCode=1`.
+All subsequent calls (`updateAlarmsById`, `delAlarmsByid`) send `advCode=1`.
+
+**VPD units in alarm fields:**
+`highVpd=50` means 5.0 kPa — divide by 10 for display (same scaling factor as `targetVpd`
+in mode settings, not the ÷100 used for live sensor `vpdnums`).
+
+**Alert sound:**
+`alertSound=255` = controller beep enabled; `alertSound=0` = silent.
+
+---
+
+## v2.0 API Endpoints Reference
+
+All endpoints below use the base URL `http://www.acinfinityserver.com/api` and require
+`Content-Type: application/x-www-form-urlencoded; charset=utf-8` plus `token: <appId>` header.
+All use plain HTTP (same accepted risk as legacy endpoints — see Quirk 8 and `docs/SECURITY-RISKS.md`).
+
+### Automation Management
+
+| Endpoint | Method | Request body | Response notes |
+|---|---|---|---|
+| `/api/version=2.0/dev/getGroups` | POST | `devId=<devId>` | Returns list of automation group objects; each has `advId`, `advName`, `isOn`, `onSpeed`, `offSpeed`, etc. |
+| `/api/version=2.0/dev/addGroups` | POST | Full form (~50 fields): `advName`, `devId`, `grouptDevType`, `currentMode`, `isOn`, `onSpeed`, `offSpeed`, `beginTime`, `endTime`, `groupNums`, `sortType`, `subNumber`, `returnData=1`, + others | Returns created automation object with server-assigned `advId` |
+| `/api/version=2.0/dev/updateGroupsIsOn` | POST | `advId=<id>&isDel=0&isflag=1` | Toggles `isOn` state server-side; no explicit `isOn` field in body |
+| `/api/version=2.0/dev/delByid` | POST | `advId=<id>&isDel=1&isflag=1` | Deletes automation by `advId` |
+
+### Alarm Management
+
+| Endpoint | Method | Request body | Response notes |
+|---|---|---|---|
+| `/api/version=2.0/dev/getAlarms` | POST | `devId=<devId>` | Returns list of alarm objects; each has `advId`, `advName`, `isOn`, `advCode`, VPD/temp/humidity thresholds |
+| `/api/version=2.0/dev/addAlarms` | POST | Full form (~35 fields): `advName`, `devId`, `currentMode`, `isOn=1`, `advCode=0`, `highVpd`, `highVpdSwitch`, `lowVpd`, `lowVpdSwitch`, `alertSound`, `setPort`, switch fields, `returnData=1`, + others | Returns created alarm object |
+| `/api/version=2.0/dev/updateAlarmsById` | POST | Full alarm object with `advId`, `advCode=1`, explicit `isOn=0` or `isOn=1` | Enable, disable, or edit alarm; `isOn` is explicit (not a toggle) |
+| `/api/version=2.0/dev/delAlarmsByid` | POST | Full alarm object | Deletes alarm |
+
+### History
+
+| Endpoint | Method | Request body / query | Response notes |
+|---|---|---|---|
+| `/api/log/logdataByAll` | POST | `appId=<token>&devId=<devId>&endTime=<unix>&id=0&orderDirection=1&pageNum=0&pageSize=1000&time=<unix>` | Returns historical readings; `validFrom` in response marks oldest available record. Previously thought broken — confirmed working. |
+| `/api/log/log?devId=<devId>&time=<unix>` | DELETE | No body | Deletes all history logs for device; `time` is current Unix timestamp. After deletion `logdataByAll` returns `validFrom` = deletion timestamp. |
+
+### Grow Stage Templates
+
+| Endpoint | Method | Query params | Response notes |
+|---|---|---|---|
+| `/api/version=2.0/dev/recipe?advVersion=1` | GET | None | Returns grow stage templates: Seedling, Vegetative, Flowering, Plant Kit, Drying |
+
+### Additional Legacy-Path Endpoints
+
+| Endpoint | Method | Request body | Response notes |
+|---|---|---|---|
+| `/api/dev/getDevSetting` | POST | `devId=<devId>&port=<N>` | Richer port settings than `getdevModeSettingList`; includes sensor calibration, load type, plant data, Matter/UUID fields, `portParamData` |
+| `/api/upgrade/getUpgrade` | POST | `fFamily=<family>&firmwareVersion=<ver>&hardwareVersion=<ver>` | Firmware upgrade check |
+| `/api/upgrade/downgrade` | POST | `devMacAddr=<mac>&fFamily=<family>&firmwareVersion=<ver>&hardwareVersion=<ver>` | Firmware downgrade info; returns download URL and release notes |
 
 ---
 
