@@ -80,12 +80,21 @@ _CLEAN_ENV: dict[str, str] = {
     if k not in ("AC_INFINITY_EMAIL", "AC_INFINITY_PASSWORD")
 }
 
+# Cycle 2 P2-C2-F001: the earlier one-liner form chained a compound `with`
+# statement after semicolons, which Python parses as SyntaxError before
+# srv.main() runs. The subprocess used to exit 1 from SyntaxError (matching
+# the rc==1 assertion) and the "authenticate" word appeared in the parser's
+# echo of the source line — so the test passed for the wrong reason.
+# Use a proper multi-line script via subprocess input or `exec()` so the
+# `with` block is valid Python and srv.main() actually executes.
 _BAD_CREDS_SCRIPT = (
-    "from unittest.mock import patch; "
-    "import ac_infinity_mcp.server as srv; "
-    "with patch('ac_infinity_mcp.server.ACInfinityClient') as M: "
-    "  M.return_value.authenticate.return_value = False; "
-    "  srv.main()"
+    "exec(\"\"\"\n"
+    "from unittest.mock import patch\n"
+    "import ac_infinity_mcp.server as srv\n"
+    "with patch('ac_infinity_mcp.server.ACInfinityClient') as M:\n"
+    "    M.return_value.authenticate.return_value = False\n"
+    "    srv.main()\n"
+    "\"\"\")"
 )
 
 
@@ -397,8 +406,15 @@ def test_main_exits_1_bad_credentials() -> None:
         text=True,
         timeout=10,
     )
+    # Defensive checks added during Cycle 2 (P2-C2-F001): pin that we exited
+    # via the auth-failure path, not via a SyntaxError that happened to also
+    # exit 1. The auth-failure log line in main() contains "Failed to
+    # authenticate"; SyntaxError exits would not.
     assert result.returncode == 1
-    assert "auth" in result.stderr.lower() or "authenticate" in result.stderr.lower()
+    assert "SyntaxError" not in result.stderr, (
+        f"_BAD_CREDS_SCRIPT failed to parse — fix the script:\n{result.stderr}"
+    )
+    assert "Failed to authenticate" in result.stderr
 
 
 def test_main_stderr_contains_no_credentials() -> None:
