@@ -16,6 +16,9 @@ MOCK_DEVICE_LEGACY: dict = {
     "devId": "1424979258063367506",
     "online": True,
     "newFrameworkDevice": False,
+    "devPortCount": 8,
+    "firmwareVersion": "3.5.28",
+    "hardwareVersion": "1.0",
     "deviceInfo": {
         "temperature": 2350,
         "temperatureF": 7430,

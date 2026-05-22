@@ -1,13 +1,69 @@
-# Security Risks — Accepted Dependency CVEs
+# Security Risks — Accepted Risks and Dependency CVEs
 
-This file lists CVEs in transitive or direct dependencies that are documented
-as accepted-risk for this project. Each entry explains why the CVE does not
-affect this codebase in practice, and includes a re-evaluation date so the
-ignore is not permanent.
+This file documents two categories of accepted risk:
 
-`pip-audit` is invoked with `--ignore-vuln <ID>` for each entry below. If a
+1. **Accepted Risk — HTTP only:** all upstream AC Infinity API endpoints use plain HTTP.
+2. **Accepted Dependency CVEs:** CVEs in transitive or direct dependencies that are
+   documented as accepted-risk. Each entry explains why the CVE does not affect this
+   codebase in practice, and includes a re-evaluation date so the ignore is not permanent.
+
+`pip-audit` is invoked with `--ignore-vuln <ID>` for each CVE entry below. If a
 new CVE appears in a `pip-audit` run, **do not** blanket-add it here — file
 an issue, evaluate the exposure, and only ignore after a documented finding.
+
+---
+
+## Accepted Risk — HTTP only (no TLS)
+
+**Base URL:** `http://www.acinfinityserver.com/api`
+
+The AC Infinity cloud API communicates over plain HTTP. Session tokens, credentials,
+and sensor data are transmitted unencrypted. This is an upstream limitation of the
+AC Infinity platform; no HTTPS alternative is available. The risk is accepted for
+local/trusted network deployments. See `docs/DEPLOYMENT.md` for HTTPS reverse-proxy
+options if external exposure is a concern.
+
+All endpoints below are subject to this accepted risk. This list was updated via
+network capture (Phase 17, 2026-05-22) to include all confirmed v2.0 endpoints.
+
+### Legacy-path endpoints (confirmed)
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /user/appUserLogin` | Authentication — transmits credentials in plaintext |
+| `POST /user/devInfoListAll` | Device list — response includes user email (`appEmail`) |
+| `POST /log/dataPage` | Historical sensor and port data |
+| `POST /dev/getdevModeSettingList` | Read current port mode settings |
+| `POST /dev/addDevMode` | Write port mode settings |
+| `POST /api/dev/getDevSetting` | Richer port settings (sensor calibration, load type, Matter/UUID fields) |
+| `POST /api/upgrade/getUpgrade` | Firmware upgrade check |
+| `POST /api/upgrade/downgrade` | Firmware downgrade info (returns download URL and release notes) |
+
+### v2.0 automation management endpoints (confirmed via network capture)
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/version=2.0/dev/getGroups` | List all automation groups for a device |
+| `POST /api/version=2.0/dev/addGroups` | Create automation group |
+| `POST /api/version=2.0/dev/updateGroupsIsOn` | Toggle automation on/off state |
+| `POST /api/version=2.0/dev/delByid` | Delete automation |
+
+### v2.0 alarm management endpoints (confirmed via network capture)
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/version=2.0/dev/getAlarms` | List all alarm configurations for a device |
+| `POST /api/version=2.0/dev/addAlarms` | Create alarm |
+| `POST /api/version=2.0/dev/updateAlarmsById` | Enable, disable, or edit alarm |
+| `POST /api/version=2.0/dev/delAlarmsByid` | Delete alarm |
+
+### v2.0 history and template endpoints (confirmed)
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/log/logdataByAll` | Historical readings (alternative to `/log/dataPage`; confirmed working) |
+| `DELETE /api/log/log?devId=...&time=...` | Delete all history logs for a device |
+| `GET /api/version=2.0/dev/recipe?advVersion=1` | Grow stage templates (Seedling, Vegetative, Flowering, Plant Kit, Drying) |
 
 ---
 

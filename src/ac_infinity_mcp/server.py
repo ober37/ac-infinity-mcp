@@ -188,6 +188,10 @@ async def discover_devices() -> str:
                 "device_id": d.get("devCode"),
                 "device_name": d.get("devName"),
                 "status": "online" if d.get("online") else "offline",
+                "device_type": d.get("devType"),
+                "port_count": d.get("devPortCount"),
+                "firmware_version": d.get("firmwareVersion"),
+                "hardware_version": d.get("hardwareVersion"),
             }
             for d in devices
         ]
