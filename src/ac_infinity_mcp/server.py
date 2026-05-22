@@ -937,35 +937,72 @@ def _get_port_name_from_device(device: dict | None, port: int) -> str:
     return _sanitize_api_string(raw_name, 64) if raw_name else f"Port {port}"
 
 
-def _build_advance_conflict_response(
-    device_id: str, port: int, port_name: str
+async def _build_advance_conflict_response(
+    device_id: str, dev_id: object, port: int, port_name: str
 ) -> str:
-    """Build a structured ADVANCE_AUTOMATION conflict response for write tools.
+    """Build a structured ADVANCE_AUTOMATION conflict response for write tools."""
+    try:
+        raw = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
+        automations = _group_automations(raw)
+        governing = next(
+            (a for a in automations if a.get("enabled") or a.get("currently_running")),
+            automations[0] if automations else None,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Could not fetch automations for conflict response (device=%s): %s", device_id, exc
+        )
+        governing = None
 
-    The automation management API endpoints are not yet confirmed — automation name
-    and co-governed ports are not available until network capture is done (see Quirk 18
-    in docs/API.md). Returns a fully structured conflict response with all fields present.
-    """
-    summary = (
-        f"{port_name} (Port {port}) is under Advance Automation control. "
-        "Your change requires resolving this conflict first."
-    )
+    if governing:
+        auto_name = governing["name"]
+        auto_id = governing["automation_id"]
+        summary = (
+            f"{port_name} (Port {port}) is governed by \"{auto_name}\"."
+            " Your change requires resolving this conflict first."
+        )
+        opt1: dict = {
+            "description": (
+                f"Disable \"{auto_name}\", lock co-governed ports to their current "
+                "settings, then apply your change."
+            ),
+            "tool": "break_out_of_automation",
+            "instruction": (
+                f"Call break_out_of_automation(device_id='{device_id}', port={port}, "
+                "dry_run=True) to preview this option."
+            ),
+            "available": True,
+        }
+    else:
+        auto_name = None
+        auto_id = None
+        summary = (
+            f"{port_name} (Port {port}) is under Advance Automation control."
+            " Your change requires resolving this conflict first."
+        )
+        opt1 = {
+            "description": "Break the port out of automation and lock co-governed ports.",
+            "tool": "break_out_of_automation",
+            "instruction": (
+                f"Call break_out_of_automation(device_id='{device_id}', port={port}, "
+                "dry_run=True) to preview this option."
+            ),
+            "available": True,
+        }
+
     return json.dumps({
         "conflict": "ADVANCE_AUTOMATION",
         "summary": summary,
         "target_port": f"{port_name} (Port {port})",
-        "automation_name": None,
-        "automation_id": None,
+        "automation_name": auto_name,
+        "automation_id": auto_id,
         "co_governed_ports": [],
         "switching_guidance": (
-            "To manage automations, use the AC Infinity app or provide a network capture "
-            "to enable the automation management tools."
+            "To switch automations: call disable_advance_automation on the current one, "
+            "then enable_advance_automation on the desired one."
         ),
         "options": {
-            "1_break_out_manually": {
-                "available": False,
-                "status": "requires_automation_api_discovery",
-            },
+            "1_break_out_manually": opt1,
             "2_edit_automation": {
                 "available": False,
                 "status": "not_yet_implemented",
@@ -1313,7 +1350,8 @@ async def set_port_speed(
         return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
     except ACInfinityAdvanceConflictError:
         port_name = _get_port_name_from_device(device, port)
-        return _build_advance_conflict_response(device_id, port, port_name)
+        dev_id = device.get("devId") if device else None
+        return await _build_advance_conflict_response(device_id, dev_id, port, port_name)
     except ACInfinityDeviceError as e:
         logger.warning("Device error in set_port_speed (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({"error": str(e)})
@@ -1396,7 +1434,8 @@ async def set_port_on(
         return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
     except ACInfinityAdvanceConflictError:
         port_name = _get_port_name_from_device(device, port)
-        return _build_advance_conflict_response(device_id, port, port_name)
+        dev_id = device.get("devId") if device else None
+        return await _build_advance_conflict_response(device_id, dev_id, port, port_name)
     except ACInfinityDeviceError as e:
         logger.warning("Device error in set_port_on (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({"error": str(e)})
@@ -1485,7 +1524,8 @@ async def set_port_off(
         return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
     except ACInfinityAdvanceConflictError:
         port_name = _get_port_name_from_device(device, port)
-        return _build_advance_conflict_response(device_id, port, port_name)
+        dev_id = device.get("devId") if device else None
+        return await _build_advance_conflict_response(device_id, dev_id, port, port_name)
     except ACInfinityDeviceError as e:
         logger.warning("Device error in set_port_off (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({"error": str(e)})
@@ -1597,7 +1637,8 @@ async def set_vpd_automation(
         return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
     except ACInfinityAdvanceConflictError:
         port_name = _get_port_name_from_device(device, port)
-        return _build_advance_conflict_response(device_id, port, port_name)
+        dev_id = device.get("devId") if device else None
+        return await _build_advance_conflict_response(device_id, dev_id, port, port_name)
     except ACInfinityDeviceError as e:
         logger.warning(
             "Device error in set_vpd_automation (device=%s port=%s): %s",
@@ -1702,7 +1743,8 @@ async def set_temperature_automation(
         return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
     except ACInfinityAdvanceConflictError:
         port_name = _get_port_name_from_device(device, port)
-        return _build_advance_conflict_response(device_id, port, port_name)
+        dev_id = device.get("devId") if device else None
+        return await _build_advance_conflict_response(device_id, dev_id, port, port_name)
     except ACInfinityDeviceError as e:
         logger.warning(
             "Device error in set_temperature_automation (device=%s port=%s): %s",
@@ -1806,7 +1848,8 @@ async def set_humidity_automation(
         return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
     except ACInfinityAdvanceConflictError:
         port_name = _get_port_name_from_device(device, port)
-        return _build_advance_conflict_response(device_id, port, port_name)
+        dev_id = device.get("devId") if device else None
+        return await _build_advance_conflict_response(device_id, dev_id, port, port_name)
     except ACInfinityDeviceError as e:
         logger.warning(
             "Device error in set_humidity_automation (device=%s port=%s): %s",
@@ -1958,7 +2001,8 @@ async def set_port_mode(
         return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
     except ACInfinityAdvanceConflictError:
         port_name = _get_port_name_from_device(device, port)
-        return _build_advance_conflict_response(device_id, port, port_name)
+        dev_id = device.get("devId") if device else None
+        return await _build_advance_conflict_response(device_id, dev_id, port, port_name)
     except ACInfinityDeviceError as e:
         logger.warning("Device error in set_port_mode (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({"error": str(e)})
@@ -2095,7 +2139,8 @@ async def apply_grow_stage_template(
         return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
     except ACInfinityAdvanceConflictError:
         port_name = _get_port_name_from_device(device, port)
-        return _build_advance_conflict_response(device_id, port, port_name)
+        dev_id = device.get("devId") if device else None
+        return await _build_advance_conflict_response(device_id, dev_id, port, port_name)
     except ACInfinityDeviceError as e:
         logger.warning(
             "Device error in apply_grow_stage_template (device=%s port=%s stage=%s): %s",
