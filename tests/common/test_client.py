@@ -206,7 +206,7 @@ def test_parse_history_record_port_names(client):
      "humidity": 0, "vpdNums": 0, "portSpead": 0, "portStatus": 0, "devPortCount": 1},
 ])
 def test_parse_history_record_raises_typed_error_on_malformed_input(client, bad_record):
-    """Structural errors in the upstream record convert to ACInfinityAPIError (P3-F011, P2-C2-F007)."""
+    """Upstream structural errors → ACInfinityAPIError (P3-F011, P2-C2-F007)."""
     with pytest.raises(ACInfinityAPIError, match="malformed history record"):
         client.parse_history_record(bad_record)
 
@@ -224,7 +224,7 @@ def test_parse_history_record_raises_typed_error_on_malformed_input(client, bad_
     }},
 ])
 def test_parse_device_data_raises_typed_error_on_malformed_input(client, bad_device):
-    """Structural errors in the upstream device dict convert to ACInfinityAPIError (P3-F011, P2-C2-F007)."""
+    """Upstream structural errors in device dict → ACInfinityAPIError (P3-F011, P2-C2-F007)."""
     with pytest.raises(ACInfinityAPIError, match="malformed device data"):
         client.parse_device_data(bad_device)
 

@@ -272,7 +272,8 @@ async def test_typed_exception_text_does_not_leak_to_mcp_response(
     ("Warning", "WARNING", False),
     # Invalid → INFO with warn flag (P2-C2-F003)
     ("BOGUS", "INFO", True),
-    ("", "INFO", False),  # empty falls back to INFO default (no warn — operator didn't try anything)
+    # Empty / None fall back to INFO default — operator didn't try anything, no warn
+    ("", "INFO", False),
     (None, "INFO", False),
     ("trace", "INFO", True),
     ("verbose", "INFO", True),
@@ -288,6 +289,7 @@ def test_resolve_log_level(raw, expected_level, expected_warn):
 def test_credential_redactor_installed_on_root_handlers():
     """P2-C2-F006: pin that the formatter is actually attached, not just constructible."""
     import logging
+
     from ac_infinity_mcp.server import _CredentialRedactingFormatter
     handlers = logging.getLogger().handlers
     assert handlers, "root logger has no handlers — install loop never ran"
@@ -314,6 +316,7 @@ def test_parse_device_data_drops_appEmail():
 async def test_more_read_tools_do_not_echo_appEmail(mock_client, caplog, tool_name, args):
     """Extends the appEmail filter coverage to historical/analytics tools."""
     import logging
+
     import ac_infinity_mcp.server as server_module
     tool = getattr(server_module, tool_name)
     mock_client.get_devices.return_value = [_device_with_pii()]
