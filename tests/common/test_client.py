@@ -637,6 +637,23 @@ def test_get_historical_data_single_page(authed_client):
 
 
 @responses_lib.activate
+def test_get_historical_data_always_sends_pageNum_1(authed_client):
+    """docs/API.md Quirk 3: pageNum is server-ignored; the client always sends 1.
+
+    No prior test inspected the request body to confirm this — a regression
+    to pageNum=2 would have failed in subtle ways at runtime but passed CI.
+    P2-F005.
+    """
+    responses_lib.add(responses_lib.POST, HISTORY_URL, json=HISTORY_PAGE_1, status=200)
+    authed_client.get_historical_data(
+        dev_id="12345", start_timestamp=1714000000, end_timestamp=1714086400,
+    )
+    body = responses_lib.calls[0].request.body
+    assert "pageNum=1" in body
+    assert "pageNum=2" not in body
+
+
+@responses_lib.activate
 def test_get_historical_data_pagination(authed_client):
     base_ts = 1714000000
     page1 = {
