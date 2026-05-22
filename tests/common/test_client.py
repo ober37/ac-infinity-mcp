@@ -556,8 +556,15 @@ def test_call_with_token_refresh_serializes_concurrent_401s(authed_client):
             threads = [threading.Thread(target=call) for _ in range(n_threads)]
             for t in threads:
                 t.start()
+            # Bound the join — a deadlock-introducing regression in the auth_lock
+                # path could hang the whole CI run otherwise. Real wall-clock here
+            # is ~50ms; 10s gives generous slack on a loaded shared runner (P2-F013).
             for t in threads:
-                t.join()
+                t.join(timeout=10.0)
+                assert not t.is_alive(), (
+                    "Token-refresh thread did not complete within 10s — possible "
+                    "deadlock in _call_with_token_refresh"
+                )
 
     assert errors == []
     assert len(results) == n_threads
