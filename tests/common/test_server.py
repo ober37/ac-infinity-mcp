@@ -2187,6 +2187,8 @@ async def test_set_vpd_automation_target_too_high(mock_client):
         result = await set_vpd_automation("C58ZA", 1, 3.1)
     data = json.loads(result)
     assert "error" in data
+    # P2-C2-F009: pin that the bounds-check fired, not some downstream error
+    assert "3.0" in data["error"] or "3.1" in data["error"]
 
 
 async def test_set_vpd_automation_boundary_min_valid(mock_client):
@@ -2313,6 +2315,7 @@ async def test_set_temperature_automation_out_of_range(mock_client):
         result = await set_temperature_automation("C58ZA", 1, -1.0, 30.0)
     data = json.loads(result)
     assert "error" in data
+    assert "between 0 and 50" in data["error"]  # P2-C2-F009
 
 
 async def test_set_temperature_automation_max_out_of_range(mock_client):
@@ -2320,6 +2323,7 @@ async def test_set_temperature_automation_max_out_of_range(mock_client):
         result = await set_temperature_automation("C58ZA", 1, 20.0, 51.0)
     data = json.loads(result)
     assert "error" in data
+    assert "between 0 and 50" in data["error"]  # P2-C2-F009
 
 
 async def test_set_temperature_automation_device_not_found(mock_client):
@@ -2438,6 +2442,7 @@ async def test_set_humidity_automation_out_of_range(mock_client):
         result = await set_humidity_automation("C58ZA", 1, -1.0, 70.0)
     data = json.loads(result)
     assert "error" in data
+    assert "between 0 and 100" in data["error"]  # P2-C2-F009
 
 
 async def test_set_humidity_automation_max_out_of_range(mock_client):
@@ -2445,6 +2450,7 @@ async def test_set_humidity_automation_max_out_of_range(mock_client):
         result = await set_humidity_automation("C58ZA", 1, 50.0, 101.0)
     data = json.loads(result)
     assert "error" in data
+    assert "between 0 and 100" in data["error"]  # P2-C2-F009
 
 
 async def test_set_humidity_automation_device_not_found(mock_client):
