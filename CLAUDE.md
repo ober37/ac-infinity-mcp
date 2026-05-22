@@ -85,6 +85,27 @@ Run each command and confirm the expected output before checking the box:
 
 **Failure at any gate → fix → restart from Gate 1.**
 
+### Quality Cycle (every 5 phases, or before any major release)
+
+A standard PR Gate Loop covers the code in the PR. A **Quality Cycle** is a
+heavier independent pass that audits the entire codebase by launching three
+cold subagent personas in parallel — Senior Python Developer, QA Engineer,
+Cyber Security Engineer — each with a discipline-specific checklist. The
+personas don't see each other's findings until consolidation, which is
+what catches the long-tail bugs a single reviewer can't see (Phase 16
+found 80+ unique findings doing this; Lesson 11 in PROJECT_REPORT.md
+explains why).
+
+Run a Quality Cycle when:
+- The PR introduces > 1000 LOC of new code, OR
+- 5 phases have passed since the last Quality Cycle, OR
+- A user-facing release is being prepared.
+
+The Quality Cycle workflow is in `.claude/plans/i-would-like-to-nested-donut.md`
+(the Phase 16 plan file) and tracks findings in `.claude/REVIEW_FINDINGS.md`
+(gitignored). Re-run the three personas until convergence (Cycle N returns
+0 findings). The plan caps at 3 cycles; user escalation if more are needed.
+
 ---
 
 ## Code Standards
@@ -92,11 +113,33 @@ Run each command and confirm the expected output before checking the box:
 - Python 3.11+, type annotations on all public functions
 - `ruff` format enforced, `line-length = 100`
 - No `print()` in library code — `logging` only
-- No credentials in log output at any level
-- `tenacity` retry on all external HTTP calls
+- No credentials in log output at any level — the credential-redacting
+  formatter installed in `server.py` is defense in depth, not a primary
+  control. Don't `logger.error("%s", payload)` for any dict that might
+  contain credentials.
+- No upstream-API exception text returned to the MCP client via `str(e)`.
+  Use the three-branch typed-except pattern: `ACInfinityAuthError` →
+  friendly auth message + `"detail": "see server logs"`; `ACInfinityAPIError`
+  → generic + `"detail": "see server logs"`; `ACInfinityDeviceError` → may
+  return `str(e)` because the messages are self-constructed actionable
+  guidance (loadType/modeType hints).
+- `tenacity` retry on all external HTTP calls. Writes retry on
+  `ConnectionError` only — `Timeout` is intentionally excluded because the
+  server may have processed the write before the timeout, so retry could
+  double-apply state.
 - `asyncio.to_thread()` for all blocking operations in async context
 - 1.5s rate limit between write API calls (enforced in `client.py`)
 - All write tools support `dry_run=True` parameter
+
+### Bulk replacements
+
+When applying the same correction to many sites (e.g. "replace `str(e)` in
+error responses everywhere"), grep for the **symptom** (any `str(e)` in a
+JSON response that crosses a tool boundary) rather than the **source-text
+pattern** you started with. Phase 16 found three cycles of the same leak
+because each pass only caught the syntactic shape of the previous pass's
+target, missing analogues with different wrappers. See PROJECT_REPORT.md
+Lesson 12.
 
 ---
 
