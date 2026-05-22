@@ -64,12 +64,31 @@ class ACInfinityClient:
 
         Held under a lock so concurrent writers serialize correctly — without it,
         parallel tool calls can pass the elapsed-time check simultaneously and
-        slam the API back-to-back.
+        slam the API back-to-back. _last_write_time is updated under the same
+        lock so concurrent waiters see the latest completion timestamp as soon
+        as the prior write returns.
         """
         with self._write_lock:
             elapsed = time.monotonic() - self._last_write_time
             if elapsed < 1.5:
                 time.sleep(1.5 - elapsed)
+            # Provisionally mark the start time so concurrent waiters in this
+            # method also serialize; the precise completion time is rewritten
+            # by _mark_write_completed() once the POST returns.
+            self._last_write_time = time.monotonic()
+
+    def _mark_write_completed(self) -> None:
+        """Update _last_write_time to reflect the actual write completion.
+
+        Called immediately after the upstream POST returns (success or HTTP
+        error). The pre-POST update inside _enforce_write_rate_limit() set
+        the timestamp at the *start* of the call; rewriting it here ensures
+        the next write's 1.5s gap is measured from the prior call's
+        completion, not its start. Without this, an in-flight 500ms POST
+        would leave only ~1.0s of gap before the next caller proceeded,
+        risking a 403 rate-limit response from the upstream.
+        """
+        with self._write_lock:
             self._last_write_time = time.monotonic()
 
     @retry(
@@ -480,9 +499,14 @@ class ACInfinityClient:
         max_attempts = 3
         for attempt in range(1, max_attempts + 1):
             self._enforce_write_rate_limit()
-            resp = self.session.post(
-                self.ADD_DEV_MODE_ENDPOINT, data=payload, headers=headers, timeout=10
-            )
+            try:
+                resp = self.session.post(
+                    self.ADD_DEV_MODE_ENDPOINT, data=payload, headers=headers, timeout=10
+                )
+            finally:
+                # Anchor the next rate-limit gap from the POST's completion
+                # (or error) rather than its start (P1-F015).
+                self._mark_write_completed()
             resp.raise_for_status()
 
             write_result = resp.json()

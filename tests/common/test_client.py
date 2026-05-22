@@ -296,6 +296,31 @@ def test_enforce_write_rate_limit_sleeps_when_elapsed_less_than_1_5s(client, mon
     assert len(sleep_calls) == 1  # no additional sleep
 
 
+def test_mark_write_completed_anchors_next_gap_from_post_return(client, monkeypatch):
+    """_last_write_time is reset after the POST returns so the next gap is measured
+    from completion, not start (P1-F015).
+    """
+    fake_now = [100.0]
+
+    def fake_monotonic() -> float:
+        return fake_now[0]
+
+    monkeypatch.setattr("ac_infinity_mcp.client.time.monotonic", fake_monotonic)
+    monkeypatch.setattr("ac_infinity_mcp.client.time.sleep", lambda _: None)
+
+    client._last_write_time = 0.0
+    client._enforce_write_rate_limit()
+    start_ts = client._last_write_time
+
+    # Simulate a 500ms POST
+    fake_now[0] += 0.5
+    client._mark_write_completed()
+    completion_ts = client._last_write_time
+
+    assert completion_ts == start_ts + 0.5
+    assert completion_ts == fake_now[0]
+
+
 def test_enforce_write_rate_limit_lock_serializes_concurrent_writes(client, monkeypatch):
     """Concurrent rate-limit calls must serialize via the lock.
 
