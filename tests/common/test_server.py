@@ -3930,8 +3930,7 @@ async def test_break_out_confirm_name_case_insensitive(mock_client):
             confirm_automation_name="MODERATE AIRFLOW"  # uppercase should match
         )
     data = json.loads(result)
-    # Should succeed (not an error from name mismatch)
-    assert "error" not in data or "does not match" not in data.get("error", "")
+    assert data.get("action") == "break_out"
 
 
 # ============ dry_run_never_writes parametrize ============
@@ -3970,3 +3969,92 @@ async def test_dry_run_never_writes(tool_fn, kwargs, mock_client):
     mock_client.create_advance_automation.assert_not_called()
     mock_client.delete_advance_automation.assert_not_called()
     mock_client.set_port_mode.assert_not_called()
+
+
+# ============ Live-path tests (Fix 5) ============
+
+async def test_enable_advance_automation_live_calls_once(mock_client):
+    """Live enable sends exactly one toggle regardless of adv_ids count."""
+    import copy
+    automations = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST)
+    for e in automations:
+        if e["advName"] == "Moderate Airflow":
+            e["isOn"] = 0  # currently disabled
+    mock_client.get_advance_automations.return_value = automations
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await enable_advance_automation("C58ZA", "1342758", dry_run=False)
+    data = json.loads(result)
+    assert data.get("sent") is True
+    assert mock_client.enable_advance_automation.call_count == 1
+
+
+async def test_create_advance_automation_live(mock_client):
+    mock_client.create_advance_automation.return_value = {"advId": 9999}
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation("C58ZA", "Test Auto", on_speed=5, dry_run=False)
+    data = json.loads(result)
+    assert data.get("sent") is True
+    assert data.get("automation_id") == 9999
+    mock_client.create_advance_automation.assert_called_once()
+
+
+async def test_delete_advance_automation_live_disables_first(mock_client):
+    """Enabled automation: disable first (once), then delete each adv_id."""
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await delete_advance_automation("C58ZA", "1342758", dry_run=False)
+    data = json.loads(result)
+    assert data.get("sent") is True
+    assert data.get("was_enabled") is True
+    mock_client.disable_advance_automation.assert_called()
+    mock_client.delete_advance_automation.assert_called()
+
+
+async def test_get_advance_automation_no_schedule_sentinel(mock_client):
+    """beginTime=255 (v2.0 no-schedule) → begin_time is None in response."""
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        # "Moderate Airflow" has beginTime=255, endTime=255
+        result = await get_advance_automation("C58ZA", "1342758")
+    data = json.loads(result)
+    assert data.get("schedule", {}).get("begin_time") is None
+    assert data.get("schedule", {}).get("end_time") is None
+
+
+# ============ _sanitize_api_string (Fix 4) ============
+
+def test_sanitize_api_string_strips_cc_cf_categories():
+    """Cc characters (ASCII control chars) and Cf (format chars) are stripped via unicodedata."""
+    from ac_infinity_mcp.server import _sanitize_api_string
+    assert _sanitize_api_string("Hello\x00World") == "HelloWorld"
+    assert _sanitize_api_string("Test\x1fName") == "TestName"
+
+
+def test_sanitize_api_string_strips_format_chars():
+    """Cf characters (Unicode format chars like soft-hyphen) are stripped."""
+    from ac_infinity_mcp.server import _sanitize_api_string
+    # Soft hyphen (U+00AD) is Cf category
+    assert _sanitize_api_string("He­llo") == "Hello"
+
+
+def test_sanitize_api_string_preserves_cjk():
+    """CJK and other non-ASCII printable characters are preserved."""
+    from ac_infinity_mcp.server import _sanitize_api_string
+    assert _sanitize_api_string("日本語テスト") == "日本語テスト"
+    assert _sanitize_api_string("한국어") == "한국어"
+    assert _sanitize_api_string("中文名称") == "中文名称"
+
+
+def test_sanitize_api_string_empty_fallback():
+    """Empty result after stripping returns '(unnamed)'."""
+    from ac_infinity_mcp.server import _sanitize_api_string
+    assert _sanitize_api_string("\x00\x01\x02") == "(unnamed)"
+    assert _sanitize_api_string("") == "(unnamed)"
+    assert _sanitize_api_string(None) == "(unnamed)"
+
+
+# ============ _format_schedule_time v2.0 sentinel (Fix 2) ============
+
+def test_format_schedule_time_255_sentinel():
+    """255 (v2.0 no-schedule) → None, same as 65535."""
+    assert _format_schedule_time(255) is None

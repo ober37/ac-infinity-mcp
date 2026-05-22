@@ -89,6 +89,79 @@ network capture (Phase 17, 2026-05-22) to include all confirmed v2.0 endpoints.
 
 ---
 
+---
+
+## Pre-existing Transitive / Dev-tool CVEs (documented 2026-05-22)
+
+The following 14 CVEs were identified in a `pip-audit` run on 2026-05-22 as part of
+the Phase 17 Gate 2 review. None are exploitable via this server's code paths.
+They are **documented here for tracking** but are NOT added to the `--ignore-vuln`
+list — each requires an explicit decision before ignoring. Re-evaluate when a fix
+becomes available in the dependency tree.
+
+### cryptography — PYSEC-2026-36, PYSEC-2026-35
+
+- **Package:** `cryptography` (transitive via `mcp` SDK)
+- **CVEs:** PYSEC-2026-36 (fix: 46.0.7), PYSEC-2026-35 (fix: 46.0.6)
+- **Exposure:** Transitive dependency — not imported directly by this server.
+  Vulnerability affects internal cryptography primitives not invoked by our code paths.
+- **Re-evaluation:** 2026-08-22 — bump `mcp` when upstream updates to cryptography ≥ 46.0.7.
+
+### idna — CVE-2026-45409
+
+- **Package:** `idna` (transitive via `requests`)
+- **CVE:** CVE-2026-45409 (fix: 3.15)
+- **Exposure:** Transitive dependency for hostname encoding. This server's HTTP calls
+  only connect to `www.acinfinityserver.com` (a simple ASCII hostname); the IDNA
+  vulnerability (malformed label handling) is not reachable.
+- **Re-evaluation:** 2026-08-22 — upgrade `requests` or `idna` directly once 3.15 is
+  available in the dependency tree.
+
+### pip — CVE-2026-3219, CVE-2026-6357
+
+- **Package:** `pip` (dev tool — not a runtime dependency)
+- **CVEs:** CVE-2026-3219 (fix: 26.1), CVE-2026-6357 (fix: 26.1)
+- **Exposure:** Dev-time only. `pip` is not imported or used by the server at runtime.
+  Upgrade `pip` in the build/dev environment: `python3 -m pip install --upgrade pip`.
+- **Re-evaluation:** 2026-08-22.
+
+### pygments — CVE-2026-4539
+
+- **Package:** `pygments` (dev tool — pulled in by rich/IPython for terminal output)
+- **CVE:** CVE-2026-4539 (fix: 2.20.0)
+- **Exposure:** Dev-time only. `pygments` is not imported or used at runtime.
+- **Re-evaluation:** 2026-08-22.
+
+### python-multipart — CVE-2026-40347, CVE-2026-42561
+
+- **Package:** `python-multipart` (transitive via `mcp` → `starlette`)
+- **CVEs:** CVE-2026-40347 (fix: 0.0.26), CVE-2026-42561 (fix: 0.0.27)
+- **Exposure:** Transitive via `mcp` SDK's HTTP/SSE transport. This server runs
+  **stdio transport only** — the multipart parsing code paths are never invoked.
+- **Re-evaluation:** 2026-08-22 — upgrade when `mcp` bumps its `starlette`/
+  `python-multipart` pins.
+
+### setuptools — PYSEC-2022-43012, PYSEC-2025-49, CVE-2024-6345
+
+- **Package:** `setuptools` (build/install tool — not a runtime dependency)
+- **CVEs:** PYSEC-2022-43012 (fix: 65.5.1), PYSEC-2025-49 (fix: 78.1.1),
+  CVE-2024-6345 (fix: 70.0.0)
+- **Exposure:** Build-time only. `setuptools` is used during package installation;
+  it is not imported at runtime.
+- **Mitigation:** Upgrade in the build environment: `pip install --upgrade setuptools`.
+- **Re-evaluation:** 2026-08-22.
+
+### starlette — PYSEC-2026-161
+
+- **Package:** `starlette` (transitive via `mcp` SDK)
+- **CVE:** PYSEC-2026-161 (fix: 1.0.1)
+- **Exposure:** Transitive via `mcp` SDK's HTTP/SSE transport path. This server
+  uses **stdio transport only** — the affected starlette request-handling code
+  paths are never reached.
+- **Re-evaluation:** 2026-08-22 — upgrade when `mcp` bumps its starlette pin.
+
+---
+
 ## How to add a new accepted CVE
 
 1. Run `pip-audit` and capture the CVE ID + package.

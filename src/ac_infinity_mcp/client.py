@@ -570,7 +570,7 @@ class ACInfinityClient:
 
     # ============ v2.0 Automation Management Methods ============
 
-    def _v2_headers(self) -> dict:
+    def _v2_headers(self) -> dict[str, str]:
         """Build the additional headers required for v2.0 API endpoints.
 
         The v2.0 API validates several app-identity headers that the legacy API
@@ -613,7 +613,9 @@ class ACInfinityClient:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type(requests.exceptions.ConnectionError),
+        retry=retry_if_exception_type(
+            (requests.exceptions.Timeout, requests.exceptions.ConnectionError)
+        ),
         reraise=True,
     )
     def _get_advance_automations_inner(self, dev_id: str) -> list[dict]:
@@ -658,6 +660,14 @@ class ACInfinityClient:
             self._enable_advance_automation_inner, dev_id, adv_id
         )
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        # ConnectionError fires before the request reaches the server — safe to retry.
+        # Timeout excluded: server may have processed the write; retrying risks double-apply.
+        retry=retry_if_exception_type(requests.exceptions.ConnectionError),
+        reraise=True,
+    )
     def _enable_advance_automation_inner(self, dev_id: str, adv_id: int) -> dict:
         """POST /api/version=2.0/dev/updateGroupsIsOn — toggles isOn state."""
         if not self.token:
@@ -705,6 +715,12 @@ class ACInfinityClient:
             self._disable_advance_automation_inner, dev_id, adv_id
         )
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(requests.exceptions.ConnectionError),
+        reraise=True,
+    )
     def _disable_advance_automation_inner(self, dev_id: str, adv_id: int) -> dict:
         """POST /api/version=2.0/dev/updateGroupsIsOn — toggles isOn state (same body as enable)."""
         if not self.token:
@@ -750,6 +766,12 @@ class ACInfinityClient:
             self._create_advance_automation_inner, dev_id, payload
         )
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(requests.exceptions.ConnectionError),
+        reraise=True,
+    )
     def _create_advance_automation_inner(self, dev_id: str, payload: dict) -> dict:
         """POST /api/version=2.0/dev/addGroups — creates automation, returns created object."""
         if not self.token:
@@ -794,6 +816,12 @@ class ACInfinityClient:
             self._delete_advance_automation_inner, dev_id, adv_id
         )
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(requests.exceptions.ConnectionError),
+        reraise=True,
+    )
     def _delete_advance_automation_inner(self, dev_id: str, adv_id: int) -> dict:
         """POST /api/version=2.0/dev/delByid — deletes automation entry."""
         if not self.token:

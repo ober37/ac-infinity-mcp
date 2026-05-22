@@ -196,17 +196,17 @@ def _group_automations(raw_entries: list[dict]) -> list[dict]:
     # Preserve insertion order so the list is stable across calls.
     groups: dict[str, list[dict]] = {}
     for entry in raw_entries:
-        name = entry.get("advName", "")
+        name = entry.get("advName") or ""
         groups.setdefault(name, []).append(entry)
 
     result = []
     for name, entries in groups.items():
         clean_name = _sanitize_api_string(name, 64)
         result.append({
-            "automation_id": entries[0]["advId"],
+            "automation_id": entries[0].get("advId"),
             "name": clean_name,
             "enabled": bool(entries[0].get("isOn", 0)),
-            "adv_ids": [e["advId"] for e in entries],
+            "adv_ids": [e.get("advId") for e in entries],
             "port_groups": [
                 {
                     "adv_id": e["advId"],
@@ -869,7 +869,7 @@ def _format_schedule_time(minutes: int | None) -> str | None:
     silently producing nonsense like "25:00" — a corrupt or unset field is
     indistinguishable from disabled in this context.
     """
-    if minutes is None or minutes == 65535:
+    if minutes is None or minutes == 65535 or minutes == 255:
         return None
     if not (0 <= minutes < 1440):
         return None
@@ -895,7 +895,7 @@ def _parse_schedule_time(time_str: str | None) -> int:
         ) from None
 
 
-def _sanitize_api_string(value: str | None, max_len: int) -> str:
+def _sanitize_api_string(value: str | None, max_len: int = 64) -> str:
     """Strip Unicode control/format characters, truncate to max_len codepoints.
 
     Preserves non-ASCII printable characters (Japanese, Korean, Chinese) — the
@@ -2335,12 +2335,13 @@ async def enable_advance_automation(
                 "sent": False,
             })
 
-        # Live: toggle each adv_id (the API toggles all entries for the same
-        # advName together, but we toggle all explicitly to be safe).
-        for adv_id in found["adv_ids"]:
-            await asyncio.to_thread(
-                _client().enable_advance_automation, str(dev_id), adv_id
-            )
+        # Live: call once with adv_ids[0]. The API's updateGroupsIsOn endpoint
+        # toggles ALL entries sharing the same advName when called with ANY one
+        # of their advId values — calling it N times causes N toggles (a no-op
+        # for even N). One call is the correct behaviour (Fix 1).
+        await asyncio.to_thread(
+            _client().enable_advance_automation, str(dev_id), found["adv_ids"][0]
+        )
 
         return json.dumps({
             "action": "enable",
@@ -2432,10 +2433,12 @@ async def disable_advance_automation(
                 "to_restore": to_restore,
             })
 
-        for adv_id in found["adv_ids"]:
-            await asyncio.to_thread(
-                _client().disable_advance_automation, str(dev_id), adv_id
-            )
+        # Live: call once with adv_ids[0]. The API's updateGroupsIsOn endpoint
+        # toggles ALL entries sharing the same advName on a single call —
+        # calling it N times causes N toggles (a no-op for even N). (Fix 1)
+        await asyncio.to_thread(
+            _client().disable_advance_automation, str(dev_id), found["adv_ids"][0]
+        )
 
         return json.dumps({
             "action": "disable",
@@ -2491,9 +2494,12 @@ async def create_advance_automation(
         On failure returns ``{"error": "..."}``.
     """
     try:
-        if not name or not name.strip():
+        # Validate original name before sanitizing so empty input produces an error
+        # rather than the "(unnamed)" fallback (which is reserved for API-returned data).
+        if not (name or "").strip():
             return json.dumps({"error": "name must not be empty"})
         clean_name = _sanitize_api_string(name, 64)
+        # If sanitizing stripped all printable content (e.g. only control chars), reject it.
         if clean_name == "(unnamed)":
             return json.dumps({"error": "name must not be empty"})
         if not 1 <= on_speed <= 10:
@@ -2672,12 +2678,13 @@ async def delete_advance_automation(
                 "sent": False,
             })
 
-        # If enabled, disable first then delete each adv_id.
+        # If enabled, disable first with a single toggle call (Fix 1: the API
+        # toggles all same-name entries on one call — N calls cause N toggles).
+        # Then delete each adv_id individually (each entry must be explicitly deleted).
         if was_enabled:
-            for adv_id in found["adv_ids"]:
-                await asyncio.to_thread(
-                    _client().disable_advance_automation, str(dev_id), adv_id
-                )
+            await asyncio.to_thread(
+                _client().disable_advance_automation, str(dev_id), found["adv_ids"][0]
+            )
 
         for adv_id in found["adv_ids"]:
             await asyncio.to_thread(
@@ -2868,9 +2875,10 @@ async def break_out_of_automation(
             })
 
         if confirm_automation_name.casefold() != auto_name.casefold():
+            safe_confirm = _sanitize_api_string(confirm_automation_name or "", 64)
             return json.dumps({
                 "error": (
-                    f"confirm_automation_name '{confirm_automation_name}' does not match "
+                    f"confirm_automation_name '{safe_confirm}' does not match "
                     f"governing automation '{auto_name}'. Re-run with the correct name."
                 ),
             })
@@ -2886,12 +2894,12 @@ async def break_out_of_automation(
             })
 
         async with device_lock:
-            # Step A: Disable the automation.
+            # Step A: Disable the automation with a single toggle call (Fix 1: the
+            # API toggles all same-name entries on one call — N calls cause N toggles).
             try:
-                for adv_id in adv_ids:
-                    await asyncio.to_thread(
-                        _client().disable_advance_automation, str(dev_id), adv_id
-                    )
+                await asyncio.to_thread(
+                    _client().disable_advance_automation, str(dev_id), adv_ids[0]
+                )
             except Exception as disable_exc:
                 logger.error(
                     "break_out_of_automation failed at disable step "
@@ -2934,13 +2942,13 @@ async def break_out_of_automation(
                     break
 
             if failed_port is not None:
-                # Attempt rollback: re-enable the automation.
+                # Attempt rollback: re-enable the automation with a single toggle call
+                # (Fix 1: same API behaviour as disable — one call toggles all entries).
                 rollback_succeeded = False
                 try:
-                    for adv_id in adv_ids:
-                        await asyncio.to_thread(
-                            _client().enable_advance_automation, str(dev_id), adv_id
-                        )
+                    await asyncio.to_thread(
+                        _client().enable_advance_automation, str(dev_id), adv_ids[0]
+                    )
                     rollback_succeeded = True
                 except Exception as rb_exc:
                     logger.error(
