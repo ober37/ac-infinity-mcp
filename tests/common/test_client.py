@@ -179,6 +179,32 @@ def test_parse_history_record_port_names(client):
     assert result["ports"][1]["name"] == "Exhaust Fan"
 
 
+@pytest.mark.parametrize("missing_devPortCount", [
+    {},          # field absent entirely
+    {"devPortCount": None},  # field present but null — Quirk 5 documents this
+])
+def test_parse_history_record_devPortCount_null_falls_back_to_8(client, missing_devPortCount):
+    """docs/API.md Quirk 5: devPortCount is often null in history records; fall back to 8.
+
+    A regression to record.get("devPortCount", 8) (which returns None for an
+    explicit-null field rather than the default) would cause range(None) to
+    raise TypeError. P2-F004.
+    """
+    record = {
+        "createTime": 1714000000,
+        "temperature": 0,
+        "fTemperature": 0,
+        "humidity": 0,
+        "vpdNums": 0,
+        "portSpead": 0,
+        "portStatus": 0,
+        **missing_devPortCount,
+    }
+    result = client.parse_history_record(record)
+    assert len(result["ports"]) == 8
+    assert [p["port"] for p in result["ports"]] == list(range(1, 9))
+
+
 # ============ rate limit ============
 
 def test_rate_limit_field_exists(client):
