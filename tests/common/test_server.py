@@ -1571,6 +1571,16 @@ def test_format_schedule_time_none():
     assert _format_schedule_time(None) is None
 
 
+@pytest.mark.parametrize("invalid_minutes", [1440, 1500, 65534, -1, -100])
+def test_format_schedule_time_out_of_range_returns_none(invalid_minutes):
+    """Out-of-range minutes (>= 1440 except sentinel 65535, or negative) → None (P2-F018).
+
+    A corrupt or unset field is indistinguishable from disabled — surfacing
+    None is safer than synthesizing nonsense like "25:00".
+    """
+    assert _format_schedule_time(invalid_minutes) is None
+
+
 # ============ get_port_status ============
 
 async def test_get_port_status_success(mock_client):
@@ -1763,6 +1773,21 @@ async def test_get_port_settings_schedule_window_active(mock_client):
         result = await get_port_settings("C58ZA", 1)
     data = json.loads(result)
     assert data["schedule_window"] == {"start": "08:00", "end": "20:00"}
+
+
+@pytest.mark.parametrize("start,end", [
+    (480, 65535),    # start set, end disabled — partial = no window
+    (65535, 1200),   # start disabled, end set — partial = no window
+    (65535, 65535),  # both disabled — no window
+])
+async def test_get_port_settings_schedule_window_partial_is_none(mock_client, start, end):
+    """A half-configured schedule must return schedule_window=None, not a half-populated dict (P2-F015)."""
+    settings = {**MOCK_MODE_SETTINGS_BASIC, "schedStartTime": start, "schedEndtTime": end}
+    mock_client.get_mode_settings.return_value = settings
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_settings("C58ZA", 1)
+    data = json.loads(result)
+    assert data["schedule_window"] is None
 
 
 async def test_get_port_settings_mode_auto(mock_client):

@@ -647,11 +647,19 @@ _MODE_AT_TYPES: dict[str, int] = {v: k for k, v in _MODE_LABELS.items()}
 
 
 def _format_schedule_time(minutes: int | None) -> str | None:
-    """Convert minutes-since-midnight to HH:MM string. Returns None if disabled (65535)."""
+    """Convert minutes-since-midnight to HH:MM string. Returns None when disabled.
+
+    65535 is the API's disabled-sentinel. Any other out-of-range value
+    (>= 1440 minutes = past 24h, or negative) is treated as None rather than
+    silently producing nonsense like "25:00" — a corrupt or unset field is
+    indistinguishable from disabled in this context.
+    """
     if minutes is None or minutes == 65535:
         return None
+    if not (0 <= minutes < 1440):
+        return None
     h, m = divmod(minutes, 60)
-    return f"{h:02d}:{m % 60:02d}"
+    return f"{h:02d}:{m:02d}"
 
 
 def _parse_schedule_time(time_str: str | None) -> int:
@@ -810,9 +818,12 @@ async def get_port_settings(device_id: str, port: int) -> str:
 
         sched_start = _format_schedule_time(settings.get("schedStartTime"))
         sched_end = _format_schedule_time(settings.get("schedEndtTime"))  # API typo: EndtTime
+        # A half-configured schedule (only start, or only end) is not a meaningful
+        # window — return None rather than {"start": "...", "end": None}, which
+        # forces the caller to interpret a confusing partial state.
         schedule_window = (
             {"start": sched_start, "end": sched_end}
-            if sched_start is not None
+            if sched_start is not None and sched_end is not None
             else None
         )
 
