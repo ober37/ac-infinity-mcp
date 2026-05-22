@@ -207,6 +207,9 @@ tempCodeRunnerFile.py
 .claude/settings*.json
 .claude/projects/
 
+# Local MCP server config (contains credentials)
+.mcp.json
+
 # Local-only working artifacts — project plan, review findings, project
 # report, and any other "internal" docs that should not ship to GitHub.
 # Put new local-only docs here rather than adding more .gitignore entries.
