@@ -24,6 +24,12 @@ an issue, evaluate the exposure, and only ignore after a documented finding.
   ignore from `.github/workflows/ci.yml` and `CLAUDE.md`.
 - **Re-evaluation due:** 2026-08-22 (3 months from acceptance) — check
   upstream advisories quarterly until resolved or scope changes.
+- **Verifying the ignore is still required:** run `pip-audit` *without*
+  the `--ignore-vuln` flag in a clean venv with current pins. If
+  PYSEC-2025-183 does not appear, the patched version is already pulled
+  in and the ignore can be removed. P3-C2-F006 raised this concern after
+  observing that a fresh install showed no findings under current pins;
+  remove the ignore as soon as the next CI run confirms the CVE is gone.
 
 ---
 
