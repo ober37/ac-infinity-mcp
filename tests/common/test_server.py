@@ -174,6 +174,42 @@ def test_parse_device_data_drops_appEmail():
     assert "appEmail" not in parsed
 
 
+# ============ Edge-input device_id and port handling (P2-F014) ============
+#
+# LLMs occasionally hallucinate inputs like "" (empty), "  " (whitespace),
+# or very long strings. Tools must return graceful structured errors rather
+# than crashing or returning success-shaped responses with empty results.
+
+@pytest.mark.parametrize("bad_device_id", ["", "   ", "X" * 1000])
+async def test_tools_handle_edge_device_ids(mock_client, bad_device_id):
+    """Empty / whitespace / oversized device_id returns a structured error."""
+    for tool_name, args in [
+        ("get_device_reading", (bad_device_id,)),
+        ("get_port_status", (bad_device_id, 1)),
+        ("get_port_settings", (bad_device_id, 1)),
+    ]:
+        import ac_infinity_mcp.server as server_module
+        tool = getattr(server_module, tool_name)
+        with patch("ac_infinity_mcp.server.aci_client", mock_client):
+            result = await tool(*args)
+        data = json.loads(result)
+        assert "error" in data, f"{tool_name}({bad_device_id!r}) should error, got {data}"
+        # Bad device_id should produce a "not found" style error, not a traceback
+        assert "Traceback" not in result
+        assert "/Users/" not in result  # no local filesystem leakage
+
+
+async def test_set_port_speed_negative_speed(mock_client):
+    """Negative speed inputs should produce a structured validation error."""
+    from ac_infinity_mcp.server import set_port_speed
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_speed("C58ZA", 1, -1)
+    data = json.loads(result)
+    assert "error" in data
+    # Should not have attempted any client call
+    mock_client.set_port_mode.assert_not_called()
+
+
 # ============ get_device_reading ============
 
 async def test_get_device_reading_success(mock_client):
