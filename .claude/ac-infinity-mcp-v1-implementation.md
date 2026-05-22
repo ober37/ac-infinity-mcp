@@ -679,7 +679,8 @@ Calls `set_vpd_automation`, `set_temperature_automation`, `set_humidity_automati
 ---
 
 ### Phase 15 — Quality Cycle (Second Pass)
-**Status:** Pending
+**Status:** ✅ Complete
+**PR:** [feat(quality): Phase 15 — quality cycle, docs, community files, GitHub hardening](https://github.com/ober37/ac-infinity-mcp/pull/29)
 **Deliverable:** All 16 tools + 3 prompts quality-gated; README + docs/API.md fully updated; 100% coverage; all open GitHub issues resolved
 **Effort:** ~5h | **Sequential after Phase 14 — runs after all planned functionality is complete**
 
@@ -704,6 +705,26 @@ Same structure as Phase 11: two-model review (Sonnet first pass, Opus independen
 - Restart from Pass 1 if any remediation required
 
 **Gate loop:** All 5 gates per CLAUDE.md
+
+**Phase 15 Lessons Learned**
+- **What went well:** Two independent Sonnet review passes (code + security) plus a cold second-model pass caught substantive bugs that had survived all prior phases — particularly the VPD banker's rounding error (present since Phase 13) and the check_vpd_drift alert text giving backwards advice. The PR template with AI model + device fields was a clean design decision. Branch protection setup via gh CLI was straightforward once the exact check names were confirmed from the live commit check-runs endpoint.
+- **Changed from plan:** (1) Opus was unavailable (daily session limit); second-model review used a cold Sonnet instance instead. Attribution noted in PR. (2) Tool count in plan was "16 tools" — corrected to 18 throughout docs. (3) `get_port_activity_report` was missing from docs/API.md (first code review caught this — not in original scope). (4) Phase 15 found 2 HIGH defects (VPD rounding, grade mismatch) and 1 MEDIUM (missing `deviation` field) that required code changes and restarting Gate 4; the quality cycle worked as designed.
+- **Watch out for Phase 16:** (1) Some earlier phases are missing the Investment Time block entirely (check Phases 3–10). (2) The two-model review pattern should be attributed as "Sonnet first pass / cold Sonnet second pass" not "Sonnet/Opus" for Phase 15 specifically — Opus was unavailable. (3) The actual tool count is 18 (not 16) everywhere in the report. (4) Phase 15 found HIGH defects in Phase 13 code (VPD encoding) — note in Section 3 that these were latent defects discovered in the Phase 15 quality pass, not Phase 13 gate loop.
+- **Actual effort vs estimate:** ~3h actual vs ~5h planned — under budget despite finding and fixing HIGH defects.
+- **Investment time:** 2026-05-21 session — ~3h wall-clock from /clear to PR #29 raised.
+- **Defects found:**
+  - [D001] VPD banker's rounding: `round(1.25*10)=12` (should be 13); affected veg stage template and any user-supplied VPD with .X5 pattern | Discovered: Independent second-model review (HIGH) | Severity: high | Resolved: Y
+  - [D002] Grade boundary mismatch: `_grade()` threshold B≥80 but `environment_alert_interpretation` prompt said B=75–89 | Discovered: Independent second-model review (HIGH) | Severity: high | Resolved: Y
+  - [D003] `deviation` field documented in prompt but absent from `check_vpd_drift` response | Discovered: Independent second-model review (MEDIUM) | Severity: medium | Resolved: Y
+  - [D004] check_vpd_drift alert text gave backwards advice: HIGH said "reduce humidity" (wrong — should raise humidity); LOW said "lower fan speed or increase humidity" (wrong — should lower humidity) | Discovered: Independent second-model review (LOW) | Severity: medium | Resolved: Y
+  - [D005] `get_port_activity_report` missing from docs/API.md MCP Tool Reference section | Discovered: First code review pass | Severity: low | Resolved: Y
+
+**Phase 15 Time Investment**
+- **Date:** 2026-05-21
+- **Actual Claude session time:** ~3:00
+- **Projected manual time:** 20h–35h (midpoint ~27h)
+- **Manual estimate basis:** Experienced Python developer. Primary cost drivers: running two independent review passes with remediation cycles, researching correct VPD rounding behavior, writing 9 new docs/API.md tool reference sections, creating 5 community files, configuring branch protection (gh API + correct check name lookup), creating milestones and closing issues, writing tests for new fields.
+- **Multiplier:** ~9x (27h projected midpoint ÷ ~3h actual)
 
 ---
 
