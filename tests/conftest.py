@@ -41,10 +41,11 @@ MOCK_DEVICE_AI_PLUS: dict = {
 }
 
 
-@pytest.fixture(autouse=True)
-def mock_env_vars(monkeypatch):
-    monkeypatch.setenv("AC_INFINITY_EMAIL", "test@example.com")
-    monkeypatch.setenv("AC_INFINITY_PASSWORD", "testpassword123")
+# NOTE: the autouse fixture that injects test credentials lives in
+# tests/common/conftest.py and tests/devices/conftest.py — explicitly NOT here.
+# Putting it at the tests/ root would apply to tests/integration/test_live.py,
+# which depends on the REAL AC_INFINITY_EMAIL / AC_INFINITY_PASSWORD captured
+# from the developer's environment. See P2-F011 in REVIEW_FINDINGS.md.
 
 
 @pytest.fixture
