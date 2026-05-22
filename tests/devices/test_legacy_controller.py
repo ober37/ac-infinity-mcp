@@ -2,7 +2,9 @@
 
 import pytest
 
+from ac_infinity_mcp.client import ACInfinityClient
 from ac_infinity_mcp.controller import ControllerType, build_write_payload, detect_controller_type
+from tests.fixtures.legacy_device_fixtures import LEGACY_HISTORY_RECORD
 from tests.fixtures.mock_mode_settings_legacy import (
     MOCK_MODE_SETTINGS_LEGACY_PORT1,
     MOCK_MODE_SETTINGS_LEGACY_PORT1_FLAT,
@@ -125,6 +127,23 @@ def test_build_write_payload_from_flat_fixture():
     )
     assert result["onSpead"] == 7
     assert "modeSetid" not in result
+
+
+# ============ parse_history_record on the legacy fixture (P2-F020) ============
+
+
+def test_parse_legacy_history_record_decodes_ports():
+    """LEGACY_HISTORY_RECORD encodes port1=speed5 and port2=speed7 in portSpead."""
+    client = ACInfinityClient("test@example.com", "pw")
+    result = client.parse_history_record(LEGACY_HISTORY_RECORD)
+    assert len(result["ports"]) == 4
+    assert result["ports"][0]["speed"] == 5
+    assert result["ports"][0]["on"] is True
+    assert result["ports"][1]["speed"] == 7
+    assert result["ports"][1]["on"] is True
+    # Ports 3 and 4 are idle (nibbles 0)
+    assert result["ports"][2]["on"] is False
+    assert result["ports"][3]["on"] is False
 
 
 # ============ Quirk markers (informational — no runtime effect) ============

@@ -1,6 +1,8 @@
 """Tests for AI+ controller behavior (devType 20+, newFrameworkDevice=True)."""
 
+from ac_infinity_mcp.client import ACInfinityClient
 from ac_infinity_mcp.controller import ControllerType, build_write_payload, detect_controller_type
+from tests.fixtures.ai_plus_device_fixtures import AI_PLUS_HISTORY_RECORD
 from tests.fixtures.mock_mode_settings_ai_plus import (
     MOCK_MODE_SETTINGS_AI_PLUS_PORT1,
     MOCK_MODE_SETTINGS_AI_PLUS_PORT1_FLAT,
@@ -76,3 +78,18 @@ def test_build_write_payload_ai_plus_preserves_surplus_null():
         MOCK_MODE_SETTINGS_AI_PLUS_PORT1, {}, ControllerType.NEW_FRAMEWORK
     )
     assert result["surplus"] is None
+
+
+# ============ parse_history_record on the AI+ fixture (P2-F020) ============
+
+
+def test_parse_ai_plus_history_record_decodes_ports():
+    """AI_PLUS_HISTORY_RECORD has 2 ports with port1=speed5 active, port2 idle."""
+    client = ACInfinityClient("test@example.com", "pw")
+    result = client.parse_history_record(AI_PLUS_HISTORY_RECORD)
+    assert len(result["ports"]) == 2
+    assert result["ports"][0]["speed"] == 5
+    assert result["ports"][0]["on"] is True
+    assert result["ports"][1]["speed"] == 0
+    assert result["ports"][1]["on"] is False
+    assert result["temperature_c"] == 23.5
