@@ -24,17 +24,27 @@ from ac_infinity_mcp.schema import (
 )
 
 _VALID_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
+
+
+def _resolve_log_level(raw: str | None) -> tuple[str, bool]:
+    """Map a raw LOG_LEVEL env value to a valid logging level + warn flag.
+
+    Returns (effective_level, fallback_warning_needed).
+
+    Defensive: a malformed LOG_LEVEL would cause logging.basicConfig to raise
+    ValueError at import, before any error handler can format the failure for
+    the operator. Falls back to INFO and signals that a warning should be
+    emitted once the logger is configured. P3-F007 (Cycle 1); extracted into
+    a function for direct testability in Cycle 2 (P2-C2-F003).
+    """
+    candidate = (raw or "INFO").upper()
+    if candidate not in _VALID_LOG_LEVELS:
+        return "INFO", True
+    return candidate, False
+
+
 _log_level_raw = os.getenv("LOG_LEVEL", "INFO").upper()
-if _log_level_raw not in _VALID_LOG_LEVELS:
-    # Defensive: a malformed LOG_LEVEL would cause logging.basicConfig to raise
-    # ValueError at import, before any error handler can format the failure
-    # for the operator. Fall back to INFO and emit a warning once the logger
-    # is configured. P3-F007.
-    _log_level_effective = "INFO"
-    _log_level_fallback_warning = True
-else:
-    _log_level_effective = _log_level_raw
-    _log_level_fallback_warning = False
+_log_level_effective, _log_level_fallback_warning = _resolve_log_level(_log_level_raw)
 
 logging.basicConfig(level=_log_level_effective)
 logger = logging.getLogger(__name__)
