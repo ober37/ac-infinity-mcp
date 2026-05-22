@@ -119,6 +119,61 @@ async def test_discover_devices_client_not_initialized():
     assert "error" in data
 
 
+# ============ appEmail PII filtering (P2-F003) ============
+#
+# docs/API.md warns that device list responses include the authenticated user's
+# email address in the appEmail field. The read tools must filter it out, and
+# logging must never emit it at any level. These tests pin both contracts.
+
+_PII_EMAIL = "leaked-pii@example.com"
+
+
+def _device_with_pii() -> dict:
+    """A legacy fixture device with appEmail populated, as the real API sends."""
+    from tests.conftest import MOCK_DEVICE_LEGACY
+    return {**MOCK_DEVICE_LEGACY, "appEmail": _PII_EMAIL}
+
+
+@pytest.mark.parametrize(
+    "tool_name,args",
+    [
+        ("discover_devices", ()),
+        ("get_device_reading", ("C58ZA",)),
+        ("get_all_device_readings", ()),
+        ("get_port_status", ("C58ZA", 1)),
+        ("get_port_settings", ("C58ZA", 1)),
+    ],
+)
+async def test_read_tools_do_not_echo_appEmail(mock_client, caplog, tool_name, args):
+    """Read tools must not include the user's appEmail in their JSON output or logs."""
+    import logging
+    import ac_infinity_mcp.server as server_module
+    tool = getattr(server_module, tool_name)
+    mock_client.get_devices.return_value = [_device_with_pii()]
+    mock_client.get_mode_settings.return_value = {
+        "atType": 1, "modeType": 0, "onSpead": 0, "offSpead": 0,
+    }
+
+    with caplog.at_level(logging.DEBUG, logger="ac_infinity_mcp"):
+        with patch("ac_infinity_mcp.server.aci_client", mock_client):
+            result = await tool(*args)
+
+    assert _PII_EMAIL not in result, f"{tool_name} leaked appEmail in its response"
+    for record in caplog.records:
+        assert _PII_EMAIL not in record.getMessage(), (
+            f"{tool_name} leaked appEmail in a log record at level {record.levelname}"
+        )
+
+
+def test_parse_device_data_drops_appEmail():
+    """parse_device_data must not propagate appEmail to its returned dict (P2-F003)."""
+    from ac_infinity_mcp.client import ACInfinityClient
+    client = ACInfinityClient("test@example.com", "pw")
+    parsed = client.parse_device_data(_device_with_pii())
+    assert _PII_EMAIL not in json.dumps(parsed)
+    assert "appEmail" not in parsed
+
+
 # ============ get_device_reading ============
 
 async def test_get_device_reading_success(mock_client):
