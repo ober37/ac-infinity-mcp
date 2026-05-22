@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+# Lock down GITHUB_TOKEN to read-only — neither job needs write access to repo
+# contents, issues, PRs, or anything else. Without this, the workflow inherits
+# the repo's default GITHUB_TOKEN permissions (which under classic settings can
+# be write-all) and a malicious fork PR could exfiltrate the token. P3-C2-F007.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: "Python ${{ matrix.python-version }}"

@@ -84,12 +84,23 @@ want this implemented).
 
 ### Minimal nginx example
 
+Let's Encrypt does not issue certificates for `.local`, `.test`, or other
+ICANN-reserved private TLDs. If you want LE-signed certs, substitute your own
+publicly-resolvable domain. For local-only use, generate a self-signed cert
+with `mkcert` (recommended) or `openssl` and trust it at the OS level.
+
 ```nginx
 server {
     listen 8443 ssl;
     server_name acinfinity.proxy.local;
-    ssl_certificate     /etc/letsencrypt/live/proxy.local/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/proxy.local/privkey.pem;
+
+    # Local-only example: use mkcert to generate a cert trusted by your OS.
+    #   mkcert -install
+    #   mkcert acinfinity.proxy.local
+    # For a publicly-resolvable hostname, replace these paths with the
+    # Let's Encrypt certificate paths after running certbot.
+    ssl_certificate     /etc/nginx/certs/acinfinity.proxy.local.pem;
+    ssl_certificate_key /etc/nginx/certs/acinfinity.proxy.local-key.pem;
 
     location / {
         proxy_pass http://www.acinfinityserver.com;

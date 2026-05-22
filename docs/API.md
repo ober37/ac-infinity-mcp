@@ -1112,14 +1112,17 @@ and `set_humidity_automation` in sequence using the VPD midpoint and full ranges
 | `mid_flower` | 1.60 | 18–25 | 35–55 |
 | `late_flower` | 1.50 | 18–24 | 30–50 |
 
-**Response:** JSON with `vpd`, `temperature`, `humidity` sub-objects, each containing
-`sent`, `controller_type`, and `payload` (when `dry_run=True`). On partial failure,
-`partial_write=True` and `recovery_note` lists what was applied so the caller can revert.
+**Response:** JSON with flat `sent`, `controller_type`, and `payload` (when `dry_run=True`)
+fields. The `vpd`, `temperature`, and `humidity` sub-objects carry the per-target
+display values (`target_kpa`, `min_c`/`max_c`, `min_rh`/`max_rh`) but not their own
+`sent`/`payload` keys. The call is atomic: it succeeds or fails as a single write, so
+there is no partial-failure state to surface — either all the stage's targets land on
+the controller, or the prior state is preserved.
 
 **Encoding:**
-- VPD: `int(target_vpd * 10)` — e.g. 1.25 kPa → stored as 13 (Quirk 4 analogue for writes)
-- Temp/humidity: raw integer — e.g. 20°C → `devLt=20` (no × 100 scaling)
-- Rate limit: 3 sequential writes = minimum 4.5s wall-clock on live writes (Quirk 15)
+- VPD: `int(target_vpd * 10 + 0.5)` — e.g. 1.25 kPa → stored as 13 (round-half-up)
+- Temp/humidity: `int(value + 0.5)` raw integer — e.g. 20°C → `devLt=20` (no × 100 scaling)
+- Rate limit: a single write, so the 1.5s rate gate fires once (Quirk 15)
 
 **AI+ note:** `dry_run=True` is fully supported. `dry_run=False` returns the AI+
 unsupported error before any writes (same as individual automation tools).

@@ -2019,8 +2019,16 @@ def _filter_readings_by_time(
     for reading in readings:
         timestamp_str = reading.get("timestamp", "")
         try:
-            ts_dt = datetime.fromisoformat(timestamp_str.rstrip("Z").replace("+00:00", ""))
-            ts_dt = ts_dt.replace(tzinfo=UTC)
+            # P1-C2-F005: handle both UTC-naive (..."T...Z") and aware (...+HH:MM)
+            # timestamps. The historical-data parser always emits the naive-Z
+            # form today, but a future fixture or hand-crafted payload could
+            # carry a non-UTC offset — converting via astimezone preserves the
+            # instant, where the old .replace(tzinfo=UTC) silently corrupted it.
+            ts_dt = datetime.fromisoformat(timestamp_str.rstrip("Z"))
+            if ts_dt.tzinfo is None:
+                ts_dt = ts_dt.replace(tzinfo=UTC)
+            else:
+                ts_dt = ts_dt.astimezone(UTC)
             reading_time = ts_dt.strftime("%H:%M")
         except (ValueError, AttributeError, TypeError) as e:
             logger.warning("Could not parse timestamp %s: %s", timestamp_str, e)

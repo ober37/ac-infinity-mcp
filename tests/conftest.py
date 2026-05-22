@@ -7,7 +7,13 @@ MOCK_DEVICE_LEGACY: dict = {
     "devCode": "C58ZA",
     "devName": "Test 69 Pro",
     "devType": 11,
-    "devId": 12345,
+    # Per docs/API.md Quirk 7: devId is a string at the top level of device
+    # records (large integer values that lose precision if int()-cast). The
+    # value used here is a representative 19-digit ID matching the real API
+    # shape; the previous int-typed fixture (12345) wouldn't surface a
+    # precision-loss bug if a future caller did int(device["devId"]).
+    # P2-C2-F011.
+    "devId": "1424979258063367506",
     "online": True,
     "newFrameworkDevice": False,
     "deviceInfo": {
