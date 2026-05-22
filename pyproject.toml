@@ -46,4 +46,11 @@ python_version = "3.11"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "--cov=ac_infinity_mcp --cov-report=term-missing --cov-fail-under=85"
+# Live tests are opt-in: contributors who want to exercise them against the
+# real AC Infinity API must pass `-m live` explicitly. CI does not pass it,
+# so even if AC_INFINITY_EMAIL leaked into the workflow env, the suite would
+# still skip these tests (P3-F009).
+addopts = "--cov=ac_infinity_mcp --cov-report=term-missing --cov-fail-under=85 -m 'not live'"
+markers = [
+    "live: tests that hit the real AC Infinity cloud API; opt-in via `-m live`",
+]

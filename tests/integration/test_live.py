@@ -1,4 +1,10 @@
-"""Live integration tests — skipped in CI without AC_INFINITY_EMAIL credential."""
+"""Live integration tests — skipped in CI without AC_INFINITY_EMAIL credential.
+
+Belt-and-braces opt-in: the live marker is deselected by default in pyproject.toml.
+A contributor who wants to run these must pass ``-m live`` explicitly. CI does
+not pass that flag, so even if AC_INFINITY_EMAIL leaked into the workflow env
+(e.g. via a future secrets edit), the suite would still skip. See P3-F009.
+"""
 
 import asyncio
 import json
@@ -10,10 +16,13 @@ import pytest
 from ac_infinity_mcp import server as srv
 from ac_infinity_mcp.client import ACInfinityClient
 
-pytestmark = pytest.mark.skipif(
-    not os.getenv("AC_INFINITY_EMAIL"),
-    reason="AC_INFINITY_EMAIL not set — skipping live API tests",
-)
+pytestmark = [
+    pytest.mark.live,  # opt-in marker — deselected by default (see pyproject.toml)
+    pytest.mark.skipif(
+        not os.getenv("AC_INFINITY_EMAIL"),
+        reason="AC_INFINITY_EMAIL not set — skipping live API tests",
+    ),
+]
 
 
 # ---------------------------------------------------------------------------
