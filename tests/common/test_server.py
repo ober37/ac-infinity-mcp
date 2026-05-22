@@ -4006,8 +4006,9 @@ async def test_delete_advance_automation_live_disables_first(mock_client):
     data = json.loads(result)
     assert data.get("sent") is True
     assert data.get("was_enabled") is True
-    mock_client.disable_advance_automation.assert_called()
-    mock_client.delete_advance_automation.assert_called()
+    assert mock_client.disable_advance_automation.call_count == 1
+    # one delete call per adv_id in "Moderate Airflow" (2 entries)
+    assert mock_client.delete_advance_automation.call_count == 2
 
 
 async def test_get_advance_automation_no_schedule_sentinel(mock_client):

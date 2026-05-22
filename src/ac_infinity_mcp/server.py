@@ -206,10 +206,10 @@ def _group_automations(raw_entries: list[dict]) -> list[dict]:
             "automation_id": entries[0].get("advId"),
             "name": clean_name,
             "enabled": bool(entries[0].get("isOn", 0)),
-            "adv_ids": [e.get("advId") for e in entries],
+            "adv_ids": [e.get("advId") for e in entries if e.get("advId") is not None],
             "port_groups": [
                 {
-                    "adv_id": e["advId"],
+                    "adv_id": e.get("advId"),
                     "on_speed": e.get("onSpeed", 0),
                     "grp_dev_type": e.get("grouptDevType", 0),
                 }
