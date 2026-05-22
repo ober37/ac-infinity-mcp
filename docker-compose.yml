@@ -5,3 +5,16 @@ services:
     stdin_open: true
     tty: true
     restart: unless-stopped
+    # Defense in depth — the Dockerfile already runs as non-root appuser and
+    # uses a multi-stage build with no secret bake-in. Compose-level hardening
+    # below catches future Dockerfile regressions and reduces blast radius of
+    # any code-execution bug. The server only reads sensor data and POSTs
+    # writes; it has no legitimate filesystem write need (P3-F015).
+    user: appuser
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
