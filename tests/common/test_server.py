@@ -172,43 +172,76 @@ async def test_read_tools_do_not_echo_appEmail(mock_client, caplog, tool_name, a
 # ============ Credential-redacting log filter (P3-F006, P3-F019) ============
 
 
-def test_credential_filter_redacts_known_fields():
-    """The filter must redact the value following known credential field markers."""
-    import logging
-
-    from ac_infinity_mcp.server import _CredentialRedactingFilter
-
-    flt = _CredentialRedactingFilter()
-    cases = [
-        ("token=abc123def456", "token=<redacted>"),
-        ("appPasswordl=hunter2", "appPasswordl=<redacted>"),
-        ("appEmail=user@example.com", "appEmail=<redacted>"),
-        ("{'appPassword': 'shouldnotleak'}", "{'appPassword': '<redacted>'}"),
-        ('{"token": "abc-123_XYZ.456"}', '{"token": "<redacted>"}'),
-        ("AC_INFINITY_PASSWORD=verysecret", "AC_INFINITY_PASSWORD=<redacted>"),
-    ]
-    for raw, expected in cases:
-        record = logging.LogRecord(
-            name="x", level=logging.DEBUG, pathname=__file__, lineno=1,
-            msg=raw, args=(), exc_info=None,
-        )
-        flt.filter(record)
-        assert record.getMessage() == expected, f"{raw} -> {record.getMessage()}"
+@pytest.mark.parametrize("raw,expected", [
+    ("token=abc123def456", "token=<redacted>"),
+    ("appPasswordl=hunter2", "appPasswordl=<redacted>"),
+    ("appEmail=user@example.com", "appEmail=<redacted>"),
+    ("{'appPassword': 'shouldnotleak'}", "{'appPassword': '<redacted>'}"),
+    ('{"token": "abc-123_XYZ.456"}', '{"token": "<redacted>"}'),
+    ("AC_INFINITY_PASSWORD=verysecret", "AC_INFINITY_PASSWORD=<redacted>"),
+    # P1-C2-F001: userId in URL query string (HTTPError __str__ leak vector)
+    (
+        "500 Server Error for url: http://server/api?userId=SECRETTOKEN123",
+        "500 Server Error for url: http://server/api?userId=<redacted>",
+    ),
+    # P3-C2-F004: password with embedded space — value pattern stops at structural
+    # terminators (comma, newline, brace), NOT at whitespace
+    ("appPasswordl=hunter pwd2,trailing", "appPasswordl=<redacted>,trailing"),
+])
+def test_credential_redaction_redacts_known_fields(raw, expected):
+    """The redactor must scrub credential field values across multiple shapes."""
+    from ac_infinity_mcp.server import _redact_credentials
+    assert _redact_credentials(raw) == expected
 
 
-def test_credential_filter_leaves_clean_messages_alone():
-    import logging
-
-    from ac_infinity_mcp.server import _CredentialRedactingFilter
-
-    flt = _CredentialRedactingFilter()
+def test_credential_redaction_leaves_clean_messages_alone():
+    from ac_infinity_mcp.server import _redact_credentials
     clean = "Fetched 3 devices for user"
-    record = logging.LogRecord(
-        name="x", level=logging.INFO, pathname=__file__, lineno=1,
-        msg=clean, args=(), exc_info=None,
+    assert _redact_credentials(clean) == clean
+
+
+def test_credential_redaction_scrubs_exception_traceback():
+    """P1-C2-F002 / P3-C2-F001: exc_info=True logs go through formatException;
+    the formatter must scrub credentials from the traceback text too."""
+    import io
+    import logging
+
+    from ac_infinity_mcp.server import _CredentialRedactingFormatter
+
+    fmt = _CredentialRedactingFormatter()
+    try:
+        raise ValueError("login failed for appPasswordl=topsecret123")
+    except ValueError:
+        import sys
+        record = logging.LogRecord(
+            name="x", level=logging.ERROR, pathname=__file__, lineno=1,
+            msg="oops: %s", args=(sys.exc_info()[1],),
+            exc_info=sys.exc_info(),
+        )
+        formatted = fmt.format(record)
+
+    assert "topsecret123" not in formatted, (
+        f"credential leaked through exc_info traceback:\n{formatted}"
     )
-    flt.filter(record)
-    assert record.getMessage() == clean
+    assert "<redacted>" in formatted
+
+    # also verify the bare _redact_credentials path covers the traceback text
+    buf = io.StringIO()
+    handler = logging.StreamHandler(buf)
+    handler.setFormatter(fmt)
+    handler.emit(record)
+    assert "topsecret123" not in buf.getvalue()
+
+
+def test_credential_redactor_installed_on_root_handlers():
+    """P2-C2-F006: pin that the formatter is actually attached, not just constructible."""
+    import logging
+    from ac_infinity_mcp.server import _CredentialRedactingFormatter
+    handlers = logging.getLogger().handlers
+    assert handlers, "root logger has no handlers — install loop never ran"
+    assert any(
+        isinstance(h.formatter, _CredentialRedactingFormatter) for h in handlers
+    ), "no root handler has the credential redactor attached"
 
 
 def test_parse_device_data_drops_appEmail():

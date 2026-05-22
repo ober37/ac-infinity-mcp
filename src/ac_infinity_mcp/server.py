@@ -46,47 +46,82 @@ if _log_level_fallback_warning:
     )
 
 
-class _CredentialRedactingFilter(logging.Filter):
-    """Redact credential field values from formatted log records.
+# Credential markers redacted in formatted log output. Tuple of (field_name,
+# value_pattern) — the field-name alternation matches the marker token, and the
+# value pattern is intentionally permissive to handle:
+#   field=value        (positional log args, e.g. "token=abc123")
+#   'field': 'value'   (dict repr from logger.debug("%s", payload_dict))
+#   "field": "value"   (json.dumps output)
+#   field=value with spaces in the value (greedy until a structural terminator)
+#   url?userId=value   (query-string credentials in HTTPError __str__)
+_FIELD_PATTERN = re.compile(
+    r"(appPasswordl|appPassword|AC_INFINITY_PASSWORD|appEmail|token|appId|userId)"
+    r"(['\"]?\s*[:=]\s*)"
+    # Value: either quoted (any chars until matching quote) or unquoted (any
+    # chars until a JSON-structural terminator). The structural terminator set
+    # is intentionally narrow — newline, comma, closing brace/bracket, end of
+    # string. A naked space mid-value (e.g. password with embedded whitespace)
+    # is preserved as part of the value and therefore still redacted.
+    r"(?:(['\"])([^'\"]*)\3|([^\n,}\]]+))",
+    re.IGNORECASE,
+)
 
-    Defense in depth: every existing logger.* call site in this server has been
-    audited clean. The filter prevents future debug-logging additions from
-    accidentally emitting credentials or session tokens. P3-F006, P3-F019.
 
-    Catches three shapes:
-      - field=value      (positional log args, e.g. "token=abc123")
-      - 'field': 'value' (dict-formatted log args)
-      - "field": "value"
+def _redact_credentials(text: str) -> str:
+    """Redact credential-field values from any text. Idempotent."""
+    if not text:
+        return text
+
+    def _sub(match: re.Match[str]) -> str:
+        field = match.group(1)
+        sep = match.group(2)
+        quote = match.group(3)
+        if quote is not None:
+            return f"{field}{sep}{quote}<redacted>{quote}"
+        return f"{field}{sep}<redacted>"
+
+    return _FIELD_PATTERN.sub(_sub, text)
+
+
+class _CredentialRedactingFormatter(logging.Formatter):
+    """Formatter that scrubs credential markers from both the message line AND
+    any exception text (the traceback emitted by ``exc_info=True``).
+
+    Switched from a logging.Filter to a Formatter subclass during Cycle 2:
+    Filter only sees ``record.msg`` and cannot scrub the post-formatExc text,
+    which is what every ``logger.error(..., exc_info=True)`` site emits. The
+    formatter wraps both surfaces. Defense in depth: every existing logger.*
+    call site is audited clean; the formatter prevents future leaks.
+
+    Tracks the lineage of Cycle 1 P3-F006 / P3-F019 and Cycle 2
+    P1-C2-F001 / P1-C2-F002 / P3-C2-F001 / P3-C2-F002 / P3-C2-F004.
     """
 
-    _PATTERNS = (
-        re.compile(
-            r"(appPasswordl|appPassword|AC_INFINITY_PASSWORD|appEmail|token|appId)"
-            r"(['\"]?\s*[:=]\s*['\"]?)([^\s'\",}]+)",
-            re.IGNORECASE,
-        ),
-    )
+    def format(self, record: logging.LogRecord) -> str:
+        formatted = super().format(record)
+        return _redact_credentials(formatted)
 
-    def filter(self, record: logging.LogRecord) -> bool:
-        msg = record.getMessage()
-        original = msg
-        for pat in self._PATTERNS:
-            msg = pat.sub(r"\1\2<redacted>", msg)
-        if msg != original:
-            record.msg = msg
-            record.args = ()
-        return True
+    def formatException(self, ei: object) -> str:  # type: ignore[override]
+        return _redact_credentials(super().formatException(ei))  # type: ignore[arg-type]
 
 
-# Install the redactor on every handler attached to the root logger.
-# Filters on the root logger itself do NOT see records propagated from child
-# loggers — Python's logging design intentionally skips filter chains for
-# propagated records (logging docs, "Filter objects"). Attaching to handlers
-# means every record actually emitted to a sink (stderr, file, etc.) passes
-# through the redactor, regardless of which child logger originated it.
-_credential_filter = _CredentialRedactingFilter()
-for _handler in logging.getLogger().handlers:
-    _handler.addFilter(_credential_filter)
+def _install_credential_redactor(target_logger: logging.Logger | None = None) -> None:
+    """Attach the credential-redacting formatter to every handler on the root logger.
+
+    Filters on logger objects (vs handlers) skip records propagated up from
+    child loggers — Python's logging design. Attaching at the handler layer
+    means every record emitted to a sink (stderr, file) passes through the
+    redactor regardless of origin logger. Also called from tests after they
+    add their own handlers.
+    """
+    target = target_logger or logging.getLogger()
+    for handler in target.handlers:
+        # Preserve any existing format string the operator may have configured.
+        existing_fmt = handler.formatter._fmt if handler.formatter else None  # type: ignore[union-attr]
+        handler.setFormatter(_CredentialRedactingFormatter(existing_fmt))
+
+
+_install_credential_redactor()
 
 mcp_server = FastMCP(name="ac-infinity-mcp")
 
