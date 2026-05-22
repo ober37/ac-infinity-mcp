@@ -23,6 +23,11 @@ class ACInfinityDeviceError(ACInfinityError):
     pass
 
 
+class ACInfinityAdvanceConflictError(ACInfinityDeviceError):
+    """Raised when a write targets a port under Advance Automation control (modeType=15)."""
+    pass
+
+
 class ACInfinityConfigError(ACInfinityError):
     """Configuration or file error."""
     pass

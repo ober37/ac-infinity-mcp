@@ -7,7 +7,12 @@ import requests
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from ac_infinity_mcp.controller import ControllerType, build_write_payload, detect_controller_type
-from ac_infinity_mcp.schema import ACInfinityAPIError, ACInfinityAuthError, ACInfinityDeviceError
+from ac_infinity_mcp.schema import (
+    ACInfinityAdvanceConflictError,
+    ACInfinityAPIError,
+    ACInfinityAuthError,
+    ACInfinityDeviceError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -448,9 +453,9 @@ class ACInfinityClient:
         # Guard: smart automation mode cannot be overridden via the write API (returns 999999)
         mode_type = current_settings.get("modeType")
         if mode_type == 15:
-            raise ACInfinityDeviceError(
+            raise ACInfinityAdvanceConflictError(
                 f"Port {port} on device {dev_id} is in smart automation mode (modeType=15) — "
-                "cannot override manually. Use the AC Infinity app to switch to manual mode first."
+                "cannot override manually."
             )
 
         # Guard: on/off hardware (loadType=4 or 128) rejects speed writes with 999999.

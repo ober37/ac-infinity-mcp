@@ -752,6 +752,83 @@ for port in range(1, port_count + 1):
 The `externalPort` field in the response matches the `port` parameter sent.
 Both legacy and AI+ controllers return the same 142-field structure.
 
+Calling with `port=0` returns the controller-level settings (not any single port).
+
+---
+
+### Quirk 17 — ADVANCE mode (`modeType=15`) — detection and write guard
+
+AC Infinity "Advance Automation" assigns a named program to govern one or more ports
+simultaneously. From the API perspective:
+
+**Detection fields (in `devInfoListAll` port sub-objects):**
+
+| Field | ADVANCE port | Non-ADVANCE port | Notes |
+|---|---|---|---|
+| `curMode` | `1` | `1` | **Ambiguous** — same value as OFF |
+| `modeTye` (note typo) | `15` | `15` | Unreliable — `15` on ALL ports |
+| `isOpenAutomation` | `1` | `0` | **Reliable trigger** |
+| `speak` | > 0 when running | `0` (always) | Secondary heuristic only |
+
+**`getdevModeSettingList` for ADVANCE ports:**
+
+| Field | Value |
+|---|---|
+| `modeType` | `15` |
+| `atType` | `1` (OFF — NOT the effective mode) |
+| `isOpenAutomation` | `1` |
+
+**Detection strategy (in priority order):**
+1. `isOpenAutomation == 1` in device list port data → ADVANCE (no secondary call needed)
+2. `curMode not in _MODE_LABELS` → secondary `getdevModeSettingList` call (AI+ devices,
+   future firmware codes where `curMode` may be absent or use an unmapped integer)
+3. `curMode == 1 AND speak > 0` → secondary call fallback (firmware without `isOpenAutomation`)
+
+**`_ADVANCE_MODE_TYPE = 15`** — do NOT add to `_MODE_LABELS`. If it were in `_MODE_LABELS`,
+`set_port_mode(mode="ADVANCE")` would become a valid call and write `atType=15` to the
+write endpoint, causing a `999999` error from the AC Infinity API.
+
+**Write guard:** When `_set_port_mode_inner` detects `modeType == 15` in the pre-read
+settings, it raises `ACInfinityAdvanceConflictError` (a typed subclass of
+`ACInfinityDeviceError`). Server-side write tools catch this typed exception and return a
+structured conflict response instead of an opaque error string.
+
+**Automation grouping indicator in `devSetting.portParamData`:**
+All ports governed by the same automation share identical `portParamData` values.
+Ports outside automation have `0, 0` at indices 4–5 of the array; automation-grouped
+ports have non-zero values (`19, 136` observed for "Moderate Airflow"). The encoding
+of these values is not yet confirmed — a network capture is required to determine how
+to decode the automation name or ID from this field. Document in a follow-up issue.
+
+---
+
+### Quirk 18 — Advance Automation API endpoints not yet confirmed
+
+The AC Infinity app manages Advance Automations (named programs that govern multiple
+ports) via API endpoints that have not been identified through REST probing.
+
+**Probing summary (Phase 17, 2026-05-22):** Over 200 endpoint guesses tried across
+8 probe scripts: `/dev/getAutoList`, `/dev/getAdvanceList`, `/dev/advanceList`,
+`/dev/sceneList`, `/dev/workModeList`, and 200+ variants with different HTTP methods,
+Content-Type headers, path prefixes (`/v2/`, `/advanced/`, etc.), `devCode`- and
+`appId`-based payloads, and alternative subdomain attempts. All returned HTTP 404.
+
+**What IS accessible without a dedicated endpoint:**
+- Whether a port is under automation: `isOpenAutomation` field in `devInfoListAll`
+- Automation "mode" confirmation: `modeType=15` in `getdevModeSettingList`
+- Automation grouping hint: `portParamData` shared value (see Quirk 17)
+- Current `speak` (effective power level): from `devInfoListAll`
+
+**What requires a network capture from the AC Infinity app:**
+- Automation name (e.g. "Moderate Airflow")
+- Automation ID (for enable/disable/delete API calls)
+- List of automations per device
+- Enable/disable/create/delete endpoint URLs and payloads
+
+**Follow-up:** Capture app traffic (iOS/Android proxy via Charles/mitmproxy) while
+listing, enabling, and disabling automations in the AC Infinity app. Document new
+endpoint(s) here and in `docs/SECURITY-RISKS.md`.
+
 ---
 
 ## MCP Tool Reference

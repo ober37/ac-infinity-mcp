@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import sys
+import unicodedata
 from datetime import UTC, datetime, timedelta
 
 from mcp.server.fastmcp import FastMCP
@@ -17,6 +18,7 @@ from ac_infinity_mcp.analytics import (
 )
 from ac_infinity_mcp.client import ACInfinityClient
 from ac_infinity_mcp.schema import (
+    ACInfinityAdvanceConflictError,
     ACInfinityAPIError,
     ACInfinityAuthError,
     ACInfinityDeviceError,
@@ -775,6 +777,10 @@ _MODE_LABELS: dict[int, str] = {
     6: "CYCLE", 7: "SCHEDULE", 8: "VPD",
 }
 
+# modeType=15 signals Advance Automation control. NOT added to _MODE_LABELS — doing so
+# would allow set_port_mode(mode="ADVANCE") to write atType=15 and trigger 999999 errors.
+_ADVANCE_MODE_TYPE: int = 15
+
 
 def _decode_mode(mode_int: int | None) -> str:
     if mode_int is None:
@@ -819,6 +825,89 @@ def _parse_schedule_time(time_str: str | None) -> int:
         ) from None
 
 
+def _sanitize_api_string(value: str | None, max_len: int) -> str:
+    """Strip Unicode control/format characters, truncate to max_len codepoints.
+
+    Preserves non-ASCII printable characters (Japanese, Korean, Chinese) — the
+    AC Infinity app supports non-English names. Strips only Cc (control) and Cf
+    (format) Unicode categories. Empty result after stripping returns "(unnamed)".
+    """
+    if not value:
+        return "(unnamed)"
+    cleaned = "".join(
+        ch for ch in value if unicodedata.category(ch) not in ("Cc", "Cf")
+    )
+    cleaned = cleaned[:max_len]
+    return cleaned if cleaned else "(unnamed)"
+
+
+async def _check_advance_mode(dev_id: str | None, port: int, fallback: str) -> str:
+    """Secondary call to getdevModeSettingList to verify ADVANCE state.
+
+    Used for AI+ devices (no curMode field) and firmware without isOpenAutomation.
+    Falls back gracefully on any error — mode accuracy is best-effort for these cases.
+    """
+    if not dev_id:
+        return fallback
+    try:
+        settings = await asyncio.to_thread(_client().get_mode_settings, dev_id, port)
+        return "ADVANCE" if settings.get("modeType") == _ADVANCE_MODE_TYPE else fallback
+    except Exception as e:
+        logger.warning("Could not verify ADVANCE mode for port %s: %s", port, type(e).__name__)
+        return fallback
+
+
+def _get_port_name_from_device(device: dict | None, port: int) -> str:
+    """Extract port name from device dict. Returns 'Port N' when device is None/not found."""
+    if not device:
+        return f"Port {port}"
+    ports = device.get("deviceInfo", {}).get("ports", [])
+    port_data = next((p for p in ports if p.get("port") == port), None)
+    raw_name = port_data.get("portName") if port_data else None
+    return _sanitize_api_string(raw_name, 64) if raw_name else f"Port {port}"
+
+
+def _build_advance_conflict_response(
+    device_id: str, port: int, port_name: str
+) -> str:
+    """Build a structured ADVANCE_AUTOMATION conflict response for write tools.
+
+    The automation management API endpoints are not yet confirmed — automation name
+    and co-governed ports are not available until network capture is done (see Quirk 18
+    in docs/API.md). Returns a fully structured conflict response with all fields present.
+    """
+    summary = (
+        f"{port_name} (Port {port}) is under Advance Automation control. "
+        "Your change requires resolving this conflict first."
+    )
+    return json.dumps({
+        "conflict": "ADVANCE_AUTOMATION",
+        "summary": summary,
+        "target_port": f"{port_name} (Port {port})",
+        "automation_name": None,
+        "automation_id": None,
+        "co_governed_ports": [],
+        "switching_guidance": (
+            "To manage automations, use the AC Infinity app or provide a network capture "
+            "to enable the automation management tools."
+        ),
+        "options": {
+            "1_break_out_manually": {
+                "available": False,
+                "status": "requires_automation_api_discovery",
+            },
+            "2_edit_automation": {
+                "available": False,
+                "status": "not_yet_implemented",
+            },
+            "3_fork_automation": {
+                "available": False,
+                "status": "not_yet_implemented",
+            },
+        },
+    }, indent=2)
+
+
 @mcp_server.tool()
 async def get_port_status(device_id: str, port: int) -> str:
     """
@@ -844,9 +933,14 @@ async def get_port_status(device_id: str, port: int) -> str:
               "remain_time_seconds": 0
             }
 
-        ``mode`` is one of: OFF, ON, AUTO, TIMER_TO_ON, TIMER_TO_OFF, CYCLE, SCHEDULE, VPD.
-        ``load_detected`` is true when a device is physically plugged into the port.
-        On failure returns ``{"error": "...", "detail": "..."}``.
+        ``mode`` is one of: OFF, ON, AUTO, TIMER_TO_ON, TIMER_TO_OFF, CYCLE, SCHEDULE, VPD,
+        ADVANCE. ``load_detected`` is true when a device is physically plugged into the port.
+        When ``mode`` is ``ADVANCE``, the port is governed by a named Advance Automation program
+        in the AC Infinity app. On failure returns ``{"error": "...", "detail": "..."}``.
+
+        Note on ADVANCE detection: ``isOpenAutomation==1`` in devInfoListAll is the primary
+        signal. For AI+ devices (no curMode field) and older firmware without isOpenAutomation,
+        a secondary call to getdevModeSettingList is made to check modeType.
     """
     try:
         if port < 1:
@@ -862,13 +956,32 @@ async def get_port_status(device_id: str, port: int) -> str:
         if port_data is None:
             return json.dumps({"error": f"Port {port} not found on device {device_id}"})
 
+        dev_id = device.get("devId")
+        cur_mode_int = port_data.get("curMode")
+
+        if port_data.get("isOpenAutomation") == 1:
+            # Primary ADVANCE signal — present in devInfoListAll; no secondary call needed.
+            mode_str = "ADVANCE"
+        elif cur_mode_int not in _MODE_LABELS:
+            # AI+ devices return no curMode, or future firmware may introduce new codes.
+            # Secondary call to getdevModeSettingList to verify.
+            mode_str = await _check_advance_mode(dev_id, port, _decode_mode(cur_mode_int))
+        elif cur_mode_int == 1 and port_data.get("speak", 0) > 0:
+            # Heuristic fallback for firmware without isOpenAutomation: a port reporting
+            # curMode=1 (OFF) while speak>0 is a contradiction — a genuinely OFF port
+            # has speak=0. This catches ADVANCE ports on older firmware. Genuine OFF
+            # ports (speak=0) are exempt; ADVANCE-at-speed-0 is a known gap.
+            mode_str = await _check_advance_mode(dev_id, port, "OFF")
+        else:
+            mode_str = _decode_mode(cur_mode_int)
+
         return json.dumps({
             "device_id": device_id,
             "port": port,
             "port_name": port_data.get("portName", f"Port {port}"),
             "power_level": port_data.get("speak", 0),
             "load_detected": bool(port_data.get("loadState", 0)),
-            "mode": _decode_mode(port_data.get("curMode")),
+            "mode": mode_str,
             "remain_time_seconds": port_data.get("remainTime") or 0,
         }, indent=2)
 
@@ -939,6 +1052,26 @@ async def get_port_settings(device_id: str, port: int) -> str:
             return json.dumps({"error": f"Device {device_id} is missing devId"})
 
         settings = await asyncio.to_thread(_client().get_mode_settings, dev_id, port)
+
+        # ADVANCE detection: modeType=15 means this port is governed by a named Advance
+        # Automation. All automation-target fields reflect automation-internal config and
+        # are not meaningful for individual port management — return early with ADVANCE mode.
+        if settings.get("modeType") == _ADVANCE_MODE_TYPE:
+            return json.dumps({
+                "device_id": device_id,
+                "port": port,
+                "mode": "ADVANCE",
+                "advance_automation": True,
+                "speed_target": settings.get("onSpead", 0),
+                "vpd_target_kpa": None,
+                "temp_range_c": None,
+                "humidity_range_pct": None,
+                "schedule_window": None,
+                "cycle_on_seconds": None,
+                "cycle_off_seconds": None,
+                "timer_on_seconds": None,
+                "timer_off_seconds": None,
+            }, indent=2)
 
         vpd_target = None
         if settings.get("targetVpdSwitch"):
@@ -1108,9 +1241,10 @@ async def set_port_speed(
     except ACInfinityAPIError as e:
         logger.error("API error in set_port_speed (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
+    except ACInfinityAdvanceConflictError:
+        port_name = _get_port_name_from_device(device, port)
+        return _build_advance_conflict_response(device_id, port, port_name)
     except ACInfinityDeviceError as e:
-        # Device-guard text (loadType=4/128, modeType=15) is self-constructed
-        # and actionable — the LLM uses these hints to switch tools.
         logger.warning("Device error in set_port_speed (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({"error": str(e)})
     except Exception as e:
@@ -1190,9 +1324,10 @@ async def set_port_on(
     except ACInfinityAPIError as e:
         logger.error("API error in set_port_on (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
+    except ACInfinityAdvanceConflictError:
+        port_name = _get_port_name_from_device(device, port)
+        return _build_advance_conflict_response(device_id, port, port_name)
     except ACInfinityDeviceError as e:
-        # Device-guard text (loadType=4/128, modeType=15) is self-constructed
-        # and actionable — the LLM uses these hints to switch tools.
         logger.warning("Device error in set_port_on (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({"error": str(e)})
     except Exception as e:
@@ -1278,9 +1413,10 @@ async def set_port_off(
     except ACInfinityAPIError as e:
         logger.error("API error in set_port_off (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
+    except ACInfinityAdvanceConflictError:
+        port_name = _get_port_name_from_device(device, port)
+        return _build_advance_conflict_response(device_id, port, port_name)
     except ACInfinityDeviceError as e:
-        # Device-guard text (loadType=4/128, modeType=15) is self-constructed
-        # and actionable — the LLM uses these hints to switch tools.
         logger.warning("Device error in set_port_off (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({"error": str(e)})
     except Exception as e:
@@ -1389,9 +1525,10 @@ async def set_vpd_automation(
             device_id, port, e,
         )
         return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
+    except ACInfinityAdvanceConflictError:
+        port_name = _get_port_name_from_device(device, port)
+        return _build_advance_conflict_response(device_id, port, port_name)
     except ACInfinityDeviceError as e:
-        # Device-guard text (loadType=4/128, modeType=15) is self-constructed
-        # and actionable — the LLM uses these hints to switch tools.
         logger.warning(
             "Device error in set_vpd_automation (device=%s port=%s): %s",
             device_id, port, e,
@@ -1493,9 +1630,10 @@ async def set_temperature_automation(
             device_id, port, e,
         )
         return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
+    except ACInfinityAdvanceConflictError:
+        port_name = _get_port_name_from_device(device, port)
+        return _build_advance_conflict_response(device_id, port, port_name)
     except ACInfinityDeviceError as e:
-        # Device-guard text (loadType=4/128, modeType=15) is self-constructed
-        # and actionable — the LLM uses these hints to switch tools.
         logger.warning(
             "Device error in set_temperature_automation (device=%s port=%s): %s",
             device_id, port, e,
@@ -1596,9 +1734,10 @@ async def set_humidity_automation(
             device_id, port, e,
         )
         return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
+    except ACInfinityAdvanceConflictError:
+        port_name = _get_port_name_from_device(device, port)
+        return _build_advance_conflict_response(device_id, port, port_name)
     except ACInfinityDeviceError as e:
-        # Device-guard text (loadType=4/128, modeType=15) is self-constructed
-        # and actionable — the LLM uses these hints to switch tools.
         logger.warning(
             "Device error in set_humidity_automation (device=%s port=%s): %s",
             device_id, port, e,
@@ -1747,9 +1886,10 @@ async def set_port_mode(
     except ACInfinityAPIError as e:
         logger.error("API error in set_port_mode (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
+    except ACInfinityAdvanceConflictError:
+        port_name = _get_port_name_from_device(device, port)
+        return _build_advance_conflict_response(device_id, port, port_name)
     except ACInfinityDeviceError as e:
-        # Device-guard text (loadType=4/128, modeType=15) is self-constructed
-        # and actionable — the LLM uses these hints to switch tools.
         logger.warning("Device error in set_port_mode (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({"error": str(e)})
     except Exception as e:
@@ -1877,12 +2017,21 @@ async def apply_grow_stage_template(
             "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
             "detail": "see server logs",
         })
-    except (ACInfinityAPIError, ACInfinityDeviceError) as e:
+    except ACInfinityAPIError as e:
         logger.error(
-            "API/device error in apply_grow_stage_template (device=%s port=%s stage=%s): %s",
+            "API error in apply_grow_stage_template (device=%s port=%s stage=%s): %s",
             device_id, port, stage, e,
         )
         return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
+    except ACInfinityAdvanceConflictError:
+        port_name = _get_port_name_from_device(device, port)
+        return _build_advance_conflict_response(device_id, port, port_name)
+    except ACInfinityDeviceError as e:
+        logger.warning(
+            "Device error in apply_grow_stage_template (device=%s port=%s stage=%s): %s",
+            device_id, port, stage, e,
+        )
+        return json.dumps({"error": str(e)})
     except Exception as e:
         logger.error("Unexpected error in apply_grow_stage_template: %s", e, exc_info=True)
         return json.dumps({

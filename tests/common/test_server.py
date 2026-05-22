@@ -6,13 +6,19 @@ from unittest.mock import patch
 
 import pytest
 
-from ac_infinity_mcp.schema import ACInfinityAPIError, ACInfinityAuthError, ACInfinityDeviceError
+from ac_infinity_mcp.schema import (
+    ACInfinityAdvanceConflictError,
+    ACInfinityAPIError,
+    ACInfinityAuthError,
+    ACInfinityDeviceError,
+)
 from ac_infinity_mcp.server import (
     _decode_mode,
     _filter_readings_by_time,
     _format_schedule_time,
     _parse_duration_seconds,
     _parse_schedule_time,
+    _sanitize_api_string,
     apply_grow_stage_template,
     apply_sampling,
     average_readings,
@@ -1346,6 +1352,16 @@ async def test_set_port_on_auth_error(mock_client):
     assert "error" in data
 
 
+async def test_set_port_on_device_error_non_advance(mock_client):
+    """Base ACInfinityDeviceError (not the advance subclass) returns a plain error string."""
+    mock_client.set_port_mode.side_effect = ACInfinityDeviceError("loadType=4 device")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_on("C58ZA", 1)
+    data = json.loads(result)
+    assert "error" in data
+    assert "loadType=4" in data["error"]
+
+
 # ============ set_port_off ============
 
 MOCK_SET_PORT_OFF_DRY = {
@@ -1397,6 +1413,16 @@ async def test_set_port_off_auth_error(mock_client):
         result = await set_port_off("C58ZA", 1)
     data = json.loads(result)
     assert "error" in data
+
+
+async def test_set_port_off_device_error_non_advance(mock_client):
+    """Base ACInfinityDeviceError (not advance subclass) returns plain error."""
+    mock_client.set_port_mode.side_effect = ACInfinityDeviceError("device guard triggered")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_off("C58ZA", 1)
+    data = json.loads(result)
+    assert "error" in data
+    assert "device guard" in data["error"]
 
 
 @pytest.mark.parametrize("tool_name,args", [
@@ -1488,38 +1514,46 @@ async def test_set_port_off_not_affected_by_load_type_guard(mock_client):
     assert data["dry_run"] is True
 
 
-async def test_set_port_speed_returns_error_for_modeType_15(mock_client):
-    """ACInfinityDeviceError from modeType=15 guard becomes a JSON error in server."""
-    mock_client.set_port_mode.side_effect = ACInfinityDeviceError(
+async def test_set_port_speed_returns_conflict_for_modeType_15(mock_client):
+    """ACInfinityAdvanceConflictError from modeType=15 guard returns structured conflict."""
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError(
         "Port 1 on device 12345 is in smart automation mode (modeType=15)"
     )
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await set_port_speed("C58ZA", 1, 5)
     data = json.loads(result)
-    assert "error" in data
-    assert "smart automation" in data["error"].lower() or "modeType=15" in data["error"]
+    assert data["conflict"] == "ADVANCE_AUTOMATION"
+    assert "summary" in data
+    assert "Intake Fan (Port 1)" in data["summary"]
+    assert data["target_port"] == "Intake Fan (Port 1)"
+    assert "options" in data
+    assert "error" not in data
 
 
-async def test_set_port_on_returns_error_for_modeType_15(mock_client):
-    """modeType=15 guard applies to set_port_on as well."""
-    mock_client.set_port_mode.side_effect = ACInfinityDeviceError(
-        "Port 2 on device 12345 is in smart automation mode (modeType=15)"
+async def test_set_port_on_returns_conflict_for_modeType_15(mock_client):
+    """ACInfinityAdvanceConflictError from modeType=15 guard applies to set_port_on."""
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError(
+        "Port 1 on device 12345 is in smart automation mode (modeType=15)"
     )
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        result = await set_port_on("C58ZA", 2)
+        result = await set_port_on("C58ZA", 1)
     data = json.loads(result)
-    assert "error" in data
+    assert data["conflict"] == "ADVANCE_AUTOMATION"
+    assert "summary" in data
+    assert "error" not in data
 
 
-async def test_set_port_off_returns_error_for_modeType_15(mock_client):
-    """modeType=15 guard applies to set_port_off as well."""
-    mock_client.set_port_mode.side_effect = ACInfinityDeviceError(
-        "Port 3 on device 12345 is in smart automation mode (modeType=15)"
+async def test_set_port_off_returns_conflict_for_modeType_15(mock_client):
+    """ACInfinityAdvanceConflictError from modeType=15 guard applies to set_port_off."""
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError(
+        "Port 1 on device 12345 is in smart automation mode (modeType=15)"
     )
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        result = await set_port_off("C58ZA", 3)
+        result = await set_port_off("C58ZA", 1)
     data = json.loads(result)
-    assert "error" in data
+    assert data["conflict"] == "ADVANCE_AUTOMATION"
+    assert "summary" in data
+    assert "error" not in data
 
 
 async def test_set_port_speed_ai_plus_live_write_returns_not_implemented(mock_client):
@@ -1865,6 +1899,40 @@ def test_format_schedule_time_out_of_range_returns_none(invalid_minutes):
     assert _format_schedule_time(invalid_minutes) is None
 
 
+# ============ _sanitize_api_string helper ============
+
+def test_sanitize_api_string_normal_string_unchanged():
+    assert _sanitize_api_string("Moderate Airflow", 64) == "Moderate Airflow"
+
+
+def test_sanitize_api_string_strips_control_chars():
+    assert _sanitize_api_string("Fan\x00Name", 64) == "FanName"
+
+
+def test_sanitize_api_string_strips_format_control_chars():
+    assert _sanitize_api_string("Fan​Name", 64) == "FanName"  # U+200B zero-width space (Cf)
+
+
+def test_sanitize_api_string_preserves_non_ascii_printable():
+    assert _sanitize_api_string("排気ファン", 64) == "排気ファン"
+
+
+def test_sanitize_api_string_truncates_to_max_len():
+    assert _sanitize_api_string("A" * 100, 10) == "A" * 10
+
+
+def test_sanitize_api_string_empty_string_returns_unnamed():
+    assert _sanitize_api_string("", 64) == "(unnamed)"
+
+
+def test_sanitize_api_string_none_returns_unnamed():
+    assert _sanitize_api_string(None, 64) == "(unnamed)"
+
+
+def test_sanitize_api_string_all_control_chars_returns_unnamed():
+    assert _sanitize_api_string("\x00\x01\x02", 64) == "(unnamed)"
+
+
 # ============ get_port_status ============
 
 async def test_get_port_status_success(mock_client):
@@ -1973,6 +2041,123 @@ async def test_get_port_status_generic_exception(mock_client):
         result = await get_port_status("C58ZA", 1)
     data = json.loads(result)
     assert "error" in data
+
+
+async def test_get_port_status_advance_mode_via_is_open_automation(mock_client):
+    """isOpenAutomation=1 in port data returns mode: ADVANCE without secondary call."""
+    mock_client.get_devices.return_value = [{
+        **MOCK_DEVICE_LEGACY,
+        "deviceInfo": {
+            **MOCK_DEVICE_LEGACY["deviceInfo"],
+            "ports": [
+                {"port": 1, "portName": "Left Fan", "speak": 2, "portsLoad": 1,
+                 "loadState": 1, "curMode": 1, "remainTime": 0, "isOpenAutomation": 1},
+            ],
+        },
+    }]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_status("C58ZA", 1)
+    data = json.loads(result)
+    assert data["mode"] == "ADVANCE"
+    assert data["power_level"] == 2
+    mock_client.get_mode_settings.assert_not_called()
+
+
+async def test_get_port_status_genuine_off_no_secondary_call(mock_client):
+    """curMode=1 (OFF) with speak=0 is genuine OFF — secondary call not made."""
+    mock_client.get_devices.return_value = [{
+        **MOCK_DEVICE_LEGACY,
+        "deviceInfo": {
+            **MOCK_DEVICE_LEGACY["deviceInfo"],
+            "ports": [
+                {"port": 1, "portName": "Filter", "speak": 0, "portsLoad": 1,
+                 "loadState": 0, "curMode": 1, "remainTime": 0},
+            ],
+        },
+    }]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_status("C58ZA", 1)
+    data = json.loads(result)
+    assert data["mode"] == "OFF"
+    mock_client.get_mode_settings.assert_not_called()
+
+
+async def test_get_port_status_advance_heuristic_curmode1_speak_nonzero(mock_client):
+    """curMode=1 with speak>0 triggers secondary call; modeType=15 → ADVANCE."""
+    mock_client.get_devices.return_value = [{
+        **MOCK_DEVICE_LEGACY,
+        "deviceInfo": {
+            **MOCK_DEVICE_LEGACY["deviceInfo"],
+            "ports": [
+                {"port": 1, "portName": "Right Fan", "speak": 2, "portsLoad": 1,
+                 "loadState": 1, "curMode": 1, "remainTime": 0},
+            ],
+        },
+    }]
+    mock_client.get_mode_settings.return_value = {"modeType": 15}
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_status("C58ZA", 1)
+    data = json.loads(result)
+    assert data["mode"] == "ADVANCE"
+    mock_client.get_mode_settings.assert_called_once()
+
+
+async def test_get_port_status_advance_heuristic_secondary_call_returns_non_advance(mock_client):
+    """curMode=1 with speak>0 triggers secondary call; modeType!=15 → OFF (fallback)."""
+    mock_client.get_devices.return_value = [{
+        **MOCK_DEVICE_LEGACY,
+        "deviceInfo": {
+            **MOCK_DEVICE_LEGACY["deviceInfo"],
+            "ports": [
+                {"port": 1, "portName": "Fan", "speak": 3, "portsLoad": 1,
+                 "loadState": 1, "curMode": 1, "remainTime": 0},
+            ],
+        },
+    }]
+    mock_client.get_mode_settings.return_value = {"modeType": 2}
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_status("C58ZA", 1)
+    data = json.loads(result)
+    assert data["mode"] == "OFF"
+
+
+async def test_get_port_status_curmode_not_in_mode_labels_secondary_call(mock_client):
+    """curMode not in _MODE_LABELS (e.g. None) triggers secondary call to verify ADVANCE."""
+    mock_client.get_devices.return_value = [{
+        **MOCK_DEVICE_LEGACY,
+        "deviceInfo": {
+            **MOCK_DEVICE_LEGACY["deviceInfo"],
+            "ports": [
+                {"port": 1, "portName": "Fan", "speak": 0, "portsLoad": 1,
+                 "loadState": 1, "curMode": None, "remainTime": 0},
+            ],
+        },
+    }]
+    mock_client.get_mode_settings.return_value = {"modeType": 0}
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_status("C58ZA", 1)
+    data = json.loads(result)
+    assert data["mode"] == "UNKNOWN"
+    mock_client.get_mode_settings.assert_called_once()
+
+
+async def test_get_port_status_check_advance_mode_exception_falls_back(mock_client):
+    """If get_mode_settings raises in _check_advance_mode, falls back to decoded mode."""
+    mock_client.get_devices.return_value = [{
+        **MOCK_DEVICE_LEGACY,
+        "deviceInfo": {
+            **MOCK_DEVICE_LEGACY["deviceInfo"],
+            "ports": [
+                {"port": 1, "portName": "Fan", "speak": 2, "portsLoad": 1,
+                 "loadState": 1, "curMode": 1, "remainTime": 0},
+            ],
+        },
+    }]
+    mock_client.get_mode_settings.side_effect = RuntimeError("network error")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_status("C58ZA", 1)
+    data = json.loads(result)
+    assert data["mode"] == "OFF"  # fallback to decoded curMode=1
 
 
 # ============ get_port_settings ============
@@ -2147,6 +2332,29 @@ async def test_get_port_settings_generic_exception(mock_client):
     assert "error" in data
 
 
+async def test_get_port_settings_advance_mode_returns_early(mock_client):
+    """modeType=15 in settings returns ADVANCE mode with all automation targets null."""
+    mock_client.get_mode_settings.return_value = {
+        **MOCK_MODE_SETTINGS_BASIC,
+        "modeType": 15,
+        "onSpead": 2,
+    }
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_settings("C58ZA", 1)
+    data = json.loads(result)
+    assert data["mode"] == "ADVANCE"
+    assert data["advance_automation"] is True
+    assert data["speed_target"] == 2
+    assert data["vpd_target_kpa"] is None
+    assert data["temp_range_c"] is None
+    assert data["humidity_range_pct"] is None
+    assert data["schedule_window"] is None
+    assert data["cycle_on_seconds"] is None
+    assert data["cycle_off_seconds"] is None
+    assert data["timer_on_seconds"] is None
+    assert data["timer_off_seconds"] is None
+
+
 # ============ _parse_schedule_time ============
 
 def test_parse_schedule_time_valid():
@@ -2312,6 +2520,27 @@ async def test_set_vpd_automation_generic_exception(mock_client):
     assert "error" in data
 
 
+async def test_set_vpd_automation_advance_conflict(mock_client):
+    """ACInfinityAdvanceConflictError → structured conflict response, not a generic error."""
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("modeType=15")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_vpd_automation("C58ZA", 1, 1.4)
+    data = json.loads(result)
+    assert data["conflict"] == "ADVANCE_AUTOMATION"
+    assert "summary" in data
+    assert "error" not in data
+
+
+async def test_set_vpd_automation_device_error_non_advance(mock_client):
+    """Base ACInfinityDeviceError → plain error response."""
+    mock_client.set_port_mode.side_effect = ACInfinityDeviceError("loadType guard")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_vpd_automation("C58ZA", 1, 1.4)
+    data = json.loads(result)
+    assert "error" in data
+    assert "loadType guard" in data["error"]
+
+
 # ============ set_temperature_automation ============
 
 MOCK_TEMP_DRY = {
@@ -2417,6 +2646,26 @@ async def test_set_temperature_automation_generic_exception(mock_client):
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await set_temperature_automation("C58ZA", 1, 20.0, 28.0)
     assert "error" in json.loads(result)
+
+
+async def test_set_temperature_automation_advance_conflict(mock_client):
+    """ACInfinityAdvanceConflictError → structured conflict response."""
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("modeType=15")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_temperature_automation("C58ZA", 1, 20.0, 28.0)
+    data = json.loads(result)
+    assert data["conflict"] == "ADVANCE_AUTOMATION"
+    assert "error" not in data
+
+
+async def test_set_temperature_automation_device_error_non_advance(mock_client):
+    """Base ACInfinityDeviceError → plain error response."""
+    mock_client.set_port_mode.side_effect = ACInfinityDeviceError("loadType guard")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_temperature_automation("C58ZA", 1, 20.0, 28.0)
+    data = json.loads(result)
+    assert "error" in data
+    assert "loadType guard" in data["error"]
 
 
 @pytest.mark.parametrize(
@@ -2544,6 +2793,26 @@ async def test_set_humidity_automation_generic_exception(mock_client):
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await set_humidity_automation("C58ZA", 1, 50.0, 70.0)
     assert "error" in json.loads(result)
+
+
+async def test_set_humidity_automation_advance_conflict(mock_client):
+    """ACInfinityAdvanceConflictError → structured conflict response."""
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("modeType=15")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_humidity_automation("C58ZA", 1, 50.0, 70.0)
+    data = json.loads(result)
+    assert data["conflict"] == "ADVANCE_AUTOMATION"
+    assert "error" not in data
+
+
+async def test_set_humidity_automation_device_error_non_advance(mock_client):
+    """Base ACInfinityDeviceError → plain error response."""
+    mock_client.set_port_mode.side_effect = ACInfinityDeviceError("loadType guard")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_humidity_automation("C58ZA", 1, 50.0, 70.0)
+    data = json.loads(result)
+    assert "error" in data
+    assert "loadType guard" in data["error"]
 
 
 @pytest.mark.parametrize(
@@ -2814,6 +3083,26 @@ async def test_set_port_mode_generic_exception(mock_client):
     assert "error" in json.loads(result)
 
 
+async def test_set_port_mode_advance_conflict(mock_client):
+    """ACInfinityAdvanceConflictError → structured conflict response."""
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("modeType=15")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_mode("C58ZA", 1, "OFF")
+    data = json.loads(result)
+    assert data["conflict"] == "ADVANCE_AUTOMATION"
+    assert "error" not in data
+
+
+async def test_set_port_mode_device_error_non_advance(mock_client):
+    """Base ACInfinityDeviceError → plain error response."""
+    mock_client.set_port_mode.side_effect = ACInfinityDeviceError("loadType guard triggered")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_mode("C58ZA", 1, "OFF")
+    data = json.loads(result)
+    assert "error" in data
+    assert "loadType guard" in data["error"]
+
+
 # ============ apply_grow_stage_template ============
 
 
@@ -3035,6 +3324,37 @@ async def test_apply_grow_stage_template_get_devices_unexpected(mock_client):
     assert data["detail"] == "see server logs"
     assert "should-not-leak" not in result
     assert "appPasswordl=" not in result
+
+
+async def test_apply_grow_stage_template_advance_conflict(mock_client):
+    """ACInfinityAdvanceConflictError from write → structured conflict, not opaque error."""
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("modeType=15")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await apply_grow_stage_template("C58ZA", 1, "veg", dry_run=False)
+    data = json.loads(result)
+    assert data["conflict"] == "ADVANCE_AUTOMATION"
+    assert "summary" in data
+    assert "error" not in data
+
+
+async def test_apply_grow_stage_template_device_error_non_advance(mock_client):
+    """Base ACInfinityDeviceError from write → plain error response."""
+    mock_client.set_port_mode.side_effect = ACInfinityDeviceError("loadType guard")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await apply_grow_stage_template("C58ZA", 1, "veg", dry_run=False)
+    data = json.loads(result)
+    assert "error" in data
+    assert "loadType guard" in data["error"]
+
+
+async def test_apply_grow_stage_template_write_generic_exception(mock_client):
+    """RuntimeError from write → generic error response (not str(e) leak)."""
+    mock_client.set_port_mode.side_effect = RuntimeError("unexpected write crash")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await apply_grow_stage_template("C58ZA", 1, "veg", dry_run=False)
+    data = json.loads(result)
+    assert data["error"] == "Unexpected error"
+    assert "unexpected write crash" not in result
 
 
 # ============ MCP Prompts ============
