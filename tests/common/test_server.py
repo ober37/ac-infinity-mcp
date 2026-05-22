@@ -2823,30 +2823,65 @@ async def test_apply_grow_stage_template_ai_plus_dry_run(mock_client):
 
 
 async def test_apply_grow_stage_template_api_error_on_write(mock_client):
+    """API errors during write return a generic message (P3-C2-F003)."""
     mock_client.set_port_mode.side_effect = ACInfinityAPIError("Data saving failed")
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await apply_grow_stage_template("C58ZA", 1, "veg", dry_run=False)
     data = json.loads(result)
-    assert "error" in data
-    assert "Data saving failed" in data["error"]
+    assert data["error"] == "AC Infinity API error"
+    assert data["detail"] == "see server logs"
+    # Raw upstream text must not leak
+    assert "Data saving failed" not in result
 
 
 async def test_apply_grow_stage_template_auth_error(mock_client):
-    mock_client.set_port_mode.side_effect = ACInfinityAuthError("expired")
+    """Auth errors from the write call return a friendly auth-error message."""
+    mock_client.set_port_mode.side_effect = ACInfinityAuthError("token expired")
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await apply_grow_stage_template("C58ZA", 1, "veg", dry_run=False)
     data = json.loads(result)
-    assert "error" in data
-    assert "expired" in data["error"]
+    assert "Authentication failed" in data["error"]
+    # Raw exception text must not leak (P1-C2-F003)
+    assert "token expired" not in result
+    assert data["detail"] == "see server logs"
 
 
 async def test_apply_grow_stage_template_get_devices_exception(mock_client):
-    mock_client.get_devices.side_effect = ACInfinityAPIError("network error")
+    """API errors during get_devices return a generic error, not str(e) (P1-C2-F003)."""
+    mock_client.get_devices.side_effect = ACInfinityAPIError("upstream said: foo bar")
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await apply_grow_stage_template("C58ZA", 1, "veg", dry_run=True)
     data = json.loads(result)
-    assert "error" in data
+    assert data["error"] == "AC Infinity API error"
+    assert data["detail"] == "see server logs"
+    # Raw upstream text must not leak
+    assert "upstream said: foo bar" not in result
     assert mock_client.set_port_mode.call_count == 0
+
+
+async def test_apply_grow_stage_template_get_devices_auth_error(mock_client):
+    """Auth error during get_devices returns the auth-failure path (not generic)."""
+    mock_client.get_devices.side_effect = ACInfinityAuthError("login rejected")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await apply_grow_stage_template("C58ZA", 1, "veg", dry_run=True)
+    data = json.loads(result)
+    assert "Authentication failed" in data["error"]
+    assert "login rejected" not in result
+    assert mock_client.set_port_mode.call_count == 0
+
+
+async def test_apply_grow_stage_template_get_devices_unexpected(mock_client):
+    """Unexpected RuntimeError during get_devices returns generic message (not str(e))."""
+    mock_client.get_devices.side_effect = RuntimeError(
+        "trace contains appPasswordl=should-not-leak"
+    )
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await apply_grow_stage_template("C58ZA", 1, "veg", dry_run=True)
+    data = json.loads(result)
+    assert data["error"] == "Unexpected error"
+    assert data["detail"] == "see server logs"
+    assert "should-not-leak" not in result
+    assert "appPasswordl=" not in result
 
 
 # ============ MCP Prompts ============

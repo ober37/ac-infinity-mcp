@@ -1698,11 +1698,30 @@ async def apply_grow_stage_template(
 
     try:
         devices = await asyncio.to_thread(_client().get_devices)
-    except Exception as e:
+    except ACInfinityAuthError as e:
         logger.warning(
-            "Error fetching devices in apply_grow_stage_template (device=%s): %s", device_id, e
+            "Auth error fetching devices in apply_grow_stage_template (device=%s): %s",
+            device_id, e,
         )
-        return json.dumps({"error": str(e)})
+        return json.dumps({
+            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "detail": "see server logs",
+        })
+    except ACInfinityAPIError as e:
+        logger.error(
+            "API error fetching devices in apply_grow_stage_template (device=%s): %s",
+            device_id, e,
+        )
+        return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
+    except Exception as e:
+        # P1-C2-F003 / P3-C2-F010: previously returned str(e) here, which echoed
+        # arbitrary exception text into the LLM-facing response. Match the
+        # generic pattern used elsewhere.
+        logger.error(
+            "Unexpected error fetching devices in apply_grow_stage_template (device=%s): %s",
+            device_id, e, exc_info=True,
+        )
+        return json.dumps({"error": "Unexpected error", "detail": "see server logs"})
 
     device = next((d for d in devices if d.get("devCode") == device_id), None)
     if not device:
@@ -1731,12 +1750,21 @@ async def apply_grow_stage_template(
         write_result = await asyncio.to_thread(
             _client().set_port_mode, device, port, updates, dry_run
         )
-    except (ACInfinityAuthError, ACInfinityAPIError, ACInfinityDeviceError) as e:
+    except ACInfinityAuthError as e:
         logger.warning(
-            "Error in apply_grow_stage_template (device=%s port=%s stage=%s): %s",
+            "Auth error in apply_grow_stage_template (device=%s port=%s stage=%s): %s",
             device_id, port, stage, e,
         )
-        return json.dumps({"error": str(e)})
+        return json.dumps({
+            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "detail": "see server logs",
+        })
+    except (ACInfinityAPIError, ACInfinityDeviceError) as e:
+        logger.error(
+            "API/device error in apply_grow_stage_template (device=%s port=%s stage=%s): %s",
+            device_id, port, stage, e,
+        )
+        return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
     except Exception as e:
         logger.error("Unexpected error in apply_grow_stage_template: %s", e, exc_info=True)
         return json.dumps({
