@@ -223,3 +223,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local project report (not published to GitHub)
+PROJECT_REPORT.md
+
+# Local review findings (uncommitted; tracks per-cycle persona findings)
+.claude/REVIEW_FINDINGS.md
