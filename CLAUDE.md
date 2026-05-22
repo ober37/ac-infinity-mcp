@@ -65,11 +65,17 @@ Run each command and confirm the expected output before checking the box:
       → Expected: `All checks passed.`
 - [ ] `mypy src/ac_infinity_mcp/`
       → Expected: `Success: no issues found in N source files`
-- [ ] `python3 -m pytest tests/common/ tests/devices/ -v`
-      → Expected: all tests pass, 0 errors, 0 failures
-- [ ] `pip-audit`
-      → Expected: no known vulnerabilities (document any new CVEs; existing `mcp` upstream
-        noise is accepted risk — see Gate 3 notes in `docs/API.md`)
+- [ ] `python3 -m pytest tests/common/ tests/devices/ tests/integration/test_mcp_protocol.py -v`
+      → Expected: all tests pass, 0 errors, 0 failures.
+      Matches the CI invocation in `.github/workflows/ci.yml` (which runs `pytest tests/`
+      minus the live-API skip path). Running the narrower `tests/common/ tests/devices/`
+      set locally misses the MCP wire-protocol integration tests; CI catches regressions
+      there but local gate-4 wouldn't (P2-F022).
+- [ ] `pip-audit --ignore-vuln PYSEC-2025-183`
+      → Expected: no known vulnerabilities. PYSEC-2025-183 is an accepted-risk upstream
+        `mcp` CVE — see `docs/SECURITY-RISKS.md` (or the "Accepted Dependency CVEs"
+        section in `docs/API.md`) for the rationale. Document any **new** CVEs as they
+        appear; do not blanket-ignore.
 
 **Gate 5 — Manual Smoke Test Proposal + Execution**
 - Write smoke test plan for the PR scope
