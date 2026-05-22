@@ -68,11 +68,19 @@ _FIELD_PATTERN = re.compile(
     r"(appPasswordl|appPassword|AC_INFINITY_PASSWORD|appEmail|token|appId|userId)"
     r"(['\"]?\s*[:=]\s*)"
     # Value: either quoted (any chars until matching quote) or unquoted (any
-    # chars until a JSON-structural terminator). The structural terminator set
-    # is intentionally narrow — newline, comma, closing brace/bracket, end of
-    # string. A naked space mid-value (e.g. password with embedded whitespace)
-    # is preserved as part of the value and therefore still redacted.
-    r"(?:(['\"])([^'\"]*)\3|([^\n,}\]]+))",
+    # chars until a structural terminator). The terminator set covers JSON
+    # delimiters (newline, comma, closing brace/bracket) AND URL/query
+    # separators (`&`, `;`) so URL-query credentials don't swallow trailing
+    # params — `?userId=tok&other=val` redacts only the token, not `&other=val`
+    # (Cycle 3 P1-C3-F002).
+    #
+    # A naked whitespace inside a value (e.g. password with embedded space) is
+    # preserved as part of the value so we never under-redact a Cycle 2
+    # P3-C2-F004-class leak. The remaining edge case — two adjacent credential
+    # markers in space-separated positional form on the same log line
+    # (P1-C3-F001) — does not occur in any production log site in this server
+    # and is documented as an accepted trade-off.
+    r"(?:(['\"])([^'\"]*)\3|([^\n,}\];&]+))",
     re.IGNORECASE,
 )
 

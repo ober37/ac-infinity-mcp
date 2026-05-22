@@ -187,6 +187,12 @@ async def test_read_tools_do_not_echo_appEmail(mock_client, caplog, tool_name, a
     # P3-C2-F004: password with embedded space — value pattern stops at structural
     # terminators (comma, newline, brace), NOT at whitespace
     ("appPasswordl=hunter pwd2,trailing", "appPasswordl=<redacted>,trailing"),
+    # P1-C3-F002: URL query with trailing params — `&` is a terminator so the
+    # trailing params survive redaction
+    (
+        "GET http://api/v1?userId=TOK&page=1&size=20",
+        "GET http://api/v1?userId=<redacted>&page=1&size=20",
+    ),
 ])
 def test_credential_redaction_redacts_known_fields(raw, expected):
     """The redactor must scrub credential field values across multiple shapes."""
