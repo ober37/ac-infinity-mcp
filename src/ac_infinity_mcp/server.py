@@ -178,11 +178,11 @@ async def discover_devices() -> str:
         logger.warning("Auth error in discover_devices: %s", e)
         return json.dumps({
             "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
-            "detail": str(e),
+            "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
         logger.error("API error in discover_devices: %s", e)
-        return json.dumps({"error": "AC Infinity API error", "detail": str(e)})
+        return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
     except Exception as e:
         logger.error("Unexpected error in discover_devices: %s", e, exc_info=True)
         return json.dumps({
@@ -236,11 +236,11 @@ async def get_device_reading(device_id: str) -> str:
         logger.warning("Auth error in get_device_reading: %s", e)
         return json.dumps({
             "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
-            "detail": str(e),
+            "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
         logger.error("API error in get_device_reading: %s", e)
-        return json.dumps({"error": "AC Infinity API error", "detail": str(e)})
+        return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
     except Exception as e:
         logger.error("Unexpected error in get_device_reading: %s", e, exc_info=True)
         return json.dumps({
@@ -435,11 +435,11 @@ async def get_historical_readings(
         logger.warning("Auth error in get_historical_readings: %s", e)
         return json.dumps({
             "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
-            "detail": str(e),
+            "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
         logger.error("API error in get_historical_readings: %s", e)
-        return json.dumps({"error": "AC Infinity API error", "detail": str(e)})
+        return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
     except Exception as e:
         logger.error("Unexpected error in get_historical_readings: %s", e, exc_info=True)
         return json.dumps({
@@ -525,11 +525,11 @@ async def check_vpd_drift(device_id: str, stage: str = "veg") -> str:
         logger.warning("Auth error in check_vpd_drift: %s", e)
         return json.dumps({
             "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
-            "detail": str(e),
+            "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
         logger.error("API error in check_vpd_drift: %s", e)
-        return json.dumps({"error": "AC Infinity API error", "detail": str(e)})
+        return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
     except Exception as e:
         logger.error("Unexpected error in check_vpd_drift: %s", e, exc_info=True)
         return json.dumps({
@@ -578,11 +578,11 @@ async def get_all_device_readings() -> str:
         logger.warning("Auth error in get_all_device_readings: %s", e)
         return json.dumps({
             "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
-            "detail": str(e),
+            "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
         logger.error("API error in get_all_device_readings: %s", e)
-        return json.dumps({"error": "AC Infinity API error", "detail": str(e)})
+        return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
     except Exception as e:
         logger.error("Unexpected error in get_all_device_readings: %s", e, exc_info=True)
         return json.dumps({
@@ -625,11 +625,11 @@ async def get_environment_health(device_id: str, stage: str = "veg") -> str:
         logger.warning("Auth error in get_environment_health: %s", e)
         return json.dumps({
             "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
-            "detail": str(e),
+            "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
         logger.error("API error in get_environment_health: %s", e)
-        return json.dumps({"error": "AC Infinity API error", "detail": str(e)})
+        return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
     except Exception as e:
         logger.error("Unexpected error in get_environment_health: %s", e, exc_info=True)
         return json.dumps({
@@ -682,11 +682,11 @@ async def detect_environment_trends(device_id: str, days: int = 7) -> str:
         logger.warning("Auth error in detect_environment_trends: %s", e)
         return json.dumps({
             "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
-            "detail": str(e),
+            "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
         logger.error("API error in detect_environment_trends: %s", e)
-        return json.dumps({"error": "AC Infinity API error", "detail": str(e)})
+        return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
     except Exception as e:
         logger.error("Unexpected error in detect_environment_trends: %s", e, exc_info=True)
         return json.dumps({
@@ -735,11 +735,11 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         logger.warning("Auth error in get_port_activity_report: %s", e)
         return json.dumps({
             "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
-            "detail": str(e),
+            "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
         logger.error("API error in get_port_activity_report: %s", e)
-        return json.dumps({"error": "AC Infinity API error", "detail": str(e)})
+        return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
     except Exception as e:
         logger.error("Unexpected error in get_port_activity_report: %s", e, exc_info=True)
         return json.dumps({
@@ -858,11 +858,11 @@ async def get_port_status(device_id: str, port: int) -> str:
         logger.warning("Auth error in get_port_status: %s", e)
         return json.dumps({
             "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
-            "detail": str(e),
+            "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
         logger.error("API error in get_port_status: %s", e)
-        return json.dumps({"error": "AC Infinity API error", "detail": str(e)})
+        return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
     except Exception as e:
         logger.error("Unexpected error in get_port_status: %s", e, exc_info=True)
         return json.dumps({
@@ -984,11 +984,11 @@ async def get_port_settings(device_id: str, port: int) -> str:
         logger.warning("Auth error in get_port_settings: %s", e)
         return json.dumps({
             "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
-            "detail": str(e),
+            "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
         logger.error("API error in get_port_settings: %s", e)
-        return json.dumps({"error": "AC Infinity API error", "detail": str(e)})
+        return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
     except Exception as e:
         logger.error("Unexpected error in get_port_settings: %s", e, exc_info=True)
         return json.dumps({

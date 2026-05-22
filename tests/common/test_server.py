@@ -233,6 +233,33 @@ def test_credential_redaction_scrubs_exception_traceback():
     assert "topsecret123" not in buf.getvalue()
 
 
+@pytest.mark.parametrize("exc_class,exc_msg,tool_call", [
+    # P3-C2-F003: typed exception text constructed from upstream API msg used to
+    # land verbatim in the LLM-facing "detail" field. Detail now routes to logs.
+    (ACInfinityAPIError, "Reflected appEmail=victim@example.com from upstream", "discover_devices"),
+    (ACInfinityAuthError, "Token rejected: appPasswordl=hunter2", "discover_devices"),
+])
+async def test_typed_exception_text_does_not_leak_to_mcp_response(
+    mock_client, exc_class, exc_msg, tool_call
+):
+    """Upstream-constructed exception messages must not appear in the MCP JSON response."""
+    import ac_infinity_mcp.server as server_module
+    tool = getattr(server_module, tool_call)
+    mock_client.get_devices.side_effect = exc_class(exc_msg)
+
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await tool()
+
+    # The exception message should NOT appear in the JSON response
+    assert "victim@example.com" not in result
+    assert "hunter2" not in result
+    assert "appEmail=" not in result
+    assert "appPasswordl=" not in result
+    # And the response should route the caller to logs
+    data = json.loads(result)
+    assert data["detail"] == "see server logs"
+
+
 def test_credential_redactor_installed_on_root_handlers():
     """P2-C2-F006: pin that the formatter is actually attached, not just constructible."""
     import logging
