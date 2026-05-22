@@ -174,14 +174,17 @@ def test_live_apply_grow_stage_template_dry_run(
         srv.apply_grow_stage_template(live_device_id, port=1, stage="veg", dry_run=True)
     )
     data = json.loads(result)
+    # Cycle 1 refactor (commit 4fd7497) collapsed the three sequential writes
+    # into a single atomic write — response is now flat sent/payload, not
+    # per-target nested. P2-C2-F002.
     assert data.get("dry_run") is True
-    assert data["vpd"]["sent"] is False
-    assert data["temperature"]["sent"] is False
-    assert data["humidity"]["sent"] is False
-    assert "payload" in data["vpd"]
-    assert "payload" in data["temperature"]
-    assert "payload" in data["humidity"]
+    assert data["sent"] is False
+    assert "payload" in data
     assert data["vpd"]["target_kpa"] == 1.25
+    assert data["temperature"]["min_c"] == 20.0
+    assert data["temperature"]["max_c"] == 28.0
+    assert data["humidity"]["min_rh"] == 50.0
+    assert data["humidity"]["max_rh"] == 70.0
     assert "error" not in data
 
 
