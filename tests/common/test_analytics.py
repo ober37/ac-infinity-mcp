@@ -528,11 +528,12 @@ def test_build_activity_report_peak_hour_none_when_never_ran():
 
 
 def test_build_activity_report_on_off_hours_complement():
-    """on_hours + off_hours == days * 24 exactly (no float drift)."""
+    """on_hours + off_hours == days * 24; on_hours magnitude is correct (70% of 72h)."""
     readings = _port_readings_for_days(on_count=7, off_count=3)
     days = 3
     result = build_activity_report(readings, days=days)
     assert len(result) == 1
+    assert result[0].on_hours == pytest.approx(50.4)  # 7/10 * 24 * 3
     total = result[0].on_hours + result[0].off_hours
     assert total == pytest.approx(days * 24)
 
