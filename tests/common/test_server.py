@@ -4800,7 +4800,7 @@ async def test_create_advance_automation_live_port_zero_error(mock_client):
 
 
 async def test_create_advance_automation_live_no_schedule(mock_client):
-    """begin_time=255, end_time=255 → Always active, null times, raw 255 in payload."""
+    """begin_time=255, end_time=255 → Always active; payload uses 0/1439 full-day range."""
     mock_client.create_advance_automation.return_value = {"advId": 5555}
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await create_advance_automation(
@@ -4813,8 +4813,10 @@ async def test_create_advance_automation_live_no_schedule(mock_client):
     assert data["begin_time"] is None
     assert data["end_time"] is None
     _, payload = mock_client.create_advance_automation.call_args[0]
-    assert payload["beginTime"] == 255
-    assert payload["endTime"] == 255
+    # Sentinel 255 maps to valid full-day range; raw 255 is rejected by the API.
+    assert payload["beginTime"] == 0
+    assert payload["endTime"] == 1439
+    assert payload["switchTime"] == 127
 
 
 async def test_create_advance_automation_live_adv_id_mapping(mock_client):
@@ -4890,8 +4892,8 @@ async def test_create_advance_automation_dry_run_schedule_summary(mock_client):
     mock_client.create_advance_automation.assert_not_called()
 
 
-async def test_create_advance_automation_off_speed_nonzero(mock_client):
-    """off_speed=5 → payload offSpeed=5 forwarded to client."""
+async def test_create_advance_automation_off_speed_always_zero(mock_client):
+    """off_speed param is ignored — On mode always sends offSpeed=0 (port's min is used)."""
     mock_client.create_advance_automation.return_value = {"advId": 1234}
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await create_advance_automation(
@@ -4900,7 +4902,8 @@ async def test_create_advance_automation_off_speed_nonzero(mock_client):
     data = json.loads(result)
     assert data["sent"] is True
     _, payload = mock_client.create_advance_automation.call_args[0]
-    assert payload["offSpeed"] == 5
+    assert payload["offSpeed"] == 0
+    assert payload["switchTime"] == 127
 
 
 async def test_create_advance_automation_mixed_255_sentinel_rejected(mock_client):

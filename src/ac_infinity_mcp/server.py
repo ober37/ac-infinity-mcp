@@ -2700,16 +2700,17 @@ async def create_advance_automation(
         name: Automation name (max 64 chars, control chars stripped).
         on_speed: Fan speed when automation is active (1–10).
         port: 1-based port number the automation should control (1–8).
-        off_speed: Fan speed when automation is inactive (0–10). Default: 0.
-        begin_time: Schedule start in minutes since midnight (0–1439, or 255=no schedule).
-            Default: 0 (midnight). Use 255 for "always active".
-        end_time: Schedule end in minutes since midnight (0–1439, or 255=no schedule).
+        off_speed: Not used — On mode relies on the port's own minimum speed setting.
+            Parameter accepted for compatibility but not sent to the device.
+        begin_time: Schedule start in minutes since midnight (0–1439, or 255=always active).
+            Default: 0 (midnight). Use 255 for "always active" (runs 00:00–23:59 every day).
+        end_time: Schedule end in minutes since midnight (0–1439, or 255=always active).
             Default: 1439 (23:59). Use 255 for "always active".
         dry_run: If True (default), previews the automation without sending it.
             Set to False to create the automation on the device.
 
     Returns:
-        JSON with action, name, port, port_name, on_speed, off_speed, begin_time,
+        JSON with action, name, port, port_name, on_speed, begin_time,
         end_time, schedule_summary, dry_run, sent. Live responses also include
         automation_id (for programmatic chaining — do not surface to the user; use
         ``name`` instead). On failure returns ``{"error": "..."}``.
@@ -2827,9 +2828,11 @@ async def create_advance_automation(
             "currentMode": 1,
             "isOn": 1,
             "onSpeed": on_speed,
-            "offSpeed": off_speed,
-            "beginTime": begin_time,
-            "endTime": end_time,
+            # On mode has no user-settable min; port's own min setting is used.
+            "offSpeed": 0,
+            # Map "always active" sentinel (255) to a valid full-day range.
+            "beginTime": 0 if begin_time == 255 else begin_time,
+            "endTime": 1439 if end_time == 255 else end_time,
             "groupNums": 9,
             "sortType": 9,
             "subNumber": 0,
@@ -2861,7 +2864,9 @@ async def create_advance_automation(
             "cycleOff": 0,
             "onTime": 0,
             "onTimeSwitch": 0,
-            "switchTime": 255,
+            # 127 = binary 01111111 = all 7 days bitmask. 255 has bit 7 set which
+            # causes the app to ignore the schedule and treat it as Continuous.
+            "switchTime": 127,
             "dualZoneSwitch": 1,
             "photocellSwitch": 0,
             "isOpenDoseTime": 0,
