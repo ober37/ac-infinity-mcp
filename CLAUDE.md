@@ -15,6 +15,12 @@ This file is the authoritative source for how Claude agents contribute to this r
 - **PRs are never merged without explicit user permission.** After Gate 5 approval and all CI
   gates pass, present the status to the user and wait for them to say "merge" (or equivalent)
   before running `gh pr merge`.
+- **Before declaring CI green or recommending merge, verify the PR's actual branch state:**
+  Run `gh pr view <N> --json mergeStateStatus,headRefOid,headRefName` and confirm
+  `mergeStateStatus` is `CLEAN` (not `BEHIND` or `DIRTY`), and that `headRefOid` matches the
+  local branch HEAD (`git rev-parse HEAD`). A PR that is `BEHIND` main must be rebased and
+  re-pushed before the all-clear is given. Never report CI passing from a stale run — confirm
+  the run SHA matches the current HEAD SHA.
 
 ---
 
