@@ -802,11 +802,15 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
     Returns:
         JSON with per-port on_hours (total hours ON over the full period), off_hours,
         transitions, avg_speed_when_running, uptime_pct, and peak_hour_utc (UTC hour
-        0–23 of highest activity, or null if the port never ran).
+        0–23 of highest activity, or null if the port never ran). If peak_hour_utc is
+        not null, describe it as 'most active around {peak_hour_utc}:00 UTC'; always
+        note that this is UTC time and growers should convert to their local timezone.
 
-    When presenting on_hours to a grower, translate it from raw hours to natural
-    language, e.g.: "The fan ran for 36.0 hours over the past 3 days (about 50% of
-    the time)." Do NOT describe on_hours as hours per day.
+    Presentation guidance:
+        - Always refer to ports as 'Name (Port N)', e.g., 'Exhaust Fan (Port 3)'.
+        - When presenting on_hours to a grower, translate it from raw hours to natural
+          language, e.g.: "The fan ran for 36.0 hours over the past 3 days (about 50%
+          of the time)." Do NOT describe on_hours as hours per day.
     """
     try:
         if not 1 <= days <= 30:
