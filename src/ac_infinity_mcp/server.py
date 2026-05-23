@@ -2710,7 +2710,8 @@ async def create_advance_automation(
             Set to False to create the automation on the device.
 
     Returns:
-        JSON with action, name, port, port_name, on_speed, begin_time,
+        JSON with action, name, port, port_name, on_speed, min_speed (the port's
+        configured minimum speed — used when the automation is inactive), begin_time,
         end_time, schedule_summary, dry_run, sent. Live responses also include
         automation_id (for programmatic chaining — do not surface to the user; use
         ``name`` instead). On failure returns ``{"error": "..."}``.
@@ -2796,6 +2797,9 @@ async def create_advance_automation(
         raw_port_nm = port_obj.get("portName")
         port_name = _sanitize_api_string(raw_port_nm, 64) if raw_port_nm else f"Port {port}"
 
+        port_settings = await asyncio.to_thread(_client().get_mode_settings, str(dev_id), port)
+        min_speed = int(port_settings.get("offSpead", 0))
+
         schedule_summary = _format_schedule_summary(begin_time, end_time)
 
         if dry_run:
@@ -2805,7 +2809,7 @@ async def create_advance_automation(
                 "port": port,
                 "port_name": port_name,
                 "on_speed": on_speed,
-                "off_speed": off_speed,
+                "min_speed": min_speed,
                 "begin_time": _format_schedule_time(begin_time),
                 "end_time": _format_schedule_time(end_time),
                 "schedule_summary": schedule_summary,
@@ -2918,7 +2922,7 @@ async def create_advance_automation(
             "port": port,
             "port_name": port_name,
             "on_speed": on_speed,
-            "off_speed": off_speed,
+            "min_speed": min_speed,
             "begin_time": _format_schedule_time(begin_time),
             "end_time": _format_schedule_time(end_time),
             "schedule_summary": schedule_summary,

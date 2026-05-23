@@ -4831,6 +4831,31 @@ async def test_create_advance_automation_live_adv_id_mapping(mock_client):
     assert isinstance(data["automation_id"], str)
 
 
+async def test_create_advance_automation_min_speed_from_port_settings(mock_client):
+    """min_speed in response comes from port's offSpead setting, not off_speed param."""
+    mock_client.get_mode_settings.return_value = {"offSpead": 3}
+    mock_client.create_advance_automation.return_value = {"advId": 9999}
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Test", on_speed=7, off_speed=5, port=1, dry_run=False
+        )
+    data = json.loads(result)
+    assert data["min_speed"] == 3
+    assert data["sent"] is True
+
+
+async def test_create_advance_automation_dry_run_includes_min_speed(mock_client):
+    """Dry run response includes min_speed from port settings."""
+    mock_client.get_mode_settings.return_value = {"offSpead": 2}
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Test", on_speed=7, port=1, dry_run=True
+        )
+    data = json.loads(result)
+    assert data["dry_run"] is True
+    assert data["min_speed"] == 2
+
+
 async def test_create_advance_automation_live_missing_adv_id(mock_client):
     """Server returns no advId → structured error, not None in output."""
     mock_client.create_advance_automation.return_value = {}
