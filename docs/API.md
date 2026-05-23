@@ -500,7 +500,7 @@ devId=REDACTED_DEV_ID&externalPort=1&onSpead=5&modeType=2&offSpead=0&...
 
 ---
 
-## All 18 Known API Quirks
+## All 19 Known API Quirks
 
 ### Quirk 1 — Auth typo: `appPasswordl`
 
@@ -859,6 +859,50 @@ in mode settings, not the ÷100 used for live sensor `vpdnums`).
 
 **Alert sound:**
 `alertSound=255` = controller beep enabled; `alertSound=0` = silent.
+
+---
+
+### Quirk 19 — `isOpenAutomation` is the authoritative ADVANCE guard; `modeType=15` alone is not sufficient
+
+This quirk extends Quirk 17 with a critical fix for the false-positive ADVANCE conflict
+detected in issue #63.
+
+**Background:** When an Advance Automation is disabled (via `disable_advance_automation` or
+in the app), the controller does **not** reset `modeType` in `getdevModeSettingList`. The
+`modeType=15` marker persists even after the automation is fully disabled — it is a static
+configuration marker, not a live-state signal.
+
+**The authoritative live-state field is `isOpenAutomation`:**
+
+| Context | Field | Meaning |
+|---|---|---|
+| `devInfoListAll` port sub-objects | `isOpenAutomation` | `1` = automation currently active; `0` = disabled |
+| `getdevModeSettingList` response | `isOpenAutomation` | Same meaning — present in both responses |
+| `getdevModeSettingList` response | `modeType` | `15` = port is configured for ADVANCE, but may or may not be actively running |
+
+**Correct guard conditions (both must be satisfied to block a write):**
+
+```python
+# In client.py _set_port_mode_inner — read from getdevModeSettingList
+if mode_type == 15 and current_settings.get("isOpenAutomation", 1) != 0:
+    raise ACInfinityAdvanceConflictError(...)
+
+# In server.py _check_advance_mode — read from devInfoListAll port data
+return "ADVANCE" if (
+    settings.get("modeType") == _ADVANCE_MODE_TYPE
+    and settings.get("isOpenAutomation", 1) != 0
+) else fallback
+```
+
+**Safe-fail default:** When the `isOpenAutomation` field is absent from the API response
+(future firmware may omit it), both guards default to `1` (treat as active). This is the
+safe conservative direction — it prevents a write to a possibly-governed port rather than
+silently overriding an automation.
+
+**Before this fix (Phase 19, PR #67):** Any port with `modeType=15` would trigger the
+ADVANCE conflict guard even after the automation was disabled, making it impossible to
+manually control ports on a controller that ever had an automation. After the fix, the
+guard only fires when the automation is confirmed active (`isOpenAutomation != 0`).
 
 ---
 
@@ -1478,6 +1522,85 @@ supported. For setting automation targets alongside the mode, prefer the dedicat
   "payload": { "...": "77-field legacy payload" }
 }
 ```
+
+---
+
+### ADVANCE_AUTOMATION conflict response (all write tools)
+
+When any write tool detects an active Advance Automation on the target port, it returns a
+structured conflict response instead of an error string. This response is returned by
+`set_port_speed`, `set_port_on`, `set_port_off`, `set_port_mode`, `set_vpd_automation`,
+`set_temperature_automation`, `set_humidity_automation`, and `apply_grow_stage_template`.
+
+**When the governing automation can be identified (normal path):**
+```json
+{
+  "conflict": "ADVANCE_AUTOMATION",
+  "summary": "While 'Moderate Airflow' automation is running, all ports on this controller are locked from manual control. Your change requires resolving this conflict first.",
+  "human_summary": "While 'Moderate Airflow' is running, all ports on this controller are locked from manual control. Disable the automation first to make manual adjustments.",
+  "target_port": "Inline Fan (Port 1)",
+  "automation_name": "Moderate Airflow",
+  "automation_id": "1234567890",
+  "active_automations": [
+    {"name": "Moderate Airflow", "automation_id": "1234567890"}
+  ],
+  "co_governed_ports": [],
+  "switching_guidance": "To regain manual control: disable all active automations using disable_advance_automation, then apply your change. To instead add this port to an automation, use create_advance_automation.",
+  "options": {
+    "1_disable_automation": {
+      "description": "Disable \"Moderate Airflow\" to regain manual control of this port.",
+      "tool": "disable_advance_automation",
+      "instruction": "Call disable_advance_automation(device_id='C58ZA', automation_id='1234567890', dry_run=True) to preview.",
+      "available": true
+    },
+    "2_break_out": {
+      "available": false,
+      "status": "Use Option 1 (disable_advance_automation) instead — break_out_of_automation is only applicable when the port is confirmed to be inside a specific automation."
+    },
+    "3_fork_automation": {
+      "available": false,
+      "status": "not_yet_implemented"
+    }
+  }
+}
+```
+
+**When the automation cannot be identified (degraded path — API error during lookup):**
+```json
+{
+  "conflict": "ADVANCE_AUTOMATION",
+  "summary": "An Advance Automation is running on this controller, locking all ports from manual control. Your change requires resolving this conflict first.",
+  "human_summary": "An active automation is blocking manual port control on this controller. Disable it first.",
+  "target_port": "Inline Fan (Port 1)",
+  "automation_name": null,
+  "automation_id": null,
+  "active_automations": [],
+  "co_governed_ports": [],
+  "switching_guidance": "To regain manual control: disable all active automations using disable_advance_automation, then apply your change. To instead add this port to an automation, use create_advance_automation.",
+  "options": {
+    "1_disable_automation": {
+      "description": "Find and disable the active automation, then apply your manual change.",
+      "tool": "list_advance_automations",
+      "instruction": "Call list_advance_automations(device_id='C58ZA') to get the automation_id of the active automation, then call disable_advance_automation(device_id='C58ZA', automation_id='<id>', dry_run=True).",
+      "available": true
+    },
+    "2_break_out": {
+      "available": false,
+      "status": "Use Option 1 (disable_advance_automation) instead — break_out_of_automation is only applicable when the port is confirmed to be inside a specific automation."
+    },
+    "3_fork_automation": {
+      "available": false,
+      "status": "not_yet_implemented"
+    }
+  }
+}
+```
+
+**Key field notes:**
+- `active_automations` — list of `{"name": ..., "automation_id": ...}` objects for all enabled automations on this controller (empty list in degraded path)
+- `human_summary` — plain-language summary suitable for display to the grower
+- `options.1_disable_automation` — replaced `1_break_out_manually` from earlier versions; always points to `disable_advance_automation`
+- The `isOpenAutomation` guard condition is documented in Quirk 19
 
 ---
 
