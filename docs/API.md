@@ -500,7 +500,7 @@ devId=REDACTED_DEV_ID&externalPort=1&onSpead=5&modeType=2&offSpead=0&...
 
 ---
 
-## All 20 Known API Quirks
+## All 21 Known API Quirks
 
 ### Quirk 1 — Auth typo: `appPasswordl`
 
@@ -948,6 +948,16 @@ def _should_include_sensor(s: dict) -> bool:
 
 This means `external_sensors` will be `[]` on a controller with no sensors plugged in,
 regardless of how many phantom slot entries the API returns.
+
+---
+
+### Quirk 21 — `onTimeSwitch` field controls schedule mode
+
+The Advance Automation API returns an `onTimeSwitch` field per group entry.
+`0` = continuous mode (always active when enabled; `beginTime`/`endTime` are irrelevant and
+should be ignored regardless of their values). `1` = scheduled mode (active only within the
+`beginTime`–`endTime` window). A missing field defaults to `0`. Values other than `0` and `1`
+are treated as continuous (safe fallback). See `_group_automations()` — `on_time_switch` key.
 
 ---
 
@@ -1784,6 +1794,7 @@ Get full detail for a single Advance Automation.
 | `automation_id` | `str` | automation_id from `list_advance_automations` |
 
 **Response:**
+**Continuous mode (always active when enabled):**
 ```json
 {
   "device_id": "C58ZA",
@@ -1792,8 +1803,9 @@ Get full detail for a single Advance Automation.
   "enabled": true,
   "currently_running": true,
   "schedule": {
-    "begin_time": "08:00",
-    "end_time": "20:00"
+    "mode": "continuous",
+    "begin_time": null,
+    "end_time": null
   },
   "port_groups": [
     {
@@ -1807,20 +1819,49 @@ Get full detail for a single Advance Automation.
     {"port": 6, "port_name": "Right Fan (Port 6)"}
   ],
   "port_resolution": "resolved",
-  "human_summary": "'Moderate Airflow' runs at speed 5 from 08:00 to 20:00, currently enabled."
+  "human_summary": "'Moderate Airflow' runs continuously at speed 5, currently enabled."
+}
+```
+
+**Scheduled mode with a time window configured:**
+```json
+{
+  "schedule": {
+    "mode": "scheduled",
+    "begin_time": "09:00",
+    "end_time": "17:00"
+  },
+  "human_summary": "'Moderate Airflow' runs at speed 5 from 09:00 to 17:00, currently enabled."
+}
+```
+
+**Scheduled mode selected but no time window set:**
+```json
+{
+  "schedule": {
+    "mode": "scheduled",
+    "begin_time": null,
+    "end_time": null,
+    "schedule_note": "scheduled mode selected but no time window is configured"
+  },
+  "human_summary": "'Moderate Airflow' runs at speed 5 on a schedule (no time window set), currently enabled."
 }
 ```
 
 **Field notes:**
-- `schedule.begin_time` / `schedule.end_time` — `null` when no schedule set (always active)
-- `port_groups` — each group has its own speed settings; `device_type` is a human-readable label derived from the `grouptDevType` port bitmask integer (e.g. `4`→port 3 → `"Inline fan/exhaust"`, `8`→port 4 → `"Clip fan"`, `48`→ports 5+6 → `"Mixed speed"`); unlabeled values fall back to `"Unknown"`
+- `schedule.mode` — `"continuous"` when `onTimeSwitch=0` (always active when enabled; `begin_time`/`end_time` are always `null`); `"scheduled"` when `onTimeSwitch=1` (active only within the configured window). See Quirk 21.
+- `schedule.begin_time` / `schedule.end_time` — `null` for continuous mode; `"HH:MM"` for scheduled mode with a time window; `null` for scheduled mode with no window configured
+- `schedule.schedule_note` — present only in scheduled mode with no time window; value: `"scheduled mode selected but no time window is configured"`
+- `port_groups` — each group has its own speed settings; `device_type` is a human-readable label (e.g. `"Inline Fan"`, `"Clip Fan"`, `"Mixed Speed Group"`) derived from the `grouptDevType` integer
 - `governed_ports` — list of `{"port": N, "port_name": "Name (Port N)"}` objects identifying which ports this automation controls; derived from `devInfoListAll` `isOpenAutomation` flags (Quirk 19)
 - `port_resolution` — one of:
   - `"resolved"` — single automation active; `governed_ports` is accurate
   - `"multiple_automations_ambiguous"` — multiple automations are simultaneously active; `governed_ports` is empty because port ownership cannot be determined
   - `"error"` — an exception occurred while resolving ports; `governed_ports` is empty
-- `human_summary` — natural-language description; adapts to single-group, multi-group, and ambiguous cases:
-  - Single group: `"'Name' runs at speed N from HH:MM to HH:MM, currently enabled."`
+- `human_summary` — natural-language description; adapts to mode and group configuration:
+  - Continuous, single group: `"'Name' runs continuously at speed N, currently enabled."`
+  - Scheduled with times, single group: `"'Name' runs at speed N from HH:MM to HH:MM, currently enabled."`
+  - Scheduled, no time window, single group: `"'Name' runs at speed N on a schedule (no time window set), currently enabled."`
   - Multi-group / ambiguous: `"'Name' is configured across multiple ports at varying speeds. Port assignment couldn't be determined — multiple automations are active..."`
   - Multi-group unambiguous: `"'Name' controls Port N Name, Port M Name at varying speeds. Currently enabled."`
 

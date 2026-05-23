@@ -2349,12 +2349,16 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
         automation_id: The automation_id from list_advance_automations.
 
     Returns:
-        JSON with automation detail including name, enabled status, schedule,
+        JSON with automation detail including name, enabled status, schedule
+        (with ``mode``: ``"continuous"`` or ``"scheduled"`` per Quirk 21;
+        ``begin_time``/``end_time`` as ``"HH:MM"`` or ``null``; optional
+        ``schedule_note`` when scheduled mode has no time window configured),
         port_groups (with human-readable device_type label per group),
         governed_ports (list of ports this automation controls, resolved from
         devInfoListAll isOpenAutomation flags), port_resolution status
         ("resolved", "multiple_automations_ambiguous", or "error"), and
-        human_summary. On failure returns ``{"error": "..."}``.
+        human_summary (adapts to continuous/scheduled/no-window variants).
+        On failure returns ``{"error": "..."}``.
     """
     try:
         adv_id_int = _validate_automation_id(automation_id)
