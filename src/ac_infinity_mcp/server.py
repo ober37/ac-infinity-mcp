@@ -2751,7 +2751,11 @@ async def create_advance_automation(
                 "error": (
                     f"Port {port} not found on device {device_id}"
                     " — devices have at most 8 ports"
-                )
+                ),
+                "suggested_reply": (
+                    f"Port {port} doesn't exist — this controller has at most 8 ports. "
+                    f"Let me look up what's connected on your device."
+                ),
             })
 
         devices = await asyncio.to_thread(_client().get_devices)

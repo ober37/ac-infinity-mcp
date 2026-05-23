@@ -4629,10 +4629,10 @@ async def test_create_advance_automation_port_zero_error(mock_client):
 
 
 async def test_create_advance_automation_port_not_found_error(mock_client):
-    """dry_run=True with port not on device → not found error with available_ports."""
+    """dry_run=True with port in 1–8 range but not on device → enriched error."""
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await create_advance_automation(
-            "C58ZA", "Night Cycle", on_speed=3, port=99, dry_run=True
+            "C58ZA", "Night Cycle", on_speed=3, port=5, dry_run=True
         )
     data = json.loads(result)
     assert "error" in data
@@ -4774,7 +4774,7 @@ async def test_create_advance_automation_live_port8(mock_client):
 
 
 async def test_create_advance_automation_live_port_too_high(mock_client):
-    """port=9 → error before any API call (at most 8 ports)."""
+    """port=9 → error before any API call (at most 8 ports), with suggested_reply."""
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await create_advance_automation(
             "C58ZA", "Test Auto", on_speed=5, port=9, dry_run=False
@@ -4782,6 +4782,7 @@ async def test_create_advance_automation_live_port_too_high(mock_client):
     data = json.loads(result)
     assert "error" in data
     assert "8 ports" in data["error"]
+    assert "suggested_reply" in data
     mock_client.get_devices.assert_not_called()
     mock_client.create_advance_automation.assert_not_called()
 
