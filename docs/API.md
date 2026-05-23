@@ -1299,11 +1299,11 @@ internally then runs pure analytics calculations — no additional API calls.
 ```
 
 **Field notes:**
-- `on_hours` / `off_hours` — calculated from raw historical records; total is `days * 24` when full data is available
+- `on_hours` / `off_hours` — cumulative total hours over the full `days` window (not hours per day); total is `days * 24` when full data is available. Present to growers as total elapsed hours, e.g. "ran 36.0 hours over the past 3 days (50%)."
 - `transitions` — number of on↔off state changes in the period
 - `avg_speed_when_running` — average `onSpead` value (1–10) across on-readings with non-zero speed
 - `uptime_pct` — `on_hours / (on_hours + off_hours) * 100`, rounded to 1 decimal
-- `peak_hour_utc` — UTC hour (0–23) with the most on-readings; `0` when no on-readings exist
+- `peak_hour_utc` — UTC hour (0–23) with the most on-readings; `null` when port never ran (always_off case). Describe to growers as 'most active around {peak_hour_utc}:00 UTC' and remind them to convert to their local timezone.
 
 ---
 
