@@ -57,6 +57,13 @@
 | ⚙️ **Automation** | `set_humidity_automation` | Enable AUTO mode with min/max % RH thresholds (`dry_run=True` by default) |
 | ⚙️ **Automation** | `set_port_mode` | Switch to any mode: OFF, ON, AUTO, VPD, CYCLE, SCHEDULE, TIMER_TO_ON, TIMER_TO_OFF (`dry_run=True` by default) |
 | 🌱 **Intelligence** | `apply_grow_stage_template` | One-click VPD + temp + humidity automation for a named grow stage (`dry_run=True` by default) |
+| 🤖 **Advance Automation** | `list_advance_automations` | List all named Advance Automation programs on a device |
+| 🤖 **Advance Automation** | `get_advance_automation` | Get full detail (schedule, port groups, run state) for one automation |
+| 🤖 **Advance Automation** | `enable_advance_automation` | Enable a disabled automation — reads state first, no-ops if already enabled (`dry_run=True` by default) |
+| 🤖 **Advance Automation** | `disable_advance_automation` | Disable an enabled automation — reads state first, no-ops if already disabled (`dry_run=True` by default) |
+| 🤖 **Advance Automation** | `create_advance_automation` | Create a new named automation with speed, schedule, and threshold settings (`dry_run=True` by default) |
+| 🤖 **Advance Automation** | `delete_advance_automation` | Delete an automation (disables first if active) (`dry_run=True` by default) |
+| 🤖 **Advance Automation** | `break_out_of_automation` | Safely break a port out of automation control and lock co-governed ports to manual speed (`dry_run=True` by default) |
 
 > ✦ All write tools (Write, Automation, and Intelligence categories) default to `dry_run=True` — they return the exact payload they *would* send without making any changes to your equipment. Pass `dry_run=False` only when you're ready to execute.
 

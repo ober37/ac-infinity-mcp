@@ -102,7 +102,7 @@ any PR can be merged.
 
 ## API Quirk Documentation
 
-The AC Infinity cloud API has 15 documented quirks that affect correct implementation.
+The AC Infinity cloud API has 18 documented quirks that affect correct implementation.
 **Read `docs/API.md` before writing any code that touches the API.**
 
 Key ones to know:

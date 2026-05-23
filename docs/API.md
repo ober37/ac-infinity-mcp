@@ -500,7 +500,7 @@ devId=REDACTED_DEV_ID&externalPort=1&onSpead=5&modeType=2&offSpead=0&...
 
 ---
 
-## All 16 Known API Quirks
+## All 18 Known API Quirks
 
 ### Quirk 1 — Auth typo: `appPasswordl`
 
@@ -916,6 +916,246 @@ notes. All tools return JSON strings. On failure every tool returns `{"error": "
 
 ---
 
+### `discover_devices()`
+
+List all AC Infinity devices on the account with their metadata.
+
+**Parameters:** None.
+
+**Response:**
+```json
+{
+  "devices": [
+    {
+      "device_id": "C58ZA",
+      "device_name": "Towlie Tent",
+      "status": "online",
+      "device_type": 11,
+      "port_count": 8,
+      "firmware_version": "3.2.56",
+      "hardware_version": "1.1"
+    }
+  ]
+}
+```
+
+**Field notes:**
+- `device_id` — the `devCode` value; used as `device_id` in all other tools (Quirk 7)
+- `status` — `"online"` or `"offline"` from the `online` bitmask field
+- `device_type` — `11` = legacy 69 Pro / 69 Pro+, `22` = AI+ 89 AI+
+- Empty account: `{"devices": [], "message": "No devices found"}`
+
+---
+
+### `get_device_reading(device_id)`
+
+Get current sensor readings (temp, humidity, VPD) and port states for one device.
+
+**Parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `device_id` | `str` | Device code from `discover_devices` |
+
+**Response:**
+```json
+{
+  "timestamp": "2026-05-20T14:32:00Z",
+  "device_id": "C58ZA",
+  "device_name": "Towlie Tent",
+  "temperature_c": 24.3,
+  "temperature_f": 75.7,
+  "humidity": 58.2,
+  "vpd": 1.31,
+  "ports": [
+    {"port": 1, "name": "Inline Fan", "speed": 5, "load": 0}
+  ],
+  "external_sensors": []
+}
+```
+
+**Field notes:**
+- `temperature_c` / `temperature_f` — decoded from raw API value ÷ 100 (Quirk 4)
+- `vpd` — decoded from `vpdnums ÷ 100` (Quirk 4, Quirk 10)
+- `ports[].speed` — current port speed 0–10 from `speak` field
+- `external_sensors` — list of UIS sensor readings when sensors are attached; empty `[]` for built-in-only devices
+
+---
+
+### `get_all_device_readings()`
+
+Get current sensor readings for all devices at once.
+
+**Parameters:** None.
+
+**Response:**
+```json
+{
+  "readings": [
+    {
+      "device_id": "C58ZA",
+      "device_name": "Towlie Tent",
+      "temperature_c": 24.3,
+      "humidity": 58.2,
+      "vpd": 1.31,
+      "ports": [...]
+    }
+  ]
+}
+```
+
+**Field notes:**
+- Each entry has the same shape as `get_device_reading`
+- Devices that fail to parse individually include `"error"` instead of sensor fields
+- Useful for a dashboard view across multiple tents/controllers
+
+---
+
+### `get_historical_readings(device_id, start_date, end_date, sample_interval="1h", time_start=None, time_end=None)`
+
+Query historical environment data with configurable bucketing and optional time-of-day filtering.
+
+**Parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `device_id` | `str` | Device code from `discover_devices` |
+| `start_date` | `str` | Start date `YYYY-MM-DD` |
+| `end_date` | `str` | End date `YYYY-MM-DD` |
+| `sample_interval` | `str` | Bucket size. `"raw"` = all records; or `"1m"`, `"5m"`, `"15m"`, `"30m"`, `"1h"`, `"2h"`, `"6h"`, `"12h"`, `"1d"` / `"daily"`. Default: `"1h"` |
+| `time_start` | `str \| None` | UTC time filter `"HH:MM"` — only return readings at or after this time |
+| `time_end` | `str \| None` | UTC time filter `"HH:MM"` — only return readings at or before this time. When `time_start > time_end`, the window crosses midnight |
+
+**Response:**
+```json
+{
+  "device_id": "C58ZA",
+  "readings": [
+    {
+      "timestamp": "2026-05-20T14:00:00Z",
+      "temperature_c": 24.1,
+      "temperature_f": 75.4,
+      "humidity": 58.0,
+      "vpd": 1.30,
+      "ports": [{"port": 1, "name": "Inline Fan", "speed": 5}]
+    }
+  ],
+  "statistics": {
+    "readings_count": 168,
+    "sample_interval": "1h",
+    "date_range": {"start": "2026-05-13", "end": "2026-05-20"},
+    "temperature_c": {"min": 20.1, "avg": 23.8, "max": 27.4},
+    "humidity": {"min": 52.0, "avg": 58.2, "max": 65.1},
+    "vpd": {"min": 1.01, "avg": 1.28, "max": 1.72},
+    "port_statistics": {
+      "Inline Fan": {"min": 0, "avg": 4.8, "max": 10}
+    }
+  }
+}
+```
+
+**Field notes:**
+- History API caps at ~1,257 records/day regardless of page size (Quirk 9)
+- `"dropped_readings"` and `"drop_reason"` keys appear when records had unparseable timestamps
+- `port_statistics` only includes ports that were on (speed > 0) at least once in the window
+
+---
+
+### `check_vpd_drift(device_id, stage="veg")`
+
+Check whether current VPD is within the target range for a named grow stage.
+
+**Parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `device_id` | `str` | Device code from `discover_devices` |
+| `stage` | `str` | One of: `clones`, `seedling`, `veg`, `early_flower`, `mid_flower`, `late_flower`. Default: `veg` |
+
+**Response:**
+```json
+{
+  "device_id": "C58ZA",
+  "current_vpd": 1.58,
+  "target_range": [1.0, 1.5],
+  "stage": "veg",
+  "status": "HIGH",
+  "deviation": 0.08,
+  "alert": "VPD 1.58 exceeds target 1.00–1.50. Raise humidity or lower temperature."
+}
+```
+
+**Field notes:**
+- `status` — `"OK"`, `"LOW"`, or `"HIGH"`
+- `deviation` — `0` when OK; positive kPa when HIGH (above upper bound); negative when LOW
+- `alert` — `null` when status is `"OK"`
+
+---
+
+### `get_environment_health(device_id, stage="veg")`
+
+Calculate a composite health score (0–100, A–F grade) across temp, humidity, and VPD.
+
+**Parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `device_id` | `str` | Device code from `discover_devices` |
+| `stage` | `str` | One of: `clones`, `seedling`, `veg`, `early_flower`, `mid_flower`, `late_flower`. Default: `veg` |
+
+**Response:**
+```json
+{
+  "device_id": "C58ZA",
+  "stage": "veg",
+  "score": 82,
+  "grade": "B",
+  "recommendation": "VPD slightly high — increase humidity or lower temperature.",
+  "vpd_score": 70,
+  "temp_score": 100,
+  "humidity_score": 85
+}
+```
+
+**Field notes:**
+- Composite score weights: VPD 40%, temperature 30%, humidity 30%
+- Grade bands: A=90–100, B=80–89, C=70–79, D=60–69, F=0–59
+- `recommendation` — top actionable suggestion based on the lowest sub-score
+
+---
+
+### `detect_environment_trends(device_id, days=7)`
+
+Detect linear trends in temperature, humidity, and VPD with a 7-day projection.
+
+**Parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `device_id` | `str` | Device code from `discover_devices` |
+| `days` | `int` | Look-back window in days (1–30). Default: 7 |
+
+**Response:**
+```json
+{
+  "device_id": "C58ZA",
+  "days_analyzed": 7,
+  "readings_used": 168,
+  "trends": [
+    {
+      "metric": "temperature_c",
+      "slope_per_hour": 0.03,
+      "direction": "rising",
+      "projection_7d": 25.1,
+      "alert": false
+    }
+  ]
+}
+```
+
+**Field notes:**
+- `slope_per_hour` — linear regression slope; positive = rising, negative = falling
+- `direction` — `"rising"`, `"falling"`, or `"stable"`
+- `projection_7d` — projected value 7 days from the last reading at the current slope
+- `alert` — `true` when the projection would leave the target range for the given stage
+
+---
+
 ### `get_port_activity_report(device_id, days=7)`
 
 Build a per-port runtime activity report from historical data. Calls `get_historical_readings`
@@ -1281,6 +1521,250 @@ the controller, or the prior state is preserved.
 
 **AI+ note:** `dry_run=True` is fully supported. `dry_run=False` returns the AI+
 unsupported error before any writes (same as individual automation tools).
+
+---
+
+## MCP Advance Automation Tools
+
+These tools manage Advance Automations — named programs that govern one or more ports
+simultaneously. See Quirk 17 and Quirk 18 for the underlying API behavior.
+
+All write tools (`enable`, `disable`, `create`, `delete`, `break_out_of_automation`) default
+to `dry_run=True` and return the planned action without executing.
+
+---
+
+### `list_advance_automations(device_id)`
+
+List all Advance Automations configured on a device.
+
+**Parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `device_id` | `str` | Device code from `discover_devices` |
+
+**Response:**
+```json
+{
+  "device_id": "C58ZA",
+  "automations": [
+    {
+      "automation_id": 12345,
+      "name": "Moderate Airflow",
+      "enabled": true,
+      "currently_running": true
+    }
+  ]
+}
+```
+
+**Field notes:**
+- `automation_id` — use this value in all other automation tools
+- `enabled` — whether the automation is active (controlled by `updateGroupsIsOn`)
+- `currently_running` — whether any port governed by this automation is actively running
+- Empty: `{"device_id": "...", "automations": []}`
+
+---
+
+### `get_advance_automation(device_id, automation_id)`
+
+Get full detail for a single Advance Automation.
+
+**Parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `device_id` | `str` | Device code from `discover_devices` |
+| `automation_id` | `str` | automation_id from `list_advance_automations` |
+
+**Response:**
+```json
+{
+  "device_id": "C58ZA",
+  "automation_id": 12345,
+  "name": "Moderate Airflow",
+  "enabled": true,
+  "currently_running": true,
+  "schedule": {
+    "begin_time": "08:00",
+    "end_time": "20:00"
+  },
+  "port_groups": [
+    {"on_speed": 5, "off_speed": 0, "ports": [1, 3]}
+  ],
+  "human_summary": "'Moderate Airflow' runs at speed 5 from 08:00 to 20:00, currently enabled."
+}
+```
+
+**Field notes:**
+- `schedule.begin_time` / `schedule.end_time` — `null` when no schedule set (always active)
+- `port_groups` — each group has its own speed settings and governed port list
+- `human_summary` — natural-language description for LLM context
+
+---
+
+### `enable_advance_automation(device_id, automation_id, dry_run=True)`
+
+Enable a previously disabled Advance Automation. No-ops if already enabled.
+
+**Parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `device_id` | `str` | Device code from `discover_devices` |
+| `automation_id` | `str` | automation_id from `list_advance_automations` |
+| `dry_run` | `bool` | Default `True` — returns plan without executing |
+
+**Response (dry_run=True):**
+```json
+{
+  "action": "enable",
+  "automation_name": "Moderate Airflow",
+  "automation_id": 12345,
+  "adv_ids_to_toggle": [12345, 12346],
+  "dry_run": true,
+  "sent": false
+}
+```
+
+**Response (already enabled):**
+```json
+{"info": "Automation 'Moderate Airflow' is already enabled. No action taken.", "dry_run": true}
+```
+
+**API note:** Uses the `updateGroupsIsOn` toggle endpoint (Quirk 18). This tool reads
+current state first and only calls the API when the automation is disabled, so a single
+toggle always results in the enabled state.
+
+---
+
+### `disable_advance_automation(device_id, automation_id, dry_run=True)`
+
+Disable a currently enabled Advance Automation. No-ops if already disabled.
+
+**Parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `device_id` | `str` | Device code from `discover_devices` |
+| `automation_id` | `str` | automation_id from `list_advance_automations` |
+| `dry_run` | `bool` | Default `True` — returns plan without executing |
+
+**Response (dry_run=True):**
+```json
+{
+  "action": "disable",
+  "automation_name": "Moderate Airflow",
+  "automation_id": 12345,
+  "revert_behavior_confirmed": false,
+  "adv_ids_to_toggle": [12345],
+  "dry_run": true,
+  "sent": false,
+  "to_restore": "Call enable_advance_automation(device_id='C58ZA', automation_id='12345') to re-enable."
+}
+```
+
+**Field notes:**
+- `revert_behavior_confirmed` — whether port revert-on-disable behavior has been confirmed via live test
+- `to_restore` — human-readable restore instruction included for safety
+
+---
+
+### `create_advance_automation(device_id, name, on_speed, off_speed=0, begin_time=0, end_time=1439, dry_run=True)`
+
+Create a new Advance Automation. The automation is enabled immediately after creation.
+
+**Parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `device_id` | `str` | Device code from `discover_devices` |
+| `name` | `str` | Automation name (max 64 chars; control chars stripped) |
+| `on_speed` | `int` | Fan speed when active (1–10) |
+| `off_speed` | `int` | Fan speed when inactive (0–10). Default: 0 |
+| `begin_time` | `int` | Schedule start as minutes since midnight (0–1439, or 255 = no schedule). Default: 0 |
+| `end_time` | `int` | Schedule end as minutes since midnight (0–1439, or 255 = no schedule). Default: 1439 |
+| `dry_run` | `bool` | Default `True` — returns payload without creating |
+
+**Response (dry_run=True):**
+```json
+{
+  "action": "create",
+  "name": "Night Mode",
+  "on_speed": 3,
+  "off_speed": 0,
+  "begin_time": 1320,
+  "end_time": 360,
+  "dry_run": true,
+  "sent": false
+}
+```
+
+**Response (live):** Same plus `"automation_id"` (server-assigned `advId`).
+
+**Validation:** `on_speed` 1–10; `off_speed` 0–10; `begin_time` ≤ `end_time` unless both are 255.
+
+---
+
+### `delete_advance_automation(device_id, automation_id, dry_run=True)`
+
+Delete an Advance Automation. If currently enabled, disables it first.
+
+**Parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `device_id` | `str` | Device code from `discover_devices` |
+| `automation_id` | `str` | automation_id from `list_advance_automations` |
+| `dry_run` | `bool` | Default `True` — returns plan without deleting |
+
+**Response:**
+```json
+{
+  "action": "delete",
+  "automation_name": "Moderate Airflow",
+  "automation_id": 12345,
+  "was_enabled": true,
+  "dry_run": true,
+  "sent": false
+}
+```
+
+---
+
+### `break_out_of_automation(device_id, port, dry_run=True, confirm_automation_name=None)`
+
+Safely break a port out of Advance Automation control. Disables the governing automation
+and locks all co-governed ADVANCE-mode ports to their current manual speed, leaving the
+target port free for manual control.
+
+**Parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `device_id` | `str` | Device code from `discover_devices` |
+| `port` | `int` | Port number to break free (1-based) |
+| `dry_run` | `bool` | Default `True` — returns execution plan without making changes |
+| `confirm_automation_name` | `str \| None` | Required when `dry_run=False` — automation name (case-insensitive) for safety confirmation |
+
+**Response (dry_run=True):**
+```json
+{
+  "plan": [
+    "Disable automation 'Moderate Airflow'",
+    "Lock port 3 to speed 5 (manual)"
+  ],
+  "governing_automation": "Moderate Airflow",
+  "co_ports_to_lock": [3],
+  "target_port": 1,
+  "estimated_duration_seconds": 3,
+  "dry_run": true
+}
+```
+
+**Response (not under automation — idempotent):**
+```json
+{"info": "Port is not currently under automation control."}
+```
+
+**Field notes:**
+- Locks *all* ADVANCE-mode ports on the device, not only those of the governing automation
+  (on devices with multiple active automations, all ADVANCE-mode ports are affected)
+- `confirm_automation_name` match is case-insensitive; required for live execution as a safety gate
 
 ---
 
