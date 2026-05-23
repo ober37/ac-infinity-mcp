@@ -681,3 +681,25 @@ def test_build_activity_report_empty_port_loads_normalized() -> None:
     result = build_activity_report(readings, days=1, port_loads={})
     # Port 1 with 100% uptime and 0 transitions but port_loads={} → NOT excluded
     assert len(result) == 1
+
+
+# ============ calculate_health_score — actual reading fields (#56) ============
+
+
+def test_calculate_health_score_exposes_actual_readings():
+    """New actual-reading fields are populated from the reading dict."""
+    reading = _reading(temp_c=22.0, humidity=55.0, vpd=1.1)
+    result = calculate_health_score(reading, "veg")
+    assert result.temperature_c == pytest.approx(22.0)
+    assert result.temperature_f == pytest.approx(reading["temperature_f"])
+    assert result.humidity_pct == pytest.approx(55.0)
+    assert result.vpd_kpa == pytest.approx(1.1)
+
+
+def test_calculate_health_score_missing_keys_default_to_zero():
+    """When reading dict has no sensor keys, actual-reading fields default to 0.0."""
+    result = calculate_health_score({}, "veg")
+    assert result.temperature_c == 0.0
+    assert result.temperature_f == 0.0
+    assert result.humidity_pct == 0.0
+    assert result.vpd_kpa == 0.0

@@ -969,6 +969,16 @@ async def test_get_environment_health_happy_path(mock_client):
     assert "top_recommendation" in data
     assert data["device_id"] == "C58ZA"
     assert data["stage"] == "veg"
+    # new actual-reading fields
+    assert data["temperature_c"] == pytest.approx(23.5)
+    assert data["temperature_f"] == pytest.approx(74.3)
+    assert data["humidity_pct"] == pytest.approx(60.0)
+    assert data["vpd_kpa"] == pytest.approx(1.24)
+    assert "human_summary" in data
+    assert "74.3°F" in data["human_summary"]
+    assert "23.5°C" in data["human_summary"]
+    assert "60%" in data["human_summary"]
+    assert "1.24 kPa" in data["human_summary"]
 
 
 async def test_get_environment_health_bad_stage(mock_client):

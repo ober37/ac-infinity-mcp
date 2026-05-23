@@ -714,6 +714,11 @@ async def get_environment_health(device_id: str, stage: str = "veg") -> str:
         result = dataclasses.asdict(health)
         result["device_id"] = device_id
         result["stage"] = stage
+        result["human_summary"] = (
+            f"Temperature {health.temperature_f:.1f}°F ({health.temperature_c:.1f}°C), "
+            f"humidity {health.humidity_pct:.0f}%, VPD {health.vpd_kpa:.2f} kPa. "
+            f"Overall health: {health.grade} ({health.score}/100)."
+        )
         return json.dumps(result, indent=2)
 
     except ACInfinityAuthError as e:
