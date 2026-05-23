@@ -1,5 +1,10 @@
 """Mock data for Advance Automation tools (Phase 17 Part 2)."""
 
+# grouptDevType is a port bitmask: Port N → 2^(N-1).
+#   grouptDevType: 48  = ports 5 and 6 combined (32 + 16 = 2^4 + 2^5)
+#   grouptDevType: 8   = port 4 (2^3)
+#   grouptDevType: 4   = port 3 (2^2)
+#
 # Two entries for "Moderate Airflow" (same advName, different advId/onSpeed/grouptDevType)
 # and one entry for "Pollenation Airflow" (disabled, scheduled).
 MOCK_ADVANCE_AUTOMATIONS_LIST = [

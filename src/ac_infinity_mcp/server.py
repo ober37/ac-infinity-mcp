@@ -888,6 +888,20 @@ def _format_schedule_time(minutes: int | None) -> str | None:
     return f"{h:02d}:{m:02d}"
 
 
+def _format_schedule_summary(begin: int, end: int) -> str:
+    """Return a grower-readable schedule description in 12-hour format."""
+    if begin in (255, 65535):
+        return "Always active"
+
+    def _fmt(m: int) -> str:
+        h, mi = divmod(m, 60)
+        suffix = "AM" if h < 12 else "PM"
+        h12 = h % 12 or 12
+        return f"{h12}:{mi:02d} {suffix}"
+
+    return f"Active {_fmt(begin)} – {_fmt(end)}"
+
+
 def _parse_schedule_time(time_str: str | None) -> int:
     """Convert HH:MM string to minutes-since-midnight. Returns 65535 if None (disabled)."""
     if time_str is None:
@@ -2675,26 +2689,29 @@ async def create_advance_automation(
     end_time: int = 1439,
     dry_run: bool = True,
 ) -> str:
-    """Create a new Advance Automation on a device (dry_run preview only).
+    """Create a new Advance Automation on a device.
 
-    Defaults to dry_run=True. Live creation (dry_run=False) is not supported
-    through this assistant — use the AC Infinity app to create automations.
+    Defaults to dry_run=True for safety. Set dry_run=False to send the automation
+    to the device. The port bitmask (grouptDevType) is computed automatically from
+    the port number (Port N → 2^(N-1)).
 
     Args:
         device_id: The AC Infinity device code (from discover_devices).
         name: Automation name (max 64 chars, control chars stripped).
         on_speed: Fan speed when automation is active (1–10).
-        port: 1-based port number the automation should control.
+        port: 1-based port number the automation should control (1–8).
         off_speed: Fan speed when automation is inactive (0–10). Default: 0.
         begin_time: Schedule start in minutes since midnight (0–1439, or 255=no schedule).
             Default: 0 (midnight). Use 255 for "always active".
         end_time: Schedule end in minutes since midnight (0–1439, or 255=no schedule).
             Default: 1439 (23:59). Use 255 for "always active".
-        dry_run: If True (default), previews the automation. Live creation is blocked.
+        dry_run: If True (default), previews the automation without sending it.
+            Set to False to create the automation on the device.
 
     Returns:
-        JSON with action, name, port, port_name, on_speed, begin_time, end_time,
-        dry_run, sent, note. On failure returns ``{"error": "..."}``.
+        JSON with action, name, port, port_name, on_speed, off_speed, begin_time,
+        end_time, schedule_summary, dry_run, sent. Live responses also include
+        automation_id. On failure returns ``{"error": "..."}``.
     """
     try:
         # Validate original name before sanitizing so empty input produces an error
@@ -2717,17 +2734,21 @@ async def create_advance_automation(
             return json.dumps(
                 {"error": "begin_time must be <= end_time (or both 255 for no schedule)"}
             )
-
-        if not dry_run:
+        if (begin_time == 255) != (end_time == 255):
             return json.dumps({
                 "error": (
-                    "Creating automations directly isn't possible through this assistant"
-                    " — the AC Infinity app handles that."
-                ),
+                    "begin_time and end_time must both be 255 (no schedule) or both be 0–1439"
+                )
             })
-
         if port < 1:
             return json.dumps({"error": "port must be a positive integer"})
+        if port > 8:
+            return json.dumps({
+                "error": (
+                    f"Port {port} not found on device {device_id}"
+                    " — devices have at most 8 ports"
+                )
+            })
 
         devices = await asyncio.to_thread(_client().get_devices)
         device = next((d for d in devices if d.get("devCode") == device_id), None)
@@ -2746,8 +2767,120 @@ async def create_advance_automation(
         raw_port_nm = port_obj.get("portName")
         port_name = _sanitize_api_string(raw_port_nm, 64) if raw_port_nm else f"Port {port}"
 
+        schedule_summary = _format_schedule_summary(begin_time, end_time)
+
+        if dry_run:
+            return json.dumps({
+                "action": "create",
+                "name": clean_name,
+                "port": port,
+                "port_name": port_name,
+                "on_speed": on_speed,
+                "off_speed": off_speed,
+                "begin_time": _format_schedule_time(begin_time),
+                "end_time": _format_schedule_time(end_time),
+                "schedule_summary": schedule_summary,
+                "dry_run": True,
+                "sent": False,
+                "note": (
+                    "Preview only — nothing sent to your device yet."
+                    " Confirm to create this automation."
+                ),
+            })
+
+        # Live path: compute port bitmask and build full payload
+        grp_dev_type = 2 ** (port - 1)
+        payload: dict = {
+            # devId NOT included here — client._create_advance_automation_inner injects it.
+            # advCode NOT included — absent from addGroups live capture (unlike addAlarms).
+            # isFlag (capital F) confirmed for addGroups;
+            # isflag (lowercase) for updateGroupsIsOn/delByid.
+            "advName": clean_name,
+            "currentMode": 1,
+            "isOn": 1,
+            "onSpeed": on_speed,
+            "offSpeed": off_speed,
+            "beginTime": begin_time,
+            "endTime": end_time,
+            "groupNums": 9,
+            "sortType": 9,
+            "subNumber": 0,
+            "subNumberSort": 0,
+            "isDel": 0,
+            "isFlag": 1,
+            "returnData": 1,
+            "templateType": 0,
+            "grouptDevType": grp_dev_type,
+            "portType": 0,
+            "portState": 0,
+            "portSetHex": "",
+            "portStateHex": "",
+            "autoHighTempF": 110,
+            "autoLowTempF": 40,
+            "autoHighTempC": 90,
+            "autoLowTempC": 0,
+            "autoHighTempSwitch": 1,
+            "autoLowTempSwitch": 1,
+            "autoHighHumi": 90,
+            "autoLowHumi": 40,
+            "autoHighHumiSwitch": 1,
+            "autoLowHumiSwitch": 1,
+            "highVpd": 99,
+            "lowVpd": 0,
+            "highVpdSwitch": 1,
+            "lowVpdSwitch": 1,
+            "cycleOn": 0,
+            "cycleOff": 0,
+            "onTime": 0,
+            "onTimeSwitch": 0,
+            "switchTime": 255,
+            "dualZoneSwitch": 1,
+            "photocellSwitch": 0,
+            "isOpenDoseTime": 0,
+            "onDoseTime": 60,
+            "offDoseTime": 1,
+            "isOnMinMaxTime": 1,
+            "onMinTime": 0,
+            "onMaxTime": 0,
+            "settingMode": 0,
+            "targetTSwitch": 1,
+            "targetHumiSwitch": 1,
+            "targetVpdSwitch": 1,
+            "targetTemp": 0,
+            "targetTempF": 32,
+            "targetHumi": 0,
+            "targetVpd": 0,
+            "insidePort": 255,
+            "insideType": 15,
+            "outsidePort": 255,
+            "outsideType": 15,
+            "runState": 0,
+            "setSelect": 0,
+            "humidityBuff": 0,
+            "humidityTrans": 0,
+            "temperatureFBuff": 0,
+            "temperatureFTrans": 0,
+            "switchHumidityBuff": 0,
+            "switchTemperatureFBuff": 0,
+            "switchVpdBuff": 0,
+            "vpdBuff": 0,
+            "vpdTrans": 0,
+            "nameLangKey": "",
+            "remarkLangKey": "",
+        }
+
+        result = await asyncio.to_thread(_client().create_advance_automation, str(dev_id), payload)
+        adv_id = result.get("advId")
+        if not adv_id:
+            logger.error("addGroups succeeded but returned no advId for devId=%s", dev_id)
+            return json.dumps({
+                "error": "Automation was created but the device did not return an ID",
+                "detail": "see server logs",
+            })
+
         return json.dumps({
             "action": "create",
+            "automation_id": str(adv_id),
             "name": clean_name,
             "port": port,
             "port_name": port_name,
@@ -2755,12 +2888,9 @@ async def create_advance_automation(
             "off_speed": off_speed,
             "begin_time": _format_schedule_time(begin_time),
             "end_time": _format_schedule_time(end_time),
-            "dry_run": True,
-            "sent": False,
-            "note": (
-                "Creating automations directly isn't possible through this assistant"
-                " — the AC Infinity app handles that."
-            ),
+            "schedule_summary": schedule_summary,
+            "dry_run": False,
+            "sent": True,
         })
 
     except ACInfinityAuthError:

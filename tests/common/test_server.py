@@ -4055,18 +4055,6 @@ async def test_enable_advance_automation_live_calls_once(mock_client):
     )
 
 
-async def test_create_advance_automation_live(mock_client):
-    """dry_run=False is blocked — returns error, no API write call made."""
-    with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        result = await create_advance_automation(
-            "C58ZA", "Test Auto", port=1, on_speed=5, dry_run=False
-        )
-    data = json.loads(result)
-    assert "error" in data
-    assert "AC Infinity app" in data["error"]
-    mock_client.create_advance_automation.assert_not_called()
-
-
 async def test_delete_advance_automation_live_disables_first(mock_client):
     """Enabled automation: disable first (once), then delete each adv_id."""
     mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
@@ -4623,7 +4611,7 @@ async def test_create_advance_automation_port_dry_run(mock_client):
     assert data["port"] == 2
     assert data["port_name"] == "Exhaust Fan"
     assert "note" in data
-    assert "AC Infinity app" in data["note"]
+    assert "Preview only" in data["note"]
     assert data["begin_time"] == "00:00"
     assert data["end_time"] == "23:59"
 
@@ -4650,13 +4638,199 @@ async def test_create_advance_automation_port_not_found_error(mock_client):
     assert "not found" in data["error"]
 
 
-async def test_create_advance_automation_live_is_blocked(mock_client):
-    """dry_run=False → blocked error regardless of other params."""
+# ============ Issue #71 — create_advance_automation live creation ============
+
+
+async def test_create_advance_automation_live_port4(mock_client):
+    """dry_run=False, port=4 → grouptDevType=8 in payload, sent=True, automation_id as string."""
+    import copy
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device["deviceInfo"]["ports"].append({"port": 4, "portName": "Clip Fan"})
+    mock_client.get_devices.return_value = [device]
+    mock_client.create_advance_automation.return_value = {"advId": 2302819}
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await create_advance_automation(
-            "C58ZA", "Night Cycle", on_speed=3, port=1, dry_run=False
+            "C58ZA", "Test Auto", on_speed=5, port=4, dry_run=False
+        )
+    data = json.loads(result)
+    assert data["sent"] is True
+    assert data["automation_id"] == "2302819"
+    assert mock_client.create_advance_automation.call_count == 1
+    _, payload = mock_client.create_advance_automation.call_args[0]
+    assert payload["grouptDevType"] == 8
+    assert payload["advName"] == "Test Auto"
+    assert payload["onSpeed"] == 5
+
+
+async def test_create_advance_automation_live_port1(mock_client):
+    """port=1 → grouptDevType=1 (2^0)."""
+    mock_client.create_advance_automation.return_value = {"advId": 1111}
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Test Auto", on_speed=3, port=1, dry_run=False
+        )
+    data = json.loads(result)
+    assert data["sent"] is True
+    assert mock_client.create_advance_automation.call_count == 1
+    _, payload = mock_client.create_advance_automation.call_args[0]
+    assert payload["grouptDevType"] == 1
+
+
+async def test_create_advance_automation_live_port8(mock_client):
+    """port=8 → grouptDevType=128 (2^7)."""
+    import copy
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device["deviceInfo"]["ports"].append({"port": 8, "portName": "Port 8"})
+    mock_client.get_devices.return_value = [device]
+    mock_client.create_advance_automation.return_value = {"advId": 9999}
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Test Auto", on_speed=7, port=8, dry_run=False
+        )
+    data = json.loads(result)
+    assert data["sent"] is True
+    _, payload = mock_client.create_advance_automation.call_args[0]
+    assert payload["grouptDevType"] == 128
+
+
+async def test_create_advance_automation_live_port_too_high(mock_client):
+    """port=9 → error before any API call (at most 8 ports)."""
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Test Auto", on_speed=5, port=9, dry_run=False
         )
     data = json.loads(result)
     assert "error" in data
-    assert "AC Infinity app" in data["error"]
+    assert "8 ports" in data["error"] or "not found" in data["error"]
+    mock_client.get_devices.assert_not_called()
     mock_client.create_advance_automation.assert_not_called()
+
+
+async def test_create_advance_automation_live_port_zero_error(mock_client):
+    """port=0, dry_run=False → port error before any API call."""
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Test Auto", on_speed=5, port=0, dry_run=False
+        )
+    data = json.loads(result)
+    assert "error" in data
+    assert "port" in data["error"]
+    mock_client.get_devices.assert_not_called()
+
+
+async def test_create_advance_automation_live_no_schedule(mock_client):
+    """begin_time=255, end_time=255 → Always active, null times, raw 255 in payload."""
+    mock_client.create_advance_automation.return_value = {"advId": 5555}
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Always On", on_speed=4, port=1,
+            begin_time=255, end_time=255, dry_run=False
+        )
+    data = json.loads(result)
+    assert data["sent"] is True
+    assert data["schedule_summary"] == "Always active"
+    assert data["begin_time"] is None
+    assert data["end_time"] is None
+    _, payload = mock_client.create_advance_automation.call_args[0]
+    assert payload["beginTime"] == 255
+    assert payload["endTime"] == 255
+
+
+async def test_create_advance_automation_live_adv_id_mapping(mock_client):
+    """Server returns advId=2302819 → automation_id='2302819' (string)."""
+    mock_client.create_advance_automation.return_value = {"advId": 2302819}
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Test", on_speed=5, port=1, dry_run=False
+        )
+    data = json.loads(result)
+    assert data["automation_id"] == "2302819"
+    assert isinstance(data["automation_id"], str)
+
+
+async def test_create_advance_automation_live_missing_adv_id(mock_client):
+    """Server returns no advId → structured error, not None in output."""
+    mock_client.create_advance_automation.return_value = {}
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Test", on_speed=5, port=1, dry_run=False
+        )
+    data = json.loads(result)
+    assert "error" in data
+    assert "detail" in data
+    assert data.get("automation_id") is None
+
+
+async def test_create_advance_automation_live_api_error(mock_client):
+    """ACInfinityAPIError → {"error": "API error", "detail": "see server logs"}."""
+    mock_client.create_advance_automation.side_effect = ACInfinityAPIError("boom")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Test", on_speed=5, port=1, dry_run=False
+        )
+    data = json.loads(result)
+    assert data["error"] == "API error"
+    assert data["detail"] == "see server logs"
+
+
+async def test_create_advance_automation_live_auth_error(mock_client):
+    """ACInfinityAuthError → {"error": "Authentication failed", "detail": "see server logs"}."""
+    mock_client.create_advance_automation.side_effect = ACInfinityAuthError("auth")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Test", on_speed=5, port=1, dry_run=False
+        )
+    data = json.loads(result)
+    assert data["error"] == "Authentication failed"
+    assert data["detail"] == "see server logs"
+
+
+async def test_create_advance_automation_dry_run_note_grower_facing(mock_client):
+    """dry_run=True → note contains 'Preview only', NOT 'AC Infinity app'."""
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Test", on_speed=5, port=1, dry_run=True
+        )
+    data = json.loads(result)
+    assert "Preview only" in data["note"]
+    assert "AC Infinity app" not in data["note"]
+    mock_client.create_advance_automation.assert_not_called()
+
+
+async def test_create_advance_automation_dry_run_schedule_summary(mock_client):
+    """begin_time=540, end_time=1020 → schedule_summary='Active 9:00 AM – 5:00 PM'."""
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Test", on_speed=5, port=1,
+            begin_time=540, end_time=1020, dry_run=True
+        )
+    data = json.loads(result)
+    assert data["schedule_summary"] == "Active 9:00 AM – 5:00 PM"
+    mock_client.create_advance_automation.assert_not_called()
+
+
+async def test_create_advance_automation_off_speed_nonzero(mock_client):
+    """off_speed=5 → payload offSpeed=5 forwarded to client."""
+    mock_client.create_advance_automation.return_value = {"advId": 1234}
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Test", on_speed=7, off_speed=5, port=1, dry_run=False
+        )
+    data = json.loads(result)
+    assert data["sent"] is True
+    _, payload = mock_client.create_advance_automation.call_args[0]
+    assert payload["offSpeed"] == 5
+
+
+async def test_create_advance_automation_mixed_255_sentinel_rejected(mock_client):
+    """begin_time=255 but end_time=600 → error (must both be 255 or both be 0-1439)."""
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Test", on_speed=5, port=1,
+            begin_time=255, end_time=600, dry_run=True
+        )
+    data = json.loads(result)
+    assert "error" in data
+    mock_client.create_advance_automation.assert_not_called()
+
+
