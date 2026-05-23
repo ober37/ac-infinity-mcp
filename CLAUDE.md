@@ -10,6 +10,8 @@ This file is the authoritative source for how Claude agents contribute to this r
 - Each phase = one PR. Phases are never bundled.
 - Every issue follows the **4-Stage Issue Workflow Protocol** (see below).
 - No PR is raised until all four stages pass. Any stage failure restarts from Stage 1.
+- **All PRs are created as drafts.** Convert to "ready for review" only after Gate 5 (manual
+  smoke test) is approved by the user. CI runs on draft PRs, so the test gate is not bypassed.
 
 ---
 
