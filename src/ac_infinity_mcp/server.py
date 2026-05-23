@@ -921,7 +921,10 @@ async def _check_advance_mode(dev_id: str | None, port: int, fallback: str) -> s
         return fallback
     try:
         settings = await asyncio.to_thread(_client().get_mode_settings, dev_id, port)
-        return "ADVANCE" if settings.get("modeType") == _ADVANCE_MODE_TYPE else fallback
+        return "ADVANCE" if (
+            settings.get("modeType") == _ADVANCE_MODE_TYPE and
+            settings.get("isOpenAutomation", 1) != 0
+        ) else fallback
     except Exception as e:
         logger.warning("Could not verify ADVANCE mode for port %s: %s", port, type(e).__name__)
         return fallback
@@ -946,30 +949,38 @@ async def _build_advance_conflict_response(
         automations = _group_automations(raw)
         governing = next(
             (a for a in automations if a.get("enabled") or a.get("run_state")),
-            automations[0] if automations else None,
+            None,  # No fallback to disabled automation
         )
+        active_automations = [
+            {"name": a["name"], "automation_id": a["automation_id"]}
+            for a in automations if a.get("enabled") or a.get("run_state")
+        ]
     except Exception as exc:
         logger.warning(
             "Could not fetch automations for conflict response (device=%s): %s", device_id, exc
         )
         governing = None
+        active_automations = []
 
     if governing:
         auto_name = governing["name"]
         auto_id = governing["automation_id"]
         summary = (
-            f"{port_name} (Port {port}) is governed by \"{auto_name}\"."
+            f"While '{auto_name}' automation is running, all ports on this controller"
+            " are locked from manual control."
             " Your change requires resolving this conflict first."
         )
+        human_summary = (
+            f"While '{auto_name}' is running, all ports on this controller are locked"
+            " from manual control. Disable the automation first to make manual adjustments."
+        )
         opt1: dict = {
-            "description": (
-                f"Disable \"{auto_name}\", lock co-governed ports to their current "
-                "settings, then apply your change."
-            ),
-            "tool": "break_out_of_automation",
+            "description": f"Disable \"{auto_name}\" to regain manual control of this port.",
+            "tool": "disable_advance_automation",
             "instruction": (
-                f"Call break_out_of_automation(device_id='{device_id}', port={port}, "
-                "dry_run=True) to preview this option."
+                f"Call disable_advance_automation(device_id='{device_id}',"
+                f" automation_id='{str(auto_id) if auto_id is not None else 'unknown'}',"
+                " dry_run=True) to preview."
             ),
             "available": True,
         }
@@ -980,12 +991,16 @@ async def _build_advance_conflict_response(
             f"{port_name} (Port {port}) is under Advance Automation control."
             " Your change requires resolving this conflict first."
         )
+        human_summary = (
+            "An active automation is blocking manual port control on this controller."
+            " Disable it first."
+        )
         opt1 = {
-            "description": "Break the port out of automation and lock co-governed ports.",
-            "tool": "break_out_of_automation",
+            "description": "Find and disable the active automation, then apply your manual change.",
+            "tool": "list_advance_automations",
             "instruction": (
-                f"Call break_out_of_automation(device_id='{device_id}', port={port}, "
-                "dry_run=True) to preview this option."
+                f"Call list_advance_automations(device_id='{device_id}') to find the active"
+                " automation ID, then call disable_advance_automation."
             ),
             "available": True,
         }
@@ -993,19 +1008,26 @@ async def _build_advance_conflict_response(
     return json.dumps({
         "conflict": "ADVANCE_AUTOMATION",
         "summary": summary,
+        "human_summary": human_summary,
         "target_port": f"{port_name} (Port {port})",
         "automation_name": auto_name,
         "automation_id": auto_id,
+        "active_automations": active_automations,
         "co_governed_ports": [],
         "switching_guidance": (
-            "To switch automations: call disable_advance_automation on the current one, "
-            "then enable_advance_automation on the desired one."
+            "To regain manual control: disable all active automations using"
+            " disable_advance_automation, then apply your change. To instead add this port"
+            " to an automation, use create_advance_automation."
         ),
         "options": {
-            "1_break_out_manually": opt1,
-            "2_edit_automation": {
+            "1_disable_automation": opt1,
+            "2_break_out": {
                 "available": False,
-                "status": "not_yet_implemented",
+                "status": (
+                    "Use Option 1 (disable_advance_automation) instead —"
+                    " break_out_of_automation is only applicable when the port is confirmed"
+                    " to be inside a specific automation."
+                ),
             },
             "3_fork_automation": {
                 "available": False,

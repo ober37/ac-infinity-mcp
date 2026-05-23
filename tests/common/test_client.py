@@ -7,7 +7,12 @@ import requests
 import responses as responses_lib
 
 from ac_infinity_mcp.client import ACInfinityClient
-from ac_infinity_mcp.schema import ACInfinityAPIError, ACInfinityAuthError, ACInfinityDeviceError
+from ac_infinity_mcp.schema import (
+    ACInfinityAdvanceConflictError,
+    ACInfinityAPIError,
+    ACInfinityAuthError,
+    ACInfinityDeviceError,
+)
 from tests.fixtures.mock_api_responses import (
     AUTH_FAILURE,
     AUTH_SUCCESS,
@@ -1072,7 +1077,15 @@ ADD_MODE_403_FIELD_ERROR = {"code": 403, "msg": "modeSetid is not allowed in pay
 MODE_SETTINGS_SMART_AUTO = {
     "code": 200,
     "msg": "success.",
-    "data": {**MOCK_MODE_SETTINGS_LEGACY_PORT1, "modeType": 15},
+    "data": {**MOCK_MODE_SETTINGS_LEGACY_PORT1, "modeType": 15, "isOpenAutomation": 1},
+    # isOpenAutomation: 1 explicit override — base fixture has 0 (non-automation port).
+    # This fixture represents an ACTIVE automation (conflict must raise).
+}
+MODE_SETTINGS_SMART_AUTO_DISABLED = {
+    "code": 200,
+    "msg": "success.",
+    "data": {**MOCK_MODE_SETTINGS_LEGACY_PORT1, "modeType": 15, "isOpenAutomation": 0},
+    # isOpenAutomation: 0 = automation disabled; write guard must NOT fire.
 }
 MODE_SETTINGS_ON_OFF_PORT = {
     "code": 200,
@@ -1208,11 +1221,11 @@ def test_set_port_mode_does_not_retry_on_timeout(authed_client, monkeypatch):
 
 @responses_lib.activate
 def test_set_port_mode_raises_on_modeType_15(authed_client):
-    """Port in smart automation (modeType=15) raises ACInfinityDeviceError before any write."""
+    """modeType=15 with active automation raises ACInfinityAdvanceConflictError before any write."""
     responses_lib.add(
         responses_lib.POST, MODE_SETTINGS_URL, json=MODE_SETTINGS_SMART_AUTO, status=200
     )
-    with pytest.raises(ACInfinityDeviceError) as exc_info:
+    with pytest.raises(ACInfinityAdvanceConflictError) as exc_info:
         authed_client.set_port_mode(LEGACY_DEVICE_DATA, port=1, updates={}, dry_run=True)
     assert "smart automation" in str(exc_info.value).lower()
     assert "1" in str(exc_info.value)  # port number appears in message
@@ -1224,10 +1237,61 @@ def test_set_port_mode_modeType_15_no_write_attempted(authed_client):
     responses_lib.add(
         responses_lib.POST, MODE_SETTINGS_URL, json=MODE_SETTINGS_SMART_AUTO, status=200
     )
-    with pytest.raises(ACInfinityDeviceError):
+    with pytest.raises(ACInfinityAdvanceConflictError):
         authed_client.set_port_mode(LEGACY_DEVICE_DATA, port=1, updates={}, dry_run=False)
     write_calls = [c for c in responses_lib.calls if "addDevMode" in c.request.url]
     assert len(write_calls) == 0
+
+
+@responses_lib.activate
+def test_set_port_mode_modeType_15_disabled_automation_allows_dry_run(authed_client):
+    """modeType=15 with isOpenAutomation=0 (disabled) does NOT raise; dry_run returns result."""
+    responses_lib.add(
+        responses_lib.POST,
+        MODE_SETTINGS_URL,
+        json=MODE_SETTINGS_SMART_AUTO_DISABLED,
+        status=200,
+    )
+    result = authed_client.set_port_mode(LEGACY_DEVICE_DATA, port=1, updates={}, dry_run=True)
+    assert result["dry_run"] is True
+    assert result["sent"] is False
+    assert "payload" in result
+
+
+@responses_lib.activate
+def test_set_port_mode_modeType_15_missing_isOpenAutomation_raises_conflict(authed_client):
+    """modeType=15 with absent isOpenAutomation field defaults to 1 (safe-fail) → raises."""
+    # Build a settings dict with modeType=15 and NO isOpenAutomation key at all.
+    # The base fixture has isOpenAutomation=0, so we must remove it explicitly.
+    settings_without_field = {k: v for k, v in MOCK_MODE_SETTINGS_LEGACY_PORT1.items()
+                               if k != "isOpenAutomation"}
+    settings_without_field["modeType"] = 15
+    no_field_fixture = {
+        "code": 200,
+        "msg": "success.",
+        "data": settings_without_field,
+        # No isOpenAutomation key — safe-fail default of 1 triggers the guard.
+    }
+    responses_lib.add(
+        responses_lib.POST, MODE_SETTINGS_URL, json=no_field_fixture, status=200
+    )
+    with pytest.raises(ACInfinityAdvanceConflictError):
+        authed_client.set_port_mode(LEGACY_DEVICE_DATA, port=1, updates={}, dry_run=True)
+
+
+@responses_lib.activate
+def test_set_port_mode_modeType_15_disabled_live_write_calls_rate_limit(authed_client):
+    """modeType=15 with isOpenAutomation=0 allows live write; rate-limit enforced."""
+    responses_lib.add(
+        responses_lib.POST,
+        MODE_SETTINGS_URL,
+        json=MODE_SETTINGS_SMART_AUTO_DISABLED,
+        status=200,
+    )
+    responses_lib.add(responses_lib.POST, ADD_DEV_MODE_URL, json=ADD_MODE_SUCCESS, status=200)
+    with patch.object(authed_client, "_enforce_write_rate_limit") as mock_limit:
+        authed_client.set_port_mode(LEGACY_DEVICE_DATA, port=1, updates={}, dry_run=False)
+        mock_limit.assert_called_once()
 
 
 @responses_lib.activate

@@ -473,8 +473,9 @@ class ACInfinityClient:
         current_settings = self.get_mode_settings(dev_id, port)
 
         # Guard: smart automation mode cannot be overridden via the write API (returns 999999)
+        # Only fire when isOpenAutomation != 0 (absent field defaults to 1 = assume active).
         mode_type = current_settings.get("modeType")
-        if mode_type == 15:
+        if mode_type == 15 and current_settings.get("isOpenAutomation", 1) != 0:
             raise ACInfinityAdvanceConflictError(
                 f"Port {port} on device {dev_id} is in smart automation mode (modeType=15) — "
                 "cannot override manually."
