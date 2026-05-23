@@ -4701,7 +4701,7 @@ async def test_create_advance_automation_live_port_too_high(mock_client):
         )
     data = json.loads(result)
     assert "error" in data
-    assert "8 ports" in data["error"] or "not found" in data["error"]
+    assert "8 ports" in data["error"]
     mock_client.get_devices.assert_not_called()
     mock_client.create_advance_automation.assert_not_called()
 
