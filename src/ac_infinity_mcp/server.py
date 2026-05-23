@@ -698,7 +698,11 @@ async def get_environment_health(device_id: str, stage: str = "veg") -> str:
 
     Returns:
         JSON with score (0–100), grade (A–F), per-metric sub-scores,
-        and a top actionable recommendation.
+        top_recommendation, and the following actual sensor readings:
+        temperature_c (°C), temperature_f (°F), humidity_pct (%), vpd_kpa (kPa).
+        Also includes human_summary — a one-line natural language summary, e.g.:
+        "Temperature 74.3°F (23.5°C), humidity 60%, VPD 1.24 kPa. Overall health: A (97.4/100)."
+        Grade labels: A = Excellent, B = Good, C = Fair, D = Poor, F = Critical.
     """
     try:
         if stage not in STAGE_TARGETS:
