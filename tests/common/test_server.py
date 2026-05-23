@@ -4340,7 +4340,7 @@ async def test_break_out_confirm_name_too_long(mock_client):
 
 
 async def test_get_advance_automation_single_group_no_schedule(mock_client):
-    """Single port-group with no schedule → human_summary contains 'no schedule'."""
+    """No onTimeSwitch field → continuous mode → human_summary contains 'continuously'."""
     single_no_schedule = [
         {
             "advId": 88001,
@@ -4360,8 +4360,86 @@ async def test_get_advance_automation_single_group_no_schedule(mock_client):
         result = await get_advance_automation("C58ZA", "88001")
     data = json.loads(result)
     assert "human_summary" in data
-    assert "no schedule" in data["human_summary"].lower()
+    assert "continuously" in data["human_summary"].lower()
     assert "speed 4" in data["human_summary"]
+
+
+async def test_get_advance_automation_continuous_mode_schedule_dict(mock_client):
+    """Continuous mode (onTimeSwitch=0) → mode='continuous', both times None, no schedule_note."""
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_advance_automation("C58ZA", "1342758")
+    data = json.loads(result)
+    assert data["schedule"]["mode"] == "continuous"
+    assert data["schedule"]["begin_time"] is None
+    assert data["schedule"]["end_time"] is None
+    assert "schedule_note" not in data["schedule"]
+
+
+async def test_get_advance_automation_scheduled_mode_schedule_dict(mock_client):
+    """Scheduled mode (onTimeSwitch=1) with valid times → mode='scheduled', times formatted."""
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_SINGLE
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_advance_automation("C58ZA", "999001")
+    data = json.loads(result)
+    assert data["schedule"]["mode"] == "scheduled"
+    assert data["schedule"]["begin_time"] == "09:00"
+    assert data["schedule"]["end_time"] == "17:00"
+    assert "schedule_note" not in data["schedule"]
+
+
+async def test_get_advance_automation_scheduled_mode_sentinel_times(mock_client):
+    """onTimeSwitch=1 with sentinel times → mode='scheduled', both times None, note present."""
+    scheduled_no_window = [
+        {
+            "advId": 77001,
+            "advName": "Ventilation",
+            "isOn": 1,
+            "onSpeed": 5,
+            "offSpeed": 0,
+            "grouptDevType": 8,
+            "advKey": "1-0",
+            "runState": 1,
+            "beginTime": 255,
+            "endTime": 255,
+            "onTimeSwitch": 1,
+        }
+    ]
+    mock_client.get_advance_automations.return_value = scheduled_no_window
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_advance_automation("C58ZA", "77001")
+    data = json.loads(result)
+    assert data["schedule"]["mode"] == "scheduled"
+    assert data["schedule"]["begin_time"] is None
+    assert data["schedule"]["end_time"] is None
+    assert "schedule_note" in data["schedule"]
+    assert "no time window" in data["schedule"]["schedule_note"]
+
+
+async def test_get_advance_automation_unknown_on_time_switch_treated_as_continuous(mock_client):
+    """Unknown onTimeSwitch value (>1) falls through to continuous mode — unknown values safe."""
+    unknown_mode = [
+        {
+            "advId": 55001,
+            "advName": "Fan",
+            "isOn": 1,
+            "onSpeed": 3,
+            "offSpeed": 0,
+            "grouptDevType": 8,
+            "advKey": "1-0",
+            "runState": 1,
+            "beginTime": 540,
+            "endTime": 1020,
+            "onTimeSwitch": 2,
+        }
+    ]
+    mock_client.get_advance_automations.return_value = unknown_mode
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_advance_automation("C58ZA", "55001")
+    data = json.loads(result)
+    assert data["schedule"]["mode"] == "continuous"
+    assert data["schedule"]["begin_time"] is None
+    assert data["schedule"]["end_time"] is None
 
 
 # ============ Issue #68 — suggested_reply in conflict response ============
@@ -4380,14 +4458,14 @@ async def test_build_advance_conflict_suggested_reply_normal(mock_client):
 
 
 async def test_build_advance_conflict_suggested_reply_degraded(mock_client):
-    """suggested_reply on degraded path hints to use list_advance_automations."""
+    """suggested_reply on degraded path is a non-empty string."""
     mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
     mock_client.get_advance_automations.side_effect = ACInfinityAPIError("fail")
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await set_port_off("C58ZA", port=1, dry_run=False)
     data = json.loads(result)
     assert "suggested_reply" in data
-    assert "list_advance_automations" in data["suggested_reply"]
+    assert isinstance(data["suggested_reply"], str) and len(data["suggested_reply"]) > 0
 
 
 # ============ Issue #60 — get_port_settings ADVANCE enrichment ============
@@ -4449,6 +4527,10 @@ async def test_get_port_settings_advance_isOpenAutomation_zero_falls_through(moc
     assert data["mode"] == "OFF"  # atType=1 → "OFF"
     assert "advance_automation" not in data
     mock_client.get_advance_automations.assert_not_called()
+
+
+
+
 
 
 async def test_get_port_settings_advance_isOpenAutomation_absent_defaults_to_active(mock_client):

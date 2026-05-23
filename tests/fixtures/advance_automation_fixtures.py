@@ -19,6 +19,7 @@ MOCK_ADVANCE_AUTOMATIONS_LIST = [
         "runState": 1,
         "beginTime": 255,
         "endTime": 255,
+        "onTimeSwitch": 0,
     },
     {
         "advId": 2179295,
@@ -31,6 +32,7 @@ MOCK_ADVANCE_AUTOMATIONS_LIST = [
         "runState": 1,
         "beginTime": 255,
         "endTime": 255,
+        "onTimeSwitch": 0,
     },
     {
         "advId": 999001,
@@ -43,6 +45,7 @@ MOCK_ADVANCE_AUTOMATIONS_LIST = [
         "runState": 0,
         "beginTime": 540,
         "endTime": 1020,
+        "onTimeSwitch": 1,
     },
 ]
 
@@ -61,5 +64,6 @@ MOCK_ADVANCE_AUTOMATIONS_SINGLE = [
         "runState": 0,
         "beginTime": 540,
         "endTime": 1020,
+        "onTimeSwitch": 1,
     },
 ]
