@@ -988,8 +988,8 @@ async def _build_advance_conflict_response(
         auto_name = None
         auto_id = None
         summary = (
-            f"{port_name} (Port {port}) is under Advance Automation control."
-            " Your change requires resolving this conflict first."
+            "An Advance Automation is running on this controller, locking all ports from"
+            " manual control. Your change requires resolving this conflict first."
         )
         human_summary = (
             "An active automation is blocking manual port control on this controller."
@@ -999,8 +999,10 @@ async def _build_advance_conflict_response(
             "description": "Find and disable the active automation, then apply your manual change.",
             "tool": "list_advance_automations",
             "instruction": (
-                f"Call list_advance_automations(device_id='{device_id}') to find the active"
-                " automation ID, then call disable_advance_automation."
+                f"Call list_advance_automations(device_id='{device_id}') to get the"
+                " automation_id of the active automation, then call"
+                f" disable_advance_automation(device_id='{device_id}',"
+                " automation_id='<id>', dry_run=True)."
             ),
             "available": True,
         }
