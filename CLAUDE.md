@@ -317,6 +317,20 @@ personas until convergence (Cycle N returns 0 findings). The plan caps at
 - 1.5s rate limit between write API calls (enforced in `client.py`)
 - All write tools support `dry_run=True` parameter
 
+### Usability — IDs are internal, names are user-facing
+
+Never surface raw internal identifiers (`automation_id`, `devId`, port integers used as
+keys, etc.) in user-facing messages. Users do not know these values and cannot act on
+them. Always use the human-readable name from the API response:
+
+- When reporting the result of `create_advance_automation`, reference the automation by
+  `name`, not `automation_id`. The ID is returned in the JSON for programmatic chaining
+  only — do not mention it to the user.
+- When listing automations, present them as a named list. If a follow-up operation
+  requires an ID, resolve it by matching the user's name input against the list.
+- The same rule applies to device IDs and port numbers: prefer "Humidifier (Port 1)"
+  over "port 1" or a raw devId.
+
 ### Bulk replacements
 
 When applying the same correction to many sites (e.g. "replace `str(e)` in

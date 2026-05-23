@@ -2711,7 +2711,8 @@ async def create_advance_automation(
     Returns:
         JSON with action, name, port, port_name, on_speed, off_speed, begin_time,
         end_time, schedule_summary, dry_run, sent. Live responses also include
-        automation_id. On failure returns ``{"error": "..."}``.
+        automation_id (for programmatic chaining — do not surface to the user; use
+        ``name`` instead). On failure returns ``{"error": "..."}``.
         When the specified port does not exist on the device, returns
         ``{"error": "Port N not found on device X", "available_ports": [{"port": N,
         "name": "..."}], "suggested_reply": "..."}``. Port names absent or empty in
