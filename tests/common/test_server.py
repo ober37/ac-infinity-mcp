@@ -1216,6 +1216,25 @@ async def test_get_port_activity_report_port_always_on(mock_client):
     assert port["avg_speed_when_running"] == 5.0
 
 
+async def test_get_port_activity_report_cumulative_on_hours_multi_day(mock_client):
+    """100% uptime across 7 days → on_hours = 168.0, not 24.0."""
+    readings = _make_port_readings(24, speed=5, on=True)
+    hist_payload = json.dumps({
+        "device_id": "C58ZA",
+        "readings": readings,
+        "statistics": {},
+    })
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        with patch("ac_infinity_mcp.server.get_historical_readings",
+                   return_value=hist_payload):
+            result = await get_port_activity_report("C58ZA", 7)
+    data = json.loads(result)
+    port = data["ports"][0]
+    assert port["on_hours"] == pytest.approx(168.0)
+    assert port["off_hours"] == pytest.approx(0.0)
+    assert port["uptime_pct"] == 100.0
+
+
 # ============ set_port_speed ============
 
 MOCK_SET_PORT_MODE_DRY = {
