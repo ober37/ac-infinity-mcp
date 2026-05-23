@@ -1283,7 +1283,7 @@ Get the full automation configuration for a port from `/api/dev/getdevModeSettin
 | `device_id` | `str` | Device code from `discover_devices` |
 | `port` | `int` | 1-based port number |
 
-**Response:**
+**Response (non-ADVANCE port):**
 ```json
 {
   "device_id": "C58ZA",
@@ -1301,7 +1301,39 @@ Get the full automation configuration for a port from `/api/dev/getdevModeSettin
 }
 ```
 
-**Field notes:**
+**Response (ADVANCE mode port):**
+```json
+{
+  "device_id": "C58ZA",
+  "port": 5,
+  "mode": "ADVANCE",
+  "advance_automation": true,
+  "automation_name": "Moderate Airflow",
+  "automation_id": "1234567890",
+  "automation_on_speed": 5,
+  "current_speed": 5,
+  "speed_target": null,
+  "vpd_target_kpa": null,
+  "temp_range_c": null,
+  "humidity_range_pct": null,
+  "schedule_window": null,
+  "cycle_on_seconds": null,
+  "cycle_off_seconds": null,
+  "timer_on_seconds": null,
+  "timer_off_seconds": null
+}
+```
+
+**ADVANCE mode field notes:**
+- `mode` — `"ADVANCE"` when `modeType=15` and `isOpenAutomation != 0` in `getdevModeSettingList` (Quirk 19)
+- `automation_name` / `automation_id` — populated from the active automation; `null` when the secondary lookup degrades (API error)
+- `automation_on_speed` — the `on_speed` configured in the first port group of the governing automation; `null` on degraded path
+- `current_speed` — live fan speed from `devInfoListAll` `speak` field (reflects what the port is currently doing)
+- `speed_target` — always `null` in ADVANCE mode (the automation governs speed, not a static target)
+- `vpd_target_kpa`, `temp_range_c`, `humidity_range_pct`, `schedule_window`, cycle/timer fields — all `null` in ADVANCE mode
+- When the secondary automation lookup fails (API error), a `note` field is added: `"Could not fetch automation details. Use list_advance_automations to view active automations."`
+
+**Non-ADVANCE field notes:**
 - `vpd_target_kpa` — non-null only when VPD automation active; decoded as `targetVpd ÷ 10` (Quirk 4 analogue)
 - `temp_range_c` — `{"min_c": N, "max_c": N}` when temp thresholds enabled; raw °C integers (no scaling)
 - `humidity_range_pct` — `{"min_pct": N, "max_pct": N}` when humidity thresholds enabled; raw % RH integers
@@ -1538,6 +1570,7 @@ structured conflict response instead of an error string. This response is return
   "conflict": "ADVANCE_AUTOMATION",
   "summary": "While 'Moderate Airflow' automation is running, all ports on this controller are locked from manual control. Your change requires resolving this conflict first.",
   "human_summary": "While 'Moderate Airflow' is running, all ports on this controller are locked from manual control. Disable the automation first to make manual adjustments.",
+  "suggested_reply": "'Moderate Airflow' automation is controlling this port right now. To make this change, I'll need to disable it first. Shall I go ahead?",
   "target_port": "Inline Fan (Port 1)",
   "automation_name": "Moderate Airflow",
   "automation_id": "1234567890",
@@ -1571,6 +1604,7 @@ structured conflict response instead of an error string. This response is return
   "conflict": "ADVANCE_AUTOMATION",
   "summary": "An Advance Automation is running on this controller, locking all ports from manual control. Your change requires resolving this conflict first.",
   "human_summary": "An active automation is blocking manual port control on this controller. Disable it first.",
+  "suggested_reply": "An active automation is blocking this port. Let me look up the active automation using list_advance_automations, then disable it. Shall I get started?",
   "target_port": "Inline Fan (Port 1)",
   "automation_name": null,
   "automation_id": null,
@@ -1599,6 +1633,9 @@ structured conflict response instead of an error string. This response is return
 **Key field notes:**
 - `active_automations` — list of `{"name": ..., "automation_id": ...}` objects for all enabled automations on this controller (empty list in degraded path)
 - `human_summary` — plain-language summary suitable for display to the grower
+- `suggested_reply` — pre-written reply text the LLM can use verbatim to inform the user what action it would take next; avoids exposing tool call syntax to the grower
+  - Normal path: names the specific automation and asks for confirmation to disable it
+  - Degraded path: explains it will use `list_advance_automations` to find the active automation
 - `options.1_disable_automation` — replaced `1_break_out_manually` from earlier versions; always points to `disable_advance_automation`
 - The `isOpenAutomation` guard condition is documented in Quirk 19
 
@@ -1712,16 +1749,33 @@ Get full detail for a single Advance Automation.
     "end_time": "20:00"
   },
   "port_groups": [
-    {"on_speed": 5, "off_speed": 0, "ports": [1, 3]}
+    {
+      "adv_id": 12345,
+      "on_speed": 5,
+      "device_type": "Inline Fan"
+    }
   ],
+  "governed_ports": [
+    {"port": 5, "port_name": "Left Fan (Port 5)"},
+    {"port": 6, "port_name": "Right Fan (Port 6)"}
+  ],
+  "port_resolution": "resolved",
   "human_summary": "'Moderate Airflow' runs at speed 5 from 08:00 to 20:00, currently enabled."
 }
 ```
 
 **Field notes:**
 - `schedule.begin_time` / `schedule.end_time` — `null` when no schedule set (always active)
-- `port_groups` — each group has its own speed settings and governed port list
-- `human_summary` — natural-language description for LLM context
+- `port_groups` — each group has its own speed settings; `device_type` is a human-readable label (e.g. `"Inline Fan"`, `"Clip Fan"`, `"Mixed Speed Group"`) derived from the `grouptDevType` integer
+- `governed_ports` — list of `{"port": N, "port_name": "Name (Port N)"}` objects identifying which ports this automation controls; derived from `devInfoListAll` `isOpenAutomation` flags (Quirk 19)
+- `port_resolution` — one of:
+  - `"resolved"` — single automation active; `governed_ports` is accurate
+  - `"multiple_automations_ambiguous"` — multiple automations are simultaneously active; `governed_ports` is empty because port ownership cannot be determined
+  - `"error"` — an exception occurred while resolving ports; `governed_ports` is empty
+- `human_summary` — natural-language description; adapts to single-group, multi-group, and ambiguous cases:
+  - Single group: `"'Name' runs at speed N from HH:MM to HH:MM, currently enabled."`
+  - Multi-group / ambiguous: `"'Name' is configured across multiple ports at varying speeds. Port assignment couldn't be determined — multiple automations are active..."`
+  - Multi-group unambiguous: `"'Name' controls Port N Name, Port M Name at varying speeds. Currently enabled."`
 
 ---
 
@@ -1790,9 +1844,9 @@ Disable a currently enabled Advance Automation. No-ops if already disabled.
 
 ---
 
-### `create_advance_automation(device_id, name, on_speed, off_speed=0, begin_time=0, end_time=1439, dry_run=True)`
+### `create_advance_automation(device_id, name, on_speed, port, off_speed=0, begin_time=0, end_time=1439, dry_run=True)`
 
-Create a new Advance Automation. The automation is enabled immediately after creation.
+Preview a new Advance Automation configuration. **Live creation is blocked** — this tool only supports `dry_run=True`. Use the AC Infinity app to create automations on the device; this tool is for previewing and planning only.
 
 **Parameters:**
 | Parameter | Type | Description |
@@ -1800,28 +1854,43 @@ Create a new Advance Automation. The automation is enabled immediately after cre
 | `device_id` | `str` | Device code from `discover_devices` |
 | `name` | `str` | Automation name (max 64 chars; control chars stripped) |
 | `on_speed` | `int` | Fan speed when active (1–10) |
+| `port` | `int` | 1-based port number the automation should control |
 | `off_speed` | `int` | Fan speed when inactive (0–10). Default: 0 |
-| `begin_time` | `int` | Schedule start as minutes since midnight (0–1439, or 255 = no schedule). Default: 0 |
-| `end_time` | `int` | Schedule end as minutes since midnight (0–1439, or 255 = no schedule). Default: 1439 |
-| `dry_run` | `bool` | Default `True` — returns payload without creating |
+| `begin_time` | `int` | Schedule start as minutes since midnight (0–1439, or 255 = no schedule). Default: 0 (midnight) |
+| `end_time` | `int` | Schedule end as minutes since midnight (0–1439, or 255 = no schedule). Default: 1439 (23:59) |
+| `dry_run` | `bool` | Default `True` — preview only. `dry_run=False` returns an error. |
 
 **Response (dry_run=True):**
 ```json
 {
   "action": "create",
   "name": "Night Mode",
+  "port": 5,
+  "port_name": "Left Fan",
   "on_speed": 3,
   "off_speed": 0,
-  "begin_time": 1320,
-  "end_time": 360,
+  "begin_time": "22:00",
+  "end_time": "06:00",
   "dry_run": true,
-  "sent": false
+  "sent": false,
+  "note": "Creating automations directly isn't possible through this assistant — the AC Infinity app handles that."
 }
 ```
 
-**Response (live):** Same plus `"automation_id"` (server-assigned `advId`).
+**Response (dry_run=False):**
+```json
+{
+  "error": "Creating automations directly isn't possible through this assistant — the AC Infinity app handles that."
+}
+```
 
-**Validation:** `on_speed` 1–10; `off_speed` 0–10; `begin_time` ≤ `end_time` unless both are 255.
+**Field notes:**
+- `port` — required; identifies the port the automation would govern
+- `port_name` — resolved from `devInfoListAll` for the given port number
+- `begin_time` / `end_time` — returned as `"HH:MM"` formatted strings in the response (input is still minutes-since-midnight integer)
+- `note` — always present in dry_run response; explains live creation is app-only
+
+**Validation:** `on_speed` 1–10; `off_speed` 0–10; `begin_time` ≤ `end_time` unless both are 255; `name` must not be empty or all control characters.
 
 ---
 

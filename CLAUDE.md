@@ -13,6 +13,45 @@ This file is the authoritative source for how Claude agents contribute to this r
 
 ---
 
+## GitHub Issue Hygiene
+
+Every issue must have at least one label applied before a PR is raised against it.
+When creating a new issue, apply labels immediately. When triaging unlabeled issues,
+audit and label before beginning work.
+
+### Labels
+
+| Label | When to apply |
+|---|---|
+| `bug` | Incorrect behavior in an existing tool |
+| `enhancement` | New feature or capability |
+| `documentation` | Doc-only changes (API.md, README, CLAUDE.md, etc.) |
+| `security` | Security vulnerability or hardening |
+| `usability` | Response wording, field ordering, conflict UX, grower-readable output |
+| `api-discovery` | New API endpoints or fields discovered via network capture or reverse engineering |
+
+Multiple labels are encouraged — a `bug` that also affects grower UX should carry both
+`bug` and `usability`.
+
+### Milestones
+
+Assign a milestone when the issue is part of a planned wave or release. If no milestone
+exists yet for the target wave, create it before assigning. Issues without a clear release
+target may be left unassigned.
+
+### Audit cadence
+
+At the start of any triage or planning session, run:
+
+```bash
+gh issue list --state open --json number,title,labels | \
+  jq -r '.[] | select(.labels | length == 0) | [.number, .title] | @tsv'
+```
+
+Label any unlabeled open issues before beginning new work.
+
+---
+
 ## Issue Workflow Protocol
 
 Every GitHub issue — feature, bug, or chore — passes through four stages before a PR is
@@ -84,6 +123,7 @@ agent writes no docs.
 *Public docs (ship with the PR):*
 - `docs/API.md` — new tools, new quirks, new endpoints in "Accepted Risk" section, tool count
 - `docs/SECURITY-RISKS.md` — new endpoints, new CVEs
+- `README.md` — update tool count, feature list, or usage examples if the PR changes them
 - Tool docstrings in `server.py` — verify they match the final implementation
 
 *Internal docs (gitignored, updated every phase):*
@@ -146,7 +186,7 @@ re-run all four. The approved plan is the contract for Stage 2.
 
 **Gate 1 — Deep Code Review (Senior Python Engineer persona)**
 - Correctness, idiomatic Python, async safety, error handling
-- API quirk compliance (see `docs/API.md` for all 15 quirks)
+- API quirk compliance (see `docs/API.md` for all 19 quirks)
 - No blocking calls in async context — all HTTP calls wrapped in `asyncio.to_thread()`
 - Retry logic applied to all external HTTP calls via `tenacity`
 
