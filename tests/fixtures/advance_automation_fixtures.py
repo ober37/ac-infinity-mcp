@@ -45,7 +45,7 @@ MOCK_ADVANCE_AUTOMATIONS_LIST = [
         "runState": 0,
         "beginTime": 540,
         "endTime": 1020,
-        "onTimeSwitch": 1,
+        "onTimeSwitch": 0,
     },
 ]
 
@@ -64,6 +64,6 @@ MOCK_ADVANCE_AUTOMATIONS_SINGLE = [
         "runState": 0,
         "beginTime": 540,
         "endTime": 1020,
-        "onTimeSwitch": 1,
+        "onTimeSwitch": 0,
     },
 ]

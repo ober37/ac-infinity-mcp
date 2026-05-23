@@ -2433,25 +2433,25 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
             port_resolution = "error"
 
         # Build human-readable summary.
+        # onTimeSwitch=0 means the "Continuous 24H/7D" toggle is OFF — the time window
+        # applies when real begin/end times are present.
+        # onTimeSwitch=1 means the toggle is ON — runs 24/7 regardless of time values.
         on_time_switch = found.get("on_time_switch", 0)
-        if on_time_switch == 1:
-            begin_str = _format_schedule_time(found.get("begin_time"))
-            end_str = _format_schedule_time(found.get("end_time"))
-        else:
+        begin_str = _format_schedule_time(found.get("begin_time"))
+        end_str = _format_schedule_time(found.get("end_time"))
+
+        # Scheduled only when toggle is OFF (0) and both formatted times are real values.
+        is_scheduled = on_time_switch == 0 and bool(begin_str) and bool(end_str)
+        if not is_scheduled:
             begin_str = None
             end_str = None
 
         if len(port_groups) == 1:
             speed = port_groups[0]["on_speed"]
-            if on_time_switch == 1 and begin_str and end_str:
+            if is_scheduled and begin_str and end_str:
                 human_summary = (
                     f"'{name}' runs at speed {speed} from {begin_str} to {end_str}, "
                     f"currently {state_str}."
-                )
-            elif on_time_switch == 1:
-                human_summary = (
-                    f"'{name}' runs at speed {speed} on a schedule"
-                    f" (no time window set), currently {state_str}."
                 )
             else:
                 human_summary = (
@@ -2472,9 +2472,7 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
                 else "multiple ports"
             )
             schedule_suffix = (
-                f" from {begin_str} to {end_str}"
-                if on_time_switch == 1 and begin_str and end_str
-                else ""
+                f" from {begin_str} to {end_str}" if is_scheduled and begin_str and end_str else ""
             )
             human_summary = (
                 f"'{name}' controls {port_list_str} at varying speeds.{schedule_suffix}"
@@ -2482,14 +2480,10 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
             )
 
         schedule_dict: dict[str, str | None] = {
-            "mode": "scheduled" if on_time_switch == 1 else "continuous",
+            "mode": "scheduled" if is_scheduled else "continuous",
             "begin_time": begin_str,
             "end_time": end_str,
         }
-        if on_time_switch == 1 and not (begin_str and end_str):
-            schedule_dict["schedule_note"] = (
-                "scheduled mode selected but no time window is configured"
-            )
 
         return json.dumps({
             "device_id": device_id,

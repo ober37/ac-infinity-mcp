@@ -4365,7 +4365,7 @@ async def test_get_advance_automation_single_group_no_schedule(mock_client):
 
 
 async def test_get_advance_automation_continuous_mode_schedule_dict(mock_client):
-    """Continuous mode (onTimeSwitch=0) → mode='continuous', both times None, no schedule_note."""
+    """onTimeSwitch=0 with sentinel times (255) → mode='continuous', both times None."""
     mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_advance_automation("C58ZA", "1342758")
@@ -4377,7 +4377,7 @@ async def test_get_advance_automation_continuous_mode_schedule_dict(mock_client)
 
 
 async def test_get_advance_automation_scheduled_mode_schedule_dict(mock_client):
-    """Scheduled mode (onTimeSwitch=1) with valid times → mode='scheduled', times formatted."""
+    """Scheduled mode (onTimeSwitch=0) with valid times → mode='scheduled', times formatted."""
     mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_SINGLE
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_advance_automation("C58ZA", "999001")
@@ -4388,9 +4388,9 @@ async def test_get_advance_automation_scheduled_mode_schedule_dict(mock_client):
     assert "schedule_note" not in data["schedule"]
 
 
-async def test_get_advance_automation_scheduled_mode_sentinel_times(mock_client):
-    """onTimeSwitch=1 with sentinel times → mode='scheduled', both times None, note present."""
-    scheduled_no_window = [
+async def test_get_advance_automation_continuous_24_7_toggle_overrides_schedule(mock_client):
+    """onTimeSwitch=1 means 'Continuous 24H/7D' toggle is ON — continuous even with real times."""
+    toggle_on_with_times = [
         {
             "advId": 77001,
             "advName": "Ventilation",
@@ -4400,20 +4400,19 @@ async def test_get_advance_automation_scheduled_mode_sentinel_times(mock_client)
             "grouptDevType": 8,
             "advKey": "1-0",
             "runState": 1,
-            "beginTime": 255,
-            "endTime": 255,
+            "beginTime": 540,
+            "endTime": 1020,
             "onTimeSwitch": 1,
         }
     ]
-    mock_client.get_advance_automations.return_value = scheduled_no_window
+    mock_client.get_advance_automations.return_value = toggle_on_with_times
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_advance_automation("C58ZA", "77001")
     data = json.loads(result)
-    assert data["schedule"]["mode"] == "scheduled"
+    assert data["schedule"]["mode"] == "continuous"
     assert data["schedule"]["begin_time"] is None
     assert data["schedule"]["end_time"] is None
-    assert "schedule_note" in data["schedule"]
-    assert "no time window" in data["schedule"]["schedule_note"]
+    assert "schedule_note" not in data["schedule"]
 
 
 async def test_get_advance_automation_unknown_on_time_switch_treated_as_continuous(mock_client):
