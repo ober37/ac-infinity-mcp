@@ -12,6 +12,40 @@ This file is the authoritative source for how Claude agents contribute to this r
 - No PR is raised until all four stages pass. Any stage failure restarts from Stage 1.
 - **All PRs are created as drafts.** Convert to "ready for review" only after Gate 5 (manual
   smoke test) is approved by the user. CI runs on draft PRs, so the test gate is not bypassed.
+- **PRs are never merged without explicit user permission.** After Gate 5 approval and all CI
+  gates pass, present the status to the user and wait for them to say "merge" (or equivalent)
+  before running `gh pr merge`.
+
+---
+
+## GitHub Issue Hygiene
+
+Every issue must have **both a label and a milestone** applied before a PR is raised against it.
+When creating a new issue, apply both immediately. When triaging unlabeled or un-milestoned
+issues, audit and update before beginning work.
+
+### Labels
+
+| Label | When to apply |
+|---|---|
+| `bug` | Incorrect behavior in an existing tool |
+| `enhancement` | New feature or capability |
+| `documentation` | Doc-only changes (API.md, README, CLAUDE.md, etc.) |
+| `security` | Security vulnerability or hardening |
+| `usability` | Response wording, field ordering, conflict UX, grower-readable output |
+| `api-discovery` | New API endpoints or fields discovered via network capture or reverse engineering |
+
+### Milestones
+
+| Milestone | When to apply |
+|---|---|
+| `v1.0` | Core feature set — all 25 tools working, Gate 5 smoke-tested |
+| `v1.0-beta` | Pre-release stabilization work |
+| `v2.0` | Post-v1.0 new capabilities |
+| `v2.0-beta` | Pre-v2.0 work |
+
+Default to `v1.0` for any issue that completes or improves existing tool behavior. Use `v2.0`
+only for net-new tools or major architecture changes agreed with the user.
 
 ---
 
