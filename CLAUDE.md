@@ -8,8 +8,106 @@ This file is the authoritative source for how Claude agents contribute to this r
 
 - Never push directly to `main`. All work goes through feature branches + PRs.
 - Each phase = one PR. Phases are never bundled.
-- Every phase begins with a **Phase Planning Session** before any code is written (see below).
-- No PR is raised until the full gate loop passes. Any failure restarts from Gate 1.
+- Every issue follows the **4-Stage Issue Workflow Protocol** (see below).
+- No PR is raised until all four stages pass. Any stage failure restarts from Stage 1.
+
+---
+
+## Issue Workflow Protocol
+
+Every GitHub issue — feature, bug, or chore — passes through four stages before a PR is
+raised. The persona prompt templates for all reviewers live in
+`.claude/internal/WORKFLOW_TEMPLATES.md`.
+
+---
+
+### Stage 1 — Plan Review (4 experts in parallel, before any code)
+
+Produce a written implementation plan (scope, files changed, example responses, edge cases,
+security considerations, test plan). Then spawn four cold reviewer agents simultaneously,
+each given the plan text and the corresponding prompt from `WORKFLOW_TEMPLATES.md`:
+
+| Reviewer | What they check |
+|---|---|
+| **Security** | Input validation, credential safety, sanitization, write guards, exception shapes |
+| **Python** | Async safety, type annotations, quirk compliance, retry policy, structure |
+| **QA** | Test coverage plan, fixture adequacy, edge cases, dry-run tests, integration impact |
+| **Usability** | Grower-readable responses, port name format, conflict messages, dry-run UX |
+
+**Convergence:** Each reviewer returns `PLAN APPROVED — [Discipline]` when they have zero
+BLOCKING findings. Only proceed to Stage 2 when all four approve.
+
+**Iteration:** Any BLOCKING finding → revise the plan → re-run all four reviewers.
+Only MAJOR/MINOR findings remaining → user decides. Cap at 3 revision cycles; escalate to
+user if not converging.
+
+---
+
+### Stage 2 — Implementation
+
+Worker agent implements against the approved plan:
+
+1. Branch from `main` (or use `isolation: "worktree"` if running in parallel with other issues)
+2. Implement the approved plan — no scope changes without returning to Stage 1
+3. Run the mechanical gate:
+   - `python3 -m ruff check src/ tests/` → `All checks passed.`
+   - `python3 -m mypy src/ac_infinity_mcp/` → `Success: no issues found`
+   - `python3 -m pytest tests/common/ tests/devices/ tests/integration/test_mcp_protocol.py -v` → all pass
+   - `python3 -m pip_audit --ignore-vuln PYSEC-2025-183` → no new CVEs
+4. Any gate failure → fix → re-run from step 3. Do not raise PR until gate is clean.
+
+---
+
+### Stage 3 — Code Review (4 experts in parallel, on the implementation)
+
+Spawn the same four reviewers with the code-review variant of each prompt from
+`WORKFLOW_TEMPLATES.md`. Each reviewer is given the full diff and the approved plan.
+
+**Convergence:** Each reviewer returns `CODE APPROVED — [Discipline]` when zero BLOCKING
+and zero MAJOR findings remain.
+
+**Iteration:** Apply all BLOCKING + MAJOR findings → commit → re-run all four reviewers.
+MINOR findings may be deferred as GitHub issues. Cap at 3 review cycles; escalate to user.
+
+After convergence, raise the PR.
+
+---
+
+### Stage 4 — Documentation Agent
+
+After the PR is created (or immediately before), spawn the Documentation Agent from
+`WORKFLOW_TEMPLATES.md`. It is the only agent that writes documentation — the implementation
+agent writes no docs.
+
+**The Documentation Agent's mandate:**
+
+*Public docs (ship with the PR):*
+- `docs/API.md` — new tools, new quirks, new endpoints in "Accepted Risk" section, tool count
+- `docs/SECURITY-RISKS.md` — new endpoints, new CVEs
+- Tool docstrings in `server.py` — verify they match the final implementation
+
+*Internal docs (gitignored, updated every phase):*
+- `.claude/internal/PROJECT_REPORT.md` — measure and update LOC, test count, coverage, tool
+  count; add phase defect log; add time investment row; add any new lessons
+- `.claude/internal/BETA_MANUAL_TESTING.md` — add session entry if live testing occurred;
+  add lessons if new patterns emerged
+- `.claude/internal/ac-infinity-mcp-v1-implementation.md` — mark phase complete, update
+  lessons and closing requirements
+
+The Documentation Agent runs these commands to get live values (never estimates from memory):
+
+```bash
+find src/ -name "*.py" | xargs wc -l | tail -1          # source LOC
+grep -c "@mcp_server.tool()" src/ac_infinity_mcp/server.py  # tool count
+python3 -m pytest --collect-only -q tests/ 2>&1 | tail -3   # test count
+python3 -m pytest tests/common/ tests/devices/ \
+  tests/integration/test_mcp_protocol.py \
+  --cov=ac_infinity_mcp --cov-report=term-missing 2>&1 | grep TOTAL  # coverage
+```
+
+The Documentation Agent reports: `N items updated. N items already current. Gaps: [list].`
+The PR is not considered complete until the Documentation Agent reports no gaps in the
+internal docs.
 
 ---
 
@@ -25,17 +123,22 @@ At the start of every phase session, in order:
 
 ---
 
-## Phase Planning Session (mandatory before any code is written)
+## Stage 1 Detail — What the Plan Must Cover
 
-Before starting implementation on each phase, run an interactive planning session with the user:
+The implementation plan (Stage 1 input) must address all of the following before the four
+reviewers are spawned. A plan that skips any section will receive BLOCKING findings.
 
-1. **Present the phase scope** — what tools/features will be built, what files will be created or modified, what the expected outputs are
-2. **Confirm usability expectations** — how will a grower actually use this? What does the tool response look like? Walk through example inputs and outputs.
-3. **Confirm implementation strategy** — which approach will be taken, any alternatives considered and why rejected
-4. **Identify edge cases** — what unusual inputs or device states should be handled? What should the tool return if data is missing?
-5. **Get explicit user approval** before writing any code
+1. **Phase scope** — what tools/features will be built, what files will be created or modified, what the expected outputs are
+2. **Usability walkthrough** — how will a grower actually use this? Walk through example tool inputs and exact JSON output. Include a sample dry-run response and a sample live response.
+3. **Implementation strategy** — which approach will be taken, alternatives considered and why rejected
+4. **Edge cases** — unusual inputs or device states; what the tool returns when data is missing, device not found, API error, partial failure
+5. **Security considerations** — input validation rules, sanitization, log-safety, write guards
+6. **Test plan** — which new test functions, which fixtures, which edge cases get parametrized cases
+7. **Documentation delta** — which sections of `docs/API.md` and `docs/SECURITY-RISKS.md` will change
 
-The session is complete when the user explicitly approves. If the user redirects scope or changes approach during the session, update the plan before starting.
+Get explicit user approval of the written plan before spawning the four reviewers. If any
+reviewer returns BLOCKING findings, revise the written plan (not just the mental model) and
+re-run all four. The approved plan is the contract for Stage 2.
 
 ---
 
@@ -163,9 +266,15 @@ Confirm the current model name at the start of each phase session and substitute
 
 ## Closing Requirements (per phase)
 
-See the **Closing Requirements** section in
-`.claude/internal/ac-infinity-mcp-v1-implementation.md` for the full
-closing checklist (lessons learned format, defect log, status update).
-The entire `.claude/internal/` directory is gitignored — it's the home
-for local-only working artifacts (the project plan, review findings,
-project report, and any other docs that should not ship to GitHub).
+Closing requirements are executed by the **Stage 4 Documentation Agent** — see the Issue
+Workflow Protocol above. The agent uses the prompt template in
+`.claude/internal/WORKFLOW_TEMPLATES.md` and the running checklist in
+`.claude/internal/ac-infinity-mcp-v1-implementation.md`.
+
+The entire `.claude/internal/` directory is gitignored — it's the home for local-only
+working artifacts (project plan, review findings, project report, workflow templates, and
+any other docs that should not ship to GitHub).
+
+**A phase is not complete until the Documentation Agent reports zero gaps.** The PR may be
+raised before Stage 4 completes, but it should not be merged until the Documentation Agent
+has finished and the internal docs are current.
