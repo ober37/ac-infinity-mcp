@@ -969,7 +969,21 @@ def _get_port_name_from_device(device: dict | None, port: int) -> str:
 async def _build_advance_conflict_response(
     device_id: str, dev_id: object, port: int, port_name: str
 ) -> str:
-    """Build a structured ADVANCE_AUTOMATION conflict response for write tools."""
+    """Build a structured ADVANCE_AUTOMATION conflict response for write tools.
+
+    Three paths depending on the secondary automation lookup result:
+
+    - **Normal path** (governing automation found and enabled): option key
+      ``"1_break_out"`` pointing to ``break_out_of_automation``; option key
+      ``"2_disable_automation"`` pointing to ``disable_advance_automation``.
+      ``suggested_reply`` discloses that releasing affects ALL ports on the automation.
+    - **All-disabled path** (API succeeded, automations non-empty, none active):
+      option key ``"1_re_disable_to_clear"`` pointing to ``disable_advance_automation``.
+      ``suggested_reply`` explains the port is stuck and offers force-release.
+    - **Degraded path** (API call failed or automation list empty):
+      option key ``"1_find_and_disable"`` pointing to ``list_advance_automations``.
+      ``suggested_reply`` avoids exposing tool names — conversational only.
+    """
     api_call_failed = False
     automations: list[dict] = []
     active_automations: list[dict] = []
@@ -1237,7 +1251,7 @@ async def get_port_settings(device_id: str, port: int) -> str:
         port: 1-based port number
 
     Returns:
-        JSON example::
+        JSON example (non-ADVANCE port)::
 
             {
               "device_id": "C58ZA",
@@ -1255,10 +1269,27 @@ async def get_port_settings(device_id: str, port: int) -> str:
             }
 
         When ``mode`` is ``"ADVANCE"``, ``speed_target`` is null (an automation governs
-        the port), ``current_speed`` reflects the live fan speed from the device, and
-        ``automation_name``/``automation_id``/``automation_on_speed`` are populated from
-        the active automation (or null if the secondary lookup degrades).
-        ``vpd_target_kpa`` is non-null only when VPD automation is active.
+        the port), and the response includes three additional enrichment fields:
+
+        - ``automation_running``: ``true`` if the governing automation has
+          ``run_state=True``; ``false`` if an automation was found but none active;
+          ``null`` when the secondary API call failed (degraded path).
+        - ``automation_configured``: ``true`` if the automations list is non-empty;
+          ``false`` if empty; ``null`` when degraded.
+        - ``human_summary``: grower-readable description of the ADVANCE state.
+          Three variants:
+          - Governing found: ``"Port is running under 'Name' automation (target
+            speed: N, current live speed: M). The automation is active."``
+          - All disabled: ``"Port is in automation mode, but all automations are
+            disabled. The port hasn't fully released. Ask me to list your
+            automations for details."``
+          - Degraded: ``"Port is in ADVANCE automation mode. Automation details
+            could not be retrieved."``
+
+        ``current_speed`` reflects the live fan speed from the device.
+        ``automation_name``/``automation_id``/``automation_on_speed`` are populated
+        from the governing automation (or null if none active or secondary lookup
+        degrades). ``vpd_target_kpa`` is non-null only when VPD automation is active.
         ``temp_range_c`` / ``humidity_range_pct`` are non-null only when those
         thresholds are enabled. ``schedule_window`` times are in device local time
         (not UTC). On failure returns ``{"error": "...", "detail": "..."}``.

@@ -1367,7 +1367,7 @@ Get the full automation configuration for a port from `/api/dev/getdevModeSettin
 }
 ```
 
-**Response (ADVANCE mode port):**
+**Response (ADVANCE mode port — governing automation found):**
 ```json
 {
   "device_id": "C58ZA",
@@ -1386,16 +1386,75 @@ Get the full automation configuration for a port from `/api/dev/getdevModeSettin
   "cycle_on_seconds": null,
   "cycle_off_seconds": null,
   "timer_on_seconds": null,
-  "timer_off_seconds": null
+  "timer_off_seconds": null,
+  "automation_running": true,
+  "automation_configured": true,
+  "human_summary": "Port is running under 'Moderate Airflow' automation (target speed: 5, current live speed: 5). The automation is active."
+}
+```
+
+**Response (ADVANCE mode port — all automations disabled):**
+```json
+{
+  "device_id": "C58ZA",
+  "port": 5,
+  "mode": "ADVANCE",
+  "advance_automation": true,
+  "automation_name": null,
+  "automation_id": null,
+  "automation_on_speed": null,
+  "current_speed": 0,
+  "speed_target": null,
+  "vpd_target_kpa": null,
+  "temp_range_c": null,
+  "humidity_range_pct": null,
+  "schedule_window": null,
+  "cycle_on_seconds": null,
+  "cycle_off_seconds": null,
+  "timer_on_seconds": null,
+  "timer_off_seconds": null,
+  "automation_running": false,
+  "automation_configured": true,
+  "human_summary": "Port is in automation mode, but all automations are disabled. The port hasn't fully released. Ask me to list your automations for details."
+}
+```
+
+**Response (ADVANCE mode port — secondary call failed / degraded):**
+```json
+{
+  "device_id": "C58ZA",
+  "port": 5,
+  "mode": "ADVANCE",
+  "advance_automation": true,
+  "automation_name": null,
+  "automation_id": null,
+  "automation_on_speed": null,
+  "current_speed": 0,
+  "speed_target": null,
+  "vpd_target_kpa": null,
+  "temp_range_c": null,
+  "humidity_range_pct": null,
+  "schedule_window": null,
+  "cycle_on_seconds": null,
+  "cycle_off_seconds": null,
+  "timer_on_seconds": null,
+  "timer_off_seconds": null,
+  "automation_running": null,
+  "automation_configured": null,
+  "human_summary": "Port is in ADVANCE automation mode. Automation details could not be retrieved.",
+  "note": "Could not fetch automation details. Use list_advance_automations to view active automations."
 }
 ```
 
 **ADVANCE mode field notes:**
 - `mode` — `"ADVANCE"` when `modeType=15` and `isOpenAutomation != 0` in `getdevModeSettingList` (Quirk 19)
-- `automation_name` / `automation_id` — populated from the active automation; `null` when the secondary lookup degrades (API error)
-- `automation_on_speed` — the `on_speed` configured in the first port group of the governing automation; `null` on degraded path
+- `automation_name` / `automation_id` — populated from the governing automation; `null` when all automations are disabled or the secondary lookup degrades
+- `automation_on_speed` — the `on_speed` configured in the first port group of the governing automation; `null` when no governing automation or on degraded path
 - `current_speed` — live fan speed from `devInfoListAll` `speak` field (reflects what the port is currently doing)
 - `speed_target` — always `null` in ADVANCE mode (the automation governs speed, not a static target)
+- `automation_running` — `true` if the governing automation has `run_state=True`; `false` if an automation was found but not running (all disabled); `null` when the secondary API call failed (degraded)
+- `automation_configured` — `true` if the automations list is non-empty; `false` if empty; `null` when degraded (secondary call failed)
+- `human_summary` — grower-readable description of the ADVANCE state; always present
 - `vpd_target_kpa`, `temp_range_c`, `humidity_range_pct`, `schedule_window`, cycle/timer fields — all `null` in ADVANCE mode
 - When the secondary automation lookup fails (API error), a `note` field is added: `"Could not fetch automation details. Use list_advance_automations to view active automations."`
 
@@ -1630,13 +1689,16 @@ structured conflict response instead of an error string. This response is return
 `set_port_speed`, `set_port_on`, `set_port_off`, `set_port_mode`, `set_vpd_automation`,
 `set_temperature_automation`, `set_humidity_automation`, and `apply_grow_stage_template`.
 
-**When the governing automation can be identified (normal path):**
+The conflict response has three distinct paths depending on what the secondary automation
+lookup finds:
+
+**Normal path (governing automation found and enabled):**
 ```json
 {
   "conflict": "ADVANCE_AUTOMATION",
   "summary": "While 'Moderate Airflow' automation is running, all ports on this controller are locked from manual control. Your change requires resolving this conflict first.",
-  "human_summary": "While 'Moderate Airflow' is running, all ports on this controller are locked from manual control. Disable the automation first to make manual adjustments.",
-  "suggested_reply": "'Moderate Airflow' automation is controlling this port right now. To make this change, I'll need to disable it first. Shall I go ahead?",
+  "human_summary": "'Moderate Airflow' is actively controlling this port at target speed 5. To make manual adjustments, you need to resolve this automation conflict first.",
+  "suggested_reply": "'Moderate Airflow' automation is controlling this port right now (target speed: 5). I can release this port from the automation — but note this will also release all other ports currently on 'Moderate Airflow'. Alternatively, I could update the automation's speed settings instead. What would you prefer?",
   "target_port": "Inline Fan (Port 1)",
   "automation_name": "Moderate Airflow",
   "automation_id": "1234567890",
@@ -1646,15 +1708,17 @@ structured conflict response instead of an error string. This response is return
   "co_governed_ports": [],
   "switching_guidance": "To regain manual control: disable all active automations using disable_advance_automation, then apply your change. To instead add this port to an automation, use create_advance_automation.",
   "options": {
-    "1_disable_automation": {
-      "description": "Disable \"Moderate Airflow\" to regain manual control of this port.",
+    "1_break_out": {
+      "description": "Release this port from 'Moderate Airflow' to regain manual control.",
+      "tool": "break_out_of_automation",
+      "instruction": "Call break_out_of_automation(device_id='C58ZA', port=1, dry_run=True) to preview.",
+      "available": true
+    },
+    "2_disable_automation": {
+      "description": "Disable 'Moderate Airflow' entirely — releases all ports on this automation.",
       "tool": "disable_advance_automation",
       "instruction": "Call disable_advance_automation(device_id='C58ZA', automation_id='1234567890', dry_run=True) to preview.",
       "available": true
-    },
-    "2_break_out": {
-      "available": false,
-      "status": "Use Option 1 (disable_advance_automation) instead — break_out_of_automation is only applicable when the port is confirmed to be inside a specific automation."
     },
     "3_fork_automation": {
       "available": false,
@@ -1664,13 +1728,13 @@ structured conflict response instead of an error string. This response is return
 }
 ```
 
-**When the automation cannot be identified (degraded path — API error during lookup):**
+**All-disabled path (API succeeded, automations non-empty, none currently active):**
 ```json
 {
   "conflict": "ADVANCE_AUTOMATION",
-  "summary": "An Advance Automation is running on this controller, locking all ports from manual control. Your change requires resolving this conflict first.",
-  "human_summary": "An active automation is blocking manual port control on this controller. Disable it first.",
-  "suggested_reply": "An active automation is blocking this port. Let me look up the active automation using list_advance_automations, then disable it. Shall I get started?",
+  "summary": "An Advance Automation is blocking this port. All configured automations are currently disabled, but the port hasn't fully released from automation mode.",
+  "human_summary": "This port is in automation mode, but all automations are disabled. The port hasn't fully released. Ask me to list your automations for details.",
+  "suggested_reply": "Your automations for this port are all turned off, but the port is still stuck in automation mode — it hasn't fully released. I can force-release it by re-applying the disable command. Want me to do that?",
   "target_port": "Inline Fan (Port 1)",
   "automation_name": null,
   "automation_id": null,
@@ -1678,15 +1742,47 @@ structured conflict response instead of an error string. This response is return
   "co_governed_ports": [],
   "switching_guidance": "To regain manual control: disable all active automations using disable_advance_automation, then apply your change. To instead add this port to an automation, use create_advance_automation.",
   "options": {
-    "1_disable_automation": {
+    "1_re_disable_to_clear": {
+      "description": "Force-release this port by re-applying the disable command.",
+      "tool": "disable_advance_automation",
+      "instruction": "Call list_advance_automations(device_id='C58ZA') to find the automation_id, then call disable_advance_automation(device_id='C58ZA', automation_id='<id>', dry_run=True) to preview the force-release.",
+      "available": true
+    },
+    "2_disable_automation": {
+      "available": false,
+      "status": "All automations already disabled — use option 1 to force-release the port."
+    },
+    "3_fork_automation": {
+      "available": false,
+      "status": "not_yet_implemented"
+    }
+  }
+}
+```
+
+**Degraded path (API error during lookup, or automation list is empty):**
+```json
+{
+  "conflict": "ADVANCE_AUTOMATION",
+  "summary": "An Advance Automation is running on this controller, locking all ports from manual control. Your change requires resolving this conflict first.",
+  "human_summary": "An active automation is blocking manual port control on this controller. Ask me to list your automations to see what's set up.",
+  "suggested_reply": "An active automation is blocking this port. Let me look up the active automations to resolve this — shall I get started?",
+  "target_port": "Inline Fan (Port 1)",
+  "automation_name": null,
+  "automation_id": null,
+  "active_automations": [],
+  "co_governed_ports": [],
+  "switching_guidance": "To regain manual control: disable all active automations using disable_advance_automation, then apply your change. To instead add this port to an automation, use create_advance_automation.",
+  "options": {
+    "1_find_and_disable": {
       "description": "Find and disable the active automation, then apply your manual change.",
       "tool": "list_advance_automations",
       "instruction": "Call list_advance_automations(device_id='C58ZA') to get the automation_id of the active automation, then call disable_advance_automation(device_id='C58ZA', automation_id='<id>', dry_run=True).",
       "available": true
     },
-    "2_break_out": {
+    "2_disable_automation": {
       "available": false,
-      "status": "Use Option 1 (disable_advance_automation) instead — break_out_of_automation is only applicable when the port is confirmed to be inside a specific automation."
+      "status": "Use option 1 first to identify the automation."
     },
     "3_fork_automation": {
       "available": false,
@@ -1697,12 +1793,17 @@ structured conflict response instead of an error string. This response is return
 ```
 
 **Key field notes:**
-- `active_automations` — list of `{"name": ..., "automation_id": ...}` objects for all enabled automations on this controller (empty list in degraded path)
-- `human_summary` — plain-language summary suitable for display to the grower
+- `active_automations` — list of `{"name": ..., "automation_id": ...}` objects for all enabled automations on this controller (empty list in all-disabled and degraded paths)
+- `human_summary` — plain-language summary suitable for display to the grower; always present
 - `suggested_reply` — pre-written reply text the LLM can use verbatim to inform the user what action it would take next; avoids exposing tool call syntax to the grower
-  - Normal path: names the specific automation and asks for confirmation to disable it
-  - Degraded path: explains it will use `list_advance_automations` to find the active automation
-- `options.1_disable_automation` — replaced `1_break_out_manually` from earlier versions; always points to `disable_advance_automation`
+  - Normal path: names the specific automation and its target speed; asks whether to break out or update the automation settings
+  - All-disabled path: explains the stuck-in-automation-mode situation and offers to force-release via re-apply
+  - Degraded path: offers to list automations to identify the blocking one (no tool names exposed to the grower)
+- Option key naming by path:
+  - Normal path: `"1_break_out"` (tool: `break_out_of_automation`), `"2_disable_automation"` (tool: `disable_advance_automation`)
+  - All-disabled path: `"1_re_disable_to_clear"` (tool: `disable_advance_automation`), `"2_disable_automation"` (available: false)
+  - Degraded path: `"1_find_and_disable"` (tool: `list_advance_automations`), `"2_disable_automation"` (available: false)
+- `options.1_break_out.available` — set to `governing.get("enabled", False)`; will be `false` if the automation is enabled but not in a runnable state
 - The `isOpenAutomation` guard condition is documented in Quirk 19
 
 ---
