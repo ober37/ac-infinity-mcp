@@ -953,11 +953,20 @@ regardless of how many phantom slot entries the API returns.
 
 ### Quirk 21 — `onTimeSwitch` field controls schedule mode
 
-The Advance Automation API returns an `onTimeSwitch` field per group entry.
-`0` = continuous mode (always active when enabled; `beginTime`/`endTime` are irrelevant and
-should be ignored regardless of their values). `1` = scheduled mode (active only within the
-`beginTime`–`endTime` window). A missing field defaults to `0`. Values other than `0` and `1`
-are treated as continuous (safe fallback). See `_group_automations()` — `on_time_switch` key.
+The Advance Automation API returns an `onTimeSwitch` field per group entry. It maps to the
+**"Continuous 24 Hours / 7 Days"** toggle in the AC Infinity app:
+
+- `onTimeSwitch = 0` — toggle **OFF**: the time window applies. The automation is scheduled
+  and only active between `beginTime` and `endTime`. Both values must be real (non-sentinel)
+  for the schedule to be shown; if either is `255` (sentinel), treat as continuous.
+- `onTimeSwitch = 1` — toggle **ON**: runs 24/7 regardless of `beginTime`/`endTime` values.
+  Always treated as continuous.
+- Missing field defaults to `0` (scheduled if real times present, else continuous).
+- Values other than `0` and `1` are treated as continuous (safe fallback).
+
+**Important:** The mapping is the opposite of what the field name implies. A value of `0`
+(switch "off") means the time-window restriction is in effect (scheduled). See
+`_group_automations()` — `on_time_switch` key.
 
 ---
 
@@ -1849,7 +1858,7 @@ Get full detail for a single Advance Automation.
 ```
 
 **Field notes:**
-- `schedule.mode` — `"continuous"` when `onTimeSwitch=0` (always active when enabled; `begin_time`/`end_time` are always `null`); `"scheduled"` when `onTimeSwitch=1` (active only within the configured window). See Quirk 21.
+- `schedule.mode` — `"scheduled"` when `onTimeSwitch=0` AND real `begin_time`/`end_time` values are present (the "Continuous 24H/7D" app toggle is OFF, so the time window applies); `"continuous"` when `onTimeSwitch=1` (toggle ON, runs 24/7) or when times are sentinel values (255). See Quirk 21.
 - `schedule.begin_time` / `schedule.end_time` — `null` for continuous mode; `"HH:MM"` for scheduled mode with a time window; `null` for scheduled mode with no window configured
 - `schedule.schedule_note` — present only in scheduled mode with no time window; value: `"scheduled mode selected but no time window is configured"`
 - `port_groups` — each group has its own speed settings; `device_type` is a human-readable label (e.g. `"Inline Fan"`, `"Clip Fan"`, `"Mixed Speed Group"`) derived from the `grouptDevType` integer
