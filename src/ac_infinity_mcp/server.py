@@ -800,8 +800,13 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         days: Number of days to analyze. Default: 7. Must be 1–30.
 
     Returns:
-        JSON with per-port on_hours, off_hours, transitions, avg_speed_when_running,
-        uptime_pct, and peak_hour_utc (UTC hour 0–23).
+        JSON with per-port on_hours (total hours ON over the full period), off_hours,
+        transitions, avg_speed_when_running, uptime_pct, and peak_hour_utc (UTC hour
+        0–23 of highest activity, or null if the port never ran).
+
+    When presenting on_hours to a grower, translate it from raw hours to natural
+    language, e.g.: "The fan ran for 36.0 hours over the past 3 days (about 50% of
+    the time)." Do NOT describe on_hours as hours per day.
     """
     try:
         if not 1 <= days <= 30:
@@ -817,7 +822,7 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
             return json.dumps(hist)
 
         readings = hist.get("readings", [])
-        ports = build_activity_report(readings)
+        ports = build_activity_report(readings, days=days)
 
         return json.dumps({
             "device_id": device_id,

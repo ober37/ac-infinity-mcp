@@ -50,7 +50,7 @@ class ActivityReport:
     transitions: int
     avg_speed_when_running: float
     uptime_pct: float
-    peak_hour_utc: int
+    peak_hour_utc: int | None = None
 
 
 def _range_score(value: float, low: float, high: float) -> float:
@@ -208,11 +208,13 @@ def detect_trends(readings: list[dict[str, Any]], days: int) -> list[TrendReport
     return reports
 
 
-def build_activity_report(readings: list[dict[str, Any]]) -> list[ActivityReport]:
+def build_activity_report(
+    readings: list[dict[str, Any]], days: int = 1
+) -> list[ActivityReport]:
     """Build per-port runtime activity report from parsed history readings.
 
     Each reading is treated as one equal time slice.
-    on_hours/off_hours are expressed as a fraction of a 24-hour day.
+    on_hours/off_hours are cumulative hours over the full ``days`` window.
     """
     if not readings:
         return []
@@ -262,10 +264,9 @@ def build_activity_report(readings: list[dict[str, Any]]) -> list[ActivityReport
             continue
 
         on_count = sum(1 for f in pd["on_flags"] if f)
-        off_count = total - on_count
 
-        on_hours = round(on_count / total * 24, 2)
-        off_hours = round(off_count / total * 24, 2)
+        on_hours = round(on_count / total * 24 * days, 2)
+        off_hours = round(days * 24 - on_hours, 2)
 
         running_speeds = [s for s, f in zip(pd["speeds"], pd["on_flags"]) if f and s > 0]
         avg_speed = round(sum(running_speeds) / len(running_speeds), 2) if running_speeds else 0.0
@@ -276,7 +277,7 @@ def build_activity_report(readings: list[dict[str, Any]]) -> list[ActivityReport
         for h in pd["hours"]:
             if h is not None:
                 hour_counts[h] = hour_counts.get(h, 0) + 1
-        peak_hour_utc = max(hour_counts, key=lambda k: hour_counts[k]) if hour_counts else 0
+        peak_hour_utc = max(hour_counts, key=hour_counts.get) if hour_counts else None  # type: ignore[arg-type]
 
         reports.append(
             ActivityReport(

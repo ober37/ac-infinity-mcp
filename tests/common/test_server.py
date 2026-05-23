@@ -1196,6 +1196,7 @@ async def test_get_port_activity_report_port_always_off(mock_client):
     assert port["uptime_pct"] == 0.0
     assert port["on_hours"] == 0.0
     assert port["avg_speed_when_running"] == 0.0
+    assert port["peak_hour_utc"] is None
 
 
 async def test_get_port_activity_report_port_always_on(mock_client):
