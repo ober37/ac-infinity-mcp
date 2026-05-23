@@ -500,7 +500,7 @@ devId=REDACTED_DEV_ID&externalPort=1&onSpead=5&modeType=2&offSpead=0&...
 
 ---
 
-## All 19 Known API Quirks
+## All 20 Known API Quirks
 
 ### Quirk 1 — Auth typo: `appPasswordl`
 
@@ -906,6 +906,38 @@ guard only fires when the automation is confirmed active (`isOpenAutomation != 0
 
 ---
 
+### Quirk 20 — Phantom external sensor entries in `devInfoListAll`
+
+The AC Infinity API includes sensor slot entries in the `deviceInfo.sensors` array even
+when no physical sensor is connected to a UIS port. These phantom entries have a non-null
+`sensorType` integer and a `sensorData` value of `0` or `null`. Including them in the
+`external_sensors` response would cause growers to see sensors they don't own.
+
+**Filtering rule applied in `parse_device_data` (`client.py`):**
+
+| Condition | Action |
+|---|---|
+| `sensorType` matches a recognized type (1–20 per `_SENSOR_TYPE_LABELS`) | **Always include** — even if current value is `0` (sensor may be connected but reading zero) |
+| `sensorType` is unrecognized (future/unknown type) | Include **only if** `sensorData != 0` — zero value on an unknown type is treated as phantom |
+| `sensorType` is `null` | **Always exclude** — no type means no sensor slot at all |
+
+**Implementation:**
+
+```python
+def _should_include_sensor(s: dict) -> bool:
+    sensor_type = s.get("sensorType")
+    if sensor_type is None:
+        return False
+    if sensor_type in _SENSOR_TYPE_LABELS:
+        return True  # recognized type: always include (even value=0)
+    return (s.get("sensorData") or 0) != 0  # unrecognized: include only if non-zero
+```
+
+This means `external_sensors` will be `[]` on a controller with no sensors plugged in,
+regardless of how many phantom slot entries the API returns.
+
+---
+
 ## v2.0 API Endpoints Reference
 
 All endpoints below use the base URL `http://www.acinfinityserver.com/api` and require
@@ -1021,7 +1053,7 @@ Get current sensor readings (temp, humidity, VPD) and port states for one device
 - `temperature_c` / `temperature_f` — decoded from raw API value ÷ 100 (Quirk 4)
 - `vpd` — decoded from `vpdnums ÷ 100` (Quirk 4, Quirk 10)
 - `ports[].speed` — current port speed 0–10 from `speak` field
-- `external_sensors` — list of UIS sensor readings when sensors are attached; empty `[]` for built-in-only devices
+- `external_sensors` — list of UIS sensor readings when sensors are attached; phantom entries (API-reported but no hardware connected) are filtered out (Quirk 20); empty `[]` for built-in-only devices
 
 ---
 
@@ -1041,7 +1073,8 @@ Get current sensor readings for all devices at once.
       "temperature_c": 24.3,
       "humidity": 58.2,
       "vpd": 1.31,
-      "ports": [...]
+      "ports": [...],
+      "external_sensors": []
     }
   ]
 }
@@ -1051,6 +1084,7 @@ Get current sensor readings for all devices at once.
 - Each entry has the same shape as `get_device_reading`
 - Devices that fail to parse individually include `"error"` instead of sensor fields
 - Useful for a dashboard view across multiple tents/controllers
+- `external_sensors` — phantom sensor entries (sensors present in the API response but with no hardware connected) are filtered out; see Quirk 20
 
 ---
 

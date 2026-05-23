@@ -186,7 +186,7 @@ re-run all four. The approved plan is the contract for Stage 2.
 
 **Gate 1 — Deep Code Review (Senior Python Engineer persona)**
 - Correctness, idiomatic Python, async safety, error handling
-- API quirk compliance (see `docs/API.md` for all 19 quirks)
+- API quirk compliance (see `docs/API.md` for all 20 quirks)
 - No blocking calls in async context — all HTTP calls wrapped in `asyncio.to_thread()`
 - Retry logic applied to all external HTTP calls via `tenacity`
 

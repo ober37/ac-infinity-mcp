@@ -308,6 +308,8 @@ async def get_device_reading(device_id: str) -> str:
               "external_sensors": []
             }
 
+        ``external_sensors`` excludes phantom entries (API-reported sensor slots
+        with no physical hardware connected — see API Quirk 20).
         On failure returns ``{"error": "...", "detail": "..."}``.
     """
     try:
@@ -639,6 +641,8 @@ async def get_all_device_readings() -> str:
         JSON with ``"readings"`` list — one entry per device, same shape as
         ``get_device_reading``. Devices that fail to parse individually include
         an ``"error"`` key instead of sensor fields.
+        ``external_sensors`` excludes phantom entries (API-reported sensor slots
+        with no physical hardware connected — see API Quirk 20).
         On auth/API failure returns ``{"error": "...", "detail": "..."}``.
     """
     try:
