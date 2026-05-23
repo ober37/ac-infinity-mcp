@@ -3834,6 +3834,20 @@ async def test_create_advance_automation_dry_run(mock_client):
     mock_client.create_advance_automation.assert_not_called()
 
 
+async def test_create_advance_automation_dry_run_port_no_name(mock_client):
+    """Port with no portName falls back to 'Port N' in dry_run response, not '(unnamed)'."""
+    import copy
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device["deviceInfo"]["ports"][0].pop("portName", None)
+    mock_client.get_devices.return_value = [device]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Night Cycle", on_speed=3, port=1, dry_run=True
+        )
+    data = json.loads(result)
+    assert data["port_name"] == "Port 1"
+
+
 async def test_create_advance_automation_invalid_speed(mock_client):
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await create_advance_automation("C58ZA", "Test", on_speed=11, port=1, dry_run=True)
@@ -4522,6 +4536,22 @@ async def test_get_advance_automation_port_resolution_single_automation(mock_cli
     assert len(data["governed_ports"]) == 1
     assert data["governed_ports"][0]["port"] == 1
     assert data["governed_ports"][0]["port_name"] == "Intake Fan (Port 1)"
+
+
+async def test_get_advance_automation_governed_ports_missing_port_name(mock_client):
+    """Port with no portName in deviceInfo falls back to 'Port N (Port N)' not '(unnamed)'."""
+    import copy
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device["deviceInfo"]["ports"][0].pop("portName", None)
+    device["deviceInfo"]["ports"][0]["isOpenAutomation"] = 1
+    mock_client.get_devices.return_value = [device]
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_advance_automation("C58ZA", "1342758")
+    data = json.loads(result)
+    assert data["port_resolution"] == "resolved"
+    assert len(data["governed_ports"]) == 1
+    assert data["governed_ports"][0]["port_name"] == "Port 1 (Port 1)"
 
 
 async def test_get_advance_automation_port_resolution_multiple_automations_ambiguous(mock_client):

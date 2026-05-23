@@ -860,7 +860,12 @@ def _decode_mode(mode_int: int | None) -> str:
 
 _MODE_AT_TYPES: dict[str, int] = {v: k for k, v in _MODE_LABELS.items()}
 
-_GRP_DEV_TYPE_LABELS: dict[int, str] = {4: "Inline fan/exhaust", 8: "Clip fan", 48: "Mixed speed"}
+_GRP_DEV_TYPE_LABELS: dict[int, str] = {
+    0: "Unknown",
+    4: "Inline fan/exhaust",
+    8: "Clip fan",
+    48: "Mixed speed",
+}
 
 
 def _format_schedule_time(minutes: int | None) -> str | None:
@@ -2379,7 +2384,11 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
                 {
                     "port": p["port"],
                     "port_name": (
-                        (_sanitize_api_string(p.get("portName"), 64) or ("Port " + str(p["port"])))
+                        (
+                            _sanitize_api_string(p["portName"], 64)
+                            if p.get("portName")
+                            else ("Port " + str(p["port"]))
+                        )
                         + f" (Port {p['port']})"
                     ),
                 }
@@ -2727,7 +2736,8 @@ async def create_advance_automation(
         if port_obj is None:
             return json.dumps({"error": f"Port {port} not found on device {device_id}"})
 
-        port_name = _sanitize_api_string(port_obj.get("portName"), 64) or f"Port {port}"
+        raw_port_nm = port_obj.get("portName")
+        port_name = _sanitize_api_string(raw_port_nm, 64) if raw_port_nm else f"Port {port}"
 
         return json.dumps({
             "action": "create",
