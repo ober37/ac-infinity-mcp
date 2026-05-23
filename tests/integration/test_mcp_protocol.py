@@ -93,7 +93,7 @@ SCHEMA_CASES: list[tuple[str, list[str], list[str]]] = [
     ),
     (
         "create_advance_automation",
-        ["device_id", "name", "on_speed"],
+        ["device_id", "name", "port", "on_speed"],
         ["off_speed", "begin_time", "end_time", "dry_run"],
     ),
     (

@@ -860,6 +860,8 @@ def _decode_mode(mode_int: int | None) -> str:
 
 _MODE_AT_TYPES: dict[str, int] = {v: k for k, v in _MODE_LABELS.items()}
 
+_GRP_DEV_TYPE_LABELS: dict[int, str] = {4: "Inline fan/exhaust", 8: "Clip fan", 48: "Mixed speed"}
+
 
 def _format_schedule_time(minutes: int | None) -> str | None:
     """Convert minutes-since-midnight to HH:MM string. Returns None when disabled.
@@ -957,7 +959,9 @@ async def _build_advance_conflict_response(
         ]
     except Exception as exc:
         logger.warning(
-            "Could not fetch automations for conflict response (device=%s): %s", device_id, exc
+            "Could not fetch automations for conflict response (device=%s): %s",
+            device_id,
+            type(exc).__name__,
         )
         governing = None
         active_automations = []
@@ -973,6 +977,10 @@ async def _build_advance_conflict_response(
         human_summary = (
             f"While '{auto_name}' is running, all ports on this controller are locked"
             " from manual control. Disable the automation first to make manual adjustments."
+        )
+        suggested_reply = (
+            f"'{auto_name}' automation is controlling this port right now."
+            " To make this change, I'll need to disable it first. Shall I go ahead?"
         )
         opt1: dict = {
             "description": f"Disable \"{auto_name}\" to regain manual control of this port.",
@@ -995,6 +1003,11 @@ async def _build_advance_conflict_response(
             "An active automation is blocking manual port control on this controller."
             " Disable it first."
         )
+        suggested_reply = (
+            "An active automation is blocking this port."
+            " Let me look up the active automation using list_advance_automations,"
+            " then disable it. Shall I get started?"
+        )
         opt1 = {
             "description": "Find and disable the active automation, then apply your manual change.",
             "tool": "list_advance_automations",
@@ -1011,6 +1024,7 @@ async def _build_advance_conflict_response(
         "conflict": "ADVANCE_AUTOMATION",
         "summary": summary,
         "human_summary": human_summary,
+        "suggested_reply": suggested_reply,
         "target_port": f"{port_name} (Port {port})",
         "automation_name": auto_name,
         "automation_id": auto_id,
@@ -1164,6 +1178,10 @@ async def get_port_settings(device_id: str, port: int) -> str:
               "timer_off_seconds": 0
             }
 
+        When ``mode`` is ``"ADVANCE"``, ``speed_target`` is null (an automation governs
+        the port), ``current_speed`` reflects the live fan speed from the device, and
+        ``automation_name``/``automation_id``/``automation_on_speed`` are populated from
+        the active automation (or null if the secondary lookup degrades).
         ``vpd_target_kpa`` is non-null only when VPD automation is active.
         ``temp_range_c`` / ``humidity_range_pct`` are non-null only when those
         thresholds are enabled. ``schedule_window`` times are in device local time
@@ -1184,16 +1202,53 @@ async def get_port_settings(device_id: str, port: int) -> str:
 
         settings = await asyncio.to_thread(_client().get_mode_settings, dev_id, port)
 
-        # ADVANCE detection: modeType=15 means this port is governed by a named Advance
-        # Automation. All automation-target fields reflect automation-internal config and
-        # are not meaningful for individual port management — return early with ADVANCE mode.
-        if settings.get("modeType") == _ADVANCE_MODE_TYPE:
-            return json.dumps({
+        # Extract current live speed from devInfoListAll for ADVANCE enrichment.
+        port_data = next(
+            (p for p in device.get("deviceInfo", {}).get("ports", []) if p.get("port") == port),
+            None,
+        )
+        current_speed = int(port_data.get("speak", 0)) if port_data else 0
+
+        # ADVANCE detection (Quirk 19): modeType=15 AND isOpenAutomation != 0.
+        # Safe-fail default: absent isOpenAutomation key treated as 1 (active).
+        if (
+            settings.get("modeType") == _ADVANCE_MODE_TYPE
+            and settings.get("isOpenAutomation", 1) != 0
+        ):
+            governing = None
+            degraded = False
+            try:
+                raw_adv = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
+                adv_grouped = _group_automations(raw_adv)
+                governing = next(
+                    (a for a in adv_grouped if a.get("enabled") or a.get("run_state")),
+                    None,
+                )
+            except ACInfinityAuthError:
+                # ACInfinityAuthError must precede Exception — auth must propagate, not degrade.
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Could not fetch advance automations in get_port_settings (device=%s): %s",
+                    device_id,
+                    type(exc).__name__,
+                )
+                degraded = True
+
+            resp: dict = {
                 "device_id": device_id,
                 "port": port,
                 "mode": "ADVANCE",
                 "advance_automation": True,
-                "speed_target": settings.get("onSpead", 0),
+                "automation_name": governing["name"] if governing else None,
+                "automation_id": governing["automation_id"] if governing else None,
+                "automation_on_speed": (
+                    governing["port_groups"][0]["on_speed"]
+                    if governing and governing["port_groups"]
+                    else None
+                ),
+                "current_speed": current_speed,
+                "speed_target": None,
                 "vpd_target_kpa": None,
                 "temp_range_c": None,
                 "humidity_range_pct": None,
@@ -1202,7 +1257,13 @@ async def get_port_settings(device_id: str, port: int) -> str:
                 "cycle_off_seconds": None,
                 "timer_on_seconds": None,
                 "timer_off_seconds": None,
-            }, indent=2)
+            }
+            if degraded:
+                resp["note"] = (
+                    "Could not fetch automation details."
+                    " Use list_advance_automations to view active automations."
+                )
+            return json.dumps(resp, indent=2)
 
         vpd_target = None
         if settings.get("targetVpdSwitch"):
@@ -2289,31 +2350,85 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
         if found is None:
             return json.dumps({"error": f"Automation {automation_id} not found"})
 
-        # Build human-readable summary.
         name = found["name"]
         enabled = found["enabled"]
         state_str = "enabled" if enabled else "disabled"
         port_groups = found["port_groups"]
 
+        # Transform grp_dev_type integer → human-readable device_type string.
+        port_groups_out = [
+            {
+                "adv_id": pg["adv_id"],
+                "on_speed": pg["on_speed"],
+                "device_type": _GRP_DEV_TYPE_LABELS.get(
+                    pg.get("grp_dev_type"),
+                    f"Type {pg.get('grp_dev_type')}"
+                    if pg.get("grp_dev_type") is not None
+                    else "Unknown",
+                ),
+            }
+            for pg in port_groups
+        ]
+
+        # Port resolution: identify which ports this automation governs.
+        governed_ports: list[dict] = []
+        port_resolution: str = "resolved"
+        try:
+            ports = device.get("deviceInfo", {}).get("ports", [])
+            advance_ports = [
+                {
+                    "port": p["port"],
+                    "port_name": (
+                        (_sanitize_api_string(p.get("portName"), 64) or ("Port " + str(p["port"])))
+                        + f" (Port {p['port']})"
+                    ),
+                }
+                for p in ports
+                if p.get("isOpenAutomation") == 1
+            ]
+            enabled_count = sum(1 for a in grouped if a.get("enabled") or a.get("run_state"))
+            if enabled_count <= 1:
+                governed_ports = advance_ports
+                port_resolution = "resolved"
+            else:
+                governed_ports = []
+                port_resolution = "multiple_automations_ambiguous"
+        except (KeyError, TypeError, AttributeError):
+            governed_ports = []
+            port_resolution = "error"
+
+        # Build human-readable summary.
+        begin_str = _format_schedule_time(found.get("begin_time"))
+        end_str = _format_schedule_time(found.get("end_time"))
+        if begin_str and end_str:
+            schedule_desc = f"from {begin_str} to {end_str}"
+        else:
+            schedule_desc = "with no schedule (always active when enabled)"
+
         if len(port_groups) == 1:
             speed = port_groups[0]["on_speed"]
-            begin_str = _format_schedule_time(found.get("begin_time"))
-            end_str = _format_schedule_time(found.get("end_time"))
-            if begin_str and end_str:
-                schedule_desc = f"from {begin_str} to {end_str}"
-            else:
-                schedule_desc = "with no schedule (always active when enabled)"
             human_summary = (
                 f"'{name}' runs at speed {speed} {schedule_desc}, "
                 f"currently {state_str}."
             )
-        else:
+        elif port_resolution == "multiple_automations_ambiguous":
             human_summary = (
-                "This automation has multiple port groups — see port_groups for full detail."
+                f"'{name}' is configured across multiple ports at varying speeds. "
+                "Port assignment couldn't be determined — multiple automations are active "
+                "at the same time, and it's unclear which ports each one controls. "
+                f"Currently {state_str}."
             )
-
-        begin_disp = _format_schedule_time(found.get("begin_time"))
-        end_disp = _format_schedule_time(found.get("end_time"))
+        else:
+            port_list_str = (
+                ", ".join(gp["port_name"] for gp in governed_ports)
+                if governed_ports
+                else "multiple ports"
+            )
+            schedule_suffix = f" from {begin_str} to {end_str}" if begin_str and end_str else ""
+            human_summary = (
+                f"'{name}' controls {port_list_str} at varying speeds.{schedule_suffix}"
+                f" Currently {state_str}."
+            )
 
         return json.dumps({
             "device_id": device_id,
@@ -2322,10 +2437,12 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
             "enabled": enabled,
             "currently_running": found["run_state"],
             "schedule": {
-                "begin_time": begin_disp,
-                "end_time": end_disp,
+                "begin_time": _format_schedule_time(found.get("begin_time")),
+                "end_time": _format_schedule_time(found.get("end_time")),
             },
-            "port_groups": port_groups,
+            "port_groups": port_groups_out,
+            "governed_ports": governed_ports,
+            "port_resolution": port_resolution,
             "human_summary": human_summary,
         }, indent=2)
 
@@ -2536,31 +2653,32 @@ async def create_advance_automation(
     device_id: str,
     name: str,
     on_speed: int,
+    port: int,
     off_speed: int = 0,
     begin_time: int = 0,
     end_time: int = 1439,
     dry_run: bool = True,
 ) -> str:
-    """Create a new Advance Automation on a device.
+    """Create a new Advance Automation on a device (dry_run preview only).
 
-    Defaults to dry_run=True — set dry_run=False to create on the device.
-    The automation is enabled immediately after creation (isOn=1).
+    Defaults to dry_run=True. Live creation (dry_run=False) is not supported
+    through this assistant — use the AC Infinity app to create automations.
 
     Args:
         device_id: The AC Infinity device code (from discover_devices).
         name: Automation name (max 64 chars, control chars stripped).
         on_speed: Fan speed when automation is active (1–10).
+        port: 1-based port number the automation should control.
         off_speed: Fan speed when automation is inactive (0–10). Default: 0.
         begin_time: Schedule start in minutes since midnight (0–1439, or 255=no schedule).
             Default: 0 (midnight). Use 255 for "always active".
         end_time: Schedule end in minutes since midnight (0–1439, or 255=no schedule).
             Default: 1439 (23:59). Use 255 for "always active".
-        dry_run: If True (default), returns the payload without creating.
+        dry_run: If True (default), previews the automation. Live creation is blocked.
 
     Returns:
-        JSON with action, name, on_speed, dry_run, sent.
-        Live response includes automation_id (server-assigned).
-        On failure returns ``{"error": "..."}``.
+        JSON with action, name, port, port_name, on_speed, begin_time, end_time,
+        dry_run, sent, note. On failure returns ``{"error": "..."}``.
     """
     try:
         # Validate original name before sanitizing so empty input produces an error
@@ -2584,6 +2702,17 @@ async def create_advance_automation(
                 {"error": "begin_time must be <= end_time (or both 255 for no schedule)"}
             )
 
+        if not dry_run:
+            return json.dumps({
+                "error": (
+                    "Creating automations directly isn't possible through this assistant"
+                    " — the AC Infinity app handles that."
+                ),
+            })
+
+        if port < 1:
+            return json.dumps({"error": "port must be a positive integer"})
+
         devices = await asyncio.to_thread(_client().get_devices)
         device = next((d for d in devices if d.get("devCode") == device_id), None)
         if not device:
@@ -2593,96 +2722,28 @@ async def create_advance_automation(
         if not dev_id:
             return json.dumps({"error": f"Device {device_id} is missing devId"})
 
-        if dry_run:
-            return json.dumps({
-                "action": "create",
-                "name": clean_name,
-                "on_speed": on_speed,
-                "off_speed": off_speed,
-                "begin_time": begin_time,
-                "end_time": end_time,
-                "dry_run": True,
-                "sent": False,
-            })
+        ports_list = device.get("deviceInfo", {}).get("ports", [])
+        port_obj = next((p for p in ports_list if p.get("port") == port), None)
+        if port_obj is None:
+            return json.dumps({"error": f"Port {port} not found on device {device_id}"})
 
-        # Build full payload with safe defaults from the confirmed network capture.
-        payload: dict = {
-            "advName": clean_name,
-            "devId": str(dev_id),
-            "currentMode": 1,
-            "isOn": 1,
-            "onSpeed": on_speed,
-            "offSpeed": off_speed,
-            "beginTime": begin_time,
-            "endTime": end_time,
-            "groupNums": 9,
-            "sortType": 9,
-            "subNumber": 0,
-            "subNumberSort": 0,
-            "isDel": 0,
-            "isFlag": 1,
-            "returnData": 1,
-            "templateType": 0,
-            "grouptDevType": 4,
-            "portType": 0,
-            "portState": 0,
-            # Threshold defaults (all inactive)
-            "autoHighTempF": 110,
-            "autoLowTempF": 40,
-            "autoHighTempC": 90,
-            "autoLowTempC": 0,
-            "autoHighTempSwitch": 0,
-            "autoLowTempSwitch": 0,
-            "autoHighHumi": 90,
-            "autoLowHumi": 40,
-            "autoHighHumiSwitch": 0,
-            "autoLowHumiSwitch": 0,
-            "highVpd": 99,
-            "lowVpd": 0,
-            "highVpdSwitch": 0,
-            "lowVpdSwitch": 0,
-            "cycleOn": 0,
-            "cycleOff": 0,
-            "onTime": 0,
-            "onTimeSwitch": 0,
-            "switchTime": 255,
-            "dualZoneSwitch": 0,
-            "photocellSwitch": 0,
-            "isOpenDoseTime": 0,
-            "onDoseTime": 60,
-            "offDoseTime": 1,
-            "isOnMinMaxTime": 1,
-            "onMinTime": 0,
-            "onMaxTime": 0,
-            "settingMode": 0,
-            "targetTSwitch": 1,
-            "targetHumiSwitch": 1,
-            "targetVpdSwitch": 1,
-            "targetTemp": 0,
-            "targetTempF": 32,
-            "targetHumi": 0,
-            "targetVpd": 0,
-            "insidePort": 255,
-            "insideType": 15,
-            "outsidePort": 255,
-            "outsideType": 15,
-            "runState": 0,
-            "setSelect": 0,
-            "nameLangKey": "",
-            "remarkLangKey": "",
-        }
-
-        result = await asyncio.to_thread(
-            _client().create_advance_automation, str(dev_id), payload
-        )
+        port_name = _sanitize_api_string(port_obj.get("portName"), 64) or f"Port {port}"
 
         return json.dumps({
             "action": "create",
-            "automation_id": result.get("advId"),
             "name": clean_name,
+            "port": port,
+            "port_name": port_name,
             "on_speed": on_speed,
-            "dry_run": False,
-            "sent": True,
+            "off_speed": off_speed,
+            "begin_time": _format_schedule_time(begin_time),
+            "end_time": _format_schedule_time(end_time),
+            "dry_run": True,
+            "sent": False,
+            "note": (
+                "Creating automations directly isn't possible through this assistant"
+                " — the AC Infinity app handles that."
+            ),
         })
 
     except ACInfinityAuthError:
