@@ -842,16 +842,29 @@ Server response includes the created object with server-assigned `advId`.
 `lowVpd`, `lowVpdSwitch`, `alertSound`, `setPort`, `switchHt`, `switchLh`, `switchHt`,
 `switchLh`, `returnData=1`, ~35 total.
 
-**`grouptDevType` values observed:**
-| Value | Device type |
+**`grouptDevType` is a port bitmask — Port N → 2^(N-1):**
+| Port | grouptDevType |
 |---|---|
-| `4` | Inline fan / exhaust |
-| `8` | Clip fan |
-| `48` | Mixed speed group |
+| 1 | 1 |
+| 2 | 2 |
+| 3 | 4 |
+| 4 | 8 |
+| 5 | 16 |
+| 6 | 32 |
+| 7 | 64 |
+| 8 | 128 |
 
-**`advCode` lifecycle:**
-Send `advCode=0` on create (`addGroups` / `addAlarms`); server returns `advCode=1`.
-All subsequent calls (`updateAlarmsById`, `delAlarmsByid`) send `advCode=1`.
+Confirmed via Proxyman iOS network capture (Phase 21, 2026-05-23): port 4 → `grouptDevType=8` (=2^3), port 1 → `grouptDevType=1` (=2^0). Earlier documentation incorrectly listed these as device type codes (4=Inline fan, 8=Clip fan, 48=Mixed speed group) — those values coincidentally matched ports 3, 4, and 5+6.
+
+**`switchTime` is a 7-bit day bitmask:**
+`switchTime=127` (binary `01111111`) = all 7 days active. **Do not use `switchTime=255`** — bit 7 set causes the AC Infinity app to ignore the schedule window entirely and treat the automation as Continuous mode (always running).
+
+**`advCode` lifecycle for `addGroups` (automation):**
+`advCode` is **absent** from `addGroups` payloads — do not include it. The server assigns an `advId` and returns it in the response.
+
+**`advCode` lifecycle for `addAlarms` (alarm):**
+Send `advCode=0` on create (`addAlarms`); server returns `advCode=1`.
+All subsequent alarm calls (`updateAlarmsById`, `delAlarmsByid`) send `advCode=1`.
 
 **VPD units in alarm fields:**
 `highVpd=50` means 5.0 kPa — divide by 10 for display (same scaling factor as `targetVpd`
@@ -1800,7 +1813,7 @@ Get full detail for a single Advance Automation.
 
 **Field notes:**
 - `schedule.begin_time` / `schedule.end_time` — `null` when no schedule set (always active)
-- `port_groups` — each group has its own speed settings; `device_type` is a human-readable label (e.g. `"Inline Fan"`, `"Clip Fan"`, `"Mixed Speed Group"`) derived from the `grouptDevType` integer
+- `port_groups` — each group has its own speed settings; `device_type` is a human-readable label derived from the `grouptDevType` port bitmask integer (e.g. `4`→port 3 → `"Inline fan/exhaust"`, `8`→port 4 → `"Clip fan"`, `48`→ports 5+6 → `"Mixed speed"`); unlabeled values fall back to `"Unknown"`
 - `governed_ports` — list of `{"port": N, "port_name": "Name (Port N)"}` objects identifying which ports this automation controls; derived from `devInfoListAll` `isOpenAutomation` flags (Quirk 19)
 - `port_resolution` — one of:
   - `"resolved"` — single automation active; `governed_ports` is accurate
@@ -1880,7 +1893,7 @@ Disable a currently enabled Advance Automation. No-ops if already disabled.
 
 ### `create_advance_automation(device_id, name, on_speed, port, off_speed=0, begin_time=0, end_time=1439, dry_run=True)`
 
-Preview a new Advance Automation configuration. **Live creation is blocked** — this tool only supports `dry_run=True`. Use the AC Infinity app to create automations on the device; this tool is for previewing and planning only.
+Create a new Advance Automation on a device. Defaults to `dry_run=True` for safety. Set `dry_run=False` to send the automation to the device. The port bitmask (`grouptDevType`) is computed automatically from the port number (Port N → 2^(N-1)).
 
 **Parameters:**
 | Parameter | Type | Description |
@@ -1888,11 +1901,11 @@ Preview a new Advance Automation configuration. **Live creation is blocked** —
 | `device_id` | `str` | Device code from `discover_devices` |
 | `name` | `str` | Automation name (max 64 chars; control chars stripped) |
 | `on_speed` | `int` | Fan speed when active (1–10) |
-| `port` | `int` | 1-based port number the automation should control |
-| `off_speed` | `int` | Fan speed when inactive (0–10). Default: 0 |
-| `begin_time` | `int` | Schedule start as minutes since midnight (0–1439, or 255 = no schedule). Default: 0 (midnight) |
-| `end_time` | `int` | Schedule end as minutes since midnight (0–1439, or 255 = no schedule). Default: 1439 (23:59) |
-| `dry_run` | `bool` | Default `True` — preview only. `dry_run=False` returns an error. |
+| `port` | `int` | 1-based port number the automation should control (1–8) |
+| `off_speed` | `int` | Accepted for compatibility but not sent to the device — On mode relies on the port's own minimum speed setting. Default: 0 |
+| `begin_time` | `int` | Schedule start as minutes since midnight (0–1439, or 255 = always active). Default: 0 (midnight) |
+| `end_time` | `int` | Schedule end as minutes since midnight (0–1439, or 255 = always active). Default: 1439 (23:59) |
+| `dry_run` | `bool` | Default `True` — previews without sending. Set to `False` to create the automation on the device. |
 
 **Response (dry_run=True):**
 ```json
@@ -1902,16 +1915,34 @@ Preview a new Advance Automation configuration. **Live creation is blocked** —
   "port": 3,
   "port_name": "Intake Fan",
   "on_speed": 3,
-  "off_speed": 0,
+  "min_speed": 1,
   "begin_time": "22:00",
   "end_time": "06:00",
+  "schedule_summary": "Active 10:00 PM – 6:00 AM",
   "dry_run": true,
   "sent": false,
-  "note": "Creating automations directly isn't possible through this assistant — the AC Infinity app handles that."
+  "note": "Preview only — nothing sent to your device yet. Confirm to create this automation."
 }
 ```
 
-**Response (live):** Same shape plus `"automation_id"` (server-assigned `advId`); `"dry_run": false`, `"sent": true`.
+**Response (live, dry_run=False):**
+```json
+{
+  "action": "create",
+  "automation_id": "12345",
+  "automation_id_note": "internal — reference this automation by name to users",
+  "name": "Night Mode",
+  "port": 3,
+  "port_name": "Intake Fan",
+  "on_speed": 3,
+  "min_speed": 1,
+  "begin_time": "22:00",
+  "end_time": "06:00",
+  "schedule_summary": "Active 10:00 PM – 6:00 AM",
+  "dry_run": false,
+  "sent": true
+}
+```
 
 **Response (port not found on device):**
 ```json
@@ -1928,12 +1959,18 @@ Preview a new Advance Automation configuration. **Live creation is blocked** —
 **Port name fallback:** When a port's `portName` field is absent or empty in the API response, the `name` field in `available_ports` falls back to `"Port N"` (e.g., `"Port 3"`). Control characters in `portName` values are sanitized via `_sanitize_api_string` before inclusion.
 
 **Field notes:**
-- `port` — required; identifies the port the automation would govern
+- `port` — required; identifies the port the automation will govern
 - `port_name` — resolved from `devInfoListAll` for the given port number
-- `begin_time` / `end_time` — returned as `"HH:MM"` formatted strings in the response (input is still minutes-since-midnight integer)
-- `note` — always present in dry_run response; explains live creation is app-only
+- `min_speed` — the port's configured minimum speed (read from `offSpead` in `getdevModeSettingList`); used by the device when the automation is inactive
+- `off_speed` — not sent to the device; On mode uses the port's own minimum speed setting (`min_speed`)
+- `begin_time` / `end_time` — returned as `"HH:MM"` formatted strings in the response (input is still minutes-since-midnight integer); use 255 for "always active" (maps to full-day range 0/1439)
+- `schedule_summary` — human-readable schedule description (e.g. `"Active 10:00 PM – 6:00 AM"` or `"Always active"`)
+- `automation_id` — server-assigned `advId`; present in live response for programmatic chaining only — do not surface to the user; reference the automation by `name` instead
+- `automation_id_note` — in-band reminder that `automation_id` is internal
+- `note` — present in dry_run response only; prompts user to confirm before creating
+- `switchTime` — always sent as `127` (binary `01111111`, all 7 days bitmask); value `255` causes the app to ignore the schedule and treat it as Continuous mode (see Quirk 18)
 
-**Validation:** `on_speed` 1–10; `off_speed` 0–10; `begin_time` ≤ `end_time` unless both are 255; `name` must not be empty or all control characters.
+**Validation:** `on_speed` 1–10; `off_speed` 0–10; `begin_time` and `end_time` each 0–1439 or both 255; `begin_time` ≤ `end_time` unless both are 255; `name` must not be empty or all control characters.
 
 ---
 
