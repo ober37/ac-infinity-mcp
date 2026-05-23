@@ -130,6 +130,98 @@ def test_parse_device_data_with_external_sensors(client):
     assert result["external_sensors"][0]["value"] == pytest.approx(850.0, abs=0.1)
 
 
+# ============ parse_device_data — phantom sensor filtering ============
+
+
+def _sensor_entry(sensor_type, sensor_data=0, precision=100, access_port=1):
+    return {
+        "sensorType": sensor_type,
+        "sensorData": sensor_data,
+        "sensorPrecision": precision,
+        "accessPort": access_port,
+    }
+
+
+def _device_with_sensor_list(sensors):
+    return {
+        "devCode": "C58ZA",
+        "devName": "Test",
+        "deviceInfo": {
+            "temperature": 2400,
+            "temperatureF": 7520,
+            "humidity": 5500,
+            "vpdnums": 150,
+            "ports": [],
+            "sensors": sensors,
+        },
+    }
+
+
+def test_parse_device_data_phantom_unrecognized_zero_excluded(client):
+    """sensorType=99, sensorData=0 → excluded (phantom)."""
+    device = _device_with_sensor_list([_sensor_entry(sensor_type=99, sensor_data=0)])
+    result = client.parse_device_data(device)
+    assert result["external_sensors"] == []
+
+
+def test_parse_device_data_unrecognized_nonzero_included(client):
+    """sensorType=99, sensorData=9900 → included with label 'unrecognized (type 99)'."""
+    device = _device_with_sensor_list([_sensor_entry(sensor_type=99, sensor_data=9900)])
+    result = client.parse_device_data(device)
+    assert len(result["external_sensors"]) == 1
+    assert result["external_sensors"][0]["sensor_type_label"] == "unrecognized (type 99)"
+    assert result["external_sensors"][0]["value"] == pytest.approx(99.0)
+
+
+def test_parse_device_data_recognized_zero_included(client):
+    """sensorType=11 (CO2), sensorData=0 → always included even at zero."""
+    device = _device_with_sensor_list([_sensor_entry(sensor_type=11, sensor_data=0)])
+    result = client.parse_device_data(device)
+    assert len(result["external_sensors"]) == 1
+    assert result["external_sensors"][0]["sensor_type"] == 11
+    assert result["external_sensors"][0]["sensor_type_label"] == "co2"
+
+
+def test_parse_device_data_sensor_type_none_excluded(client):
+    """sensorType=None → excluded regardless of sensorData."""
+    device = _device_with_sensor_list([_sensor_entry(sensor_type=None, sensor_data=500)])
+    result = client.parse_device_data(device)
+    assert result["external_sensors"] == []
+
+
+def test_parse_device_data_sensor_data_none_excluded(client):
+    """sensorType=99, sensorData=None → excluded (None treated as 0, unrecognized type)."""
+    device = _device_with_sensor_list([_sensor_entry(sensor_type=99, sensor_data=None)])
+    result = client.parse_device_data(device)
+    assert result["external_sensors"] == []
+
+
+def test_parse_device_data_sensor_type_none_data_none_excluded(client):
+    """sensorType=None, sensorData=None → excluded."""
+    device = _device_with_sensor_list([_sensor_entry(sensor_type=None, sensor_data=None)])
+    result = client.parse_device_data(device)
+    assert result["external_sensors"] == []
+
+
+def test_parse_device_data_mixed_sensor_list(client):
+    """Mixed sensor list: phantom excluded, recognized/nonzero-unrecognized included."""
+    sensors = [
+        _sensor_entry(sensor_type=99, sensor_data=0, access_port=1),  # phantom — excluded
+        _sensor_entry(sensor_type=11, sensor_data=45000, precision=100, access_port=2),  # included
+        _sensor_entry(sensor_type=None, sensor_data=500, access_port=3),  # no type — excluded
+        _sensor_entry(sensor_type=21, sensor_data=8550, precision=100, access_port=4),  # included
+    ]
+    device = _device_with_sensor_list(sensors)
+    result = client.parse_device_data(device)
+    assert len(result["external_sensors"]) == 2
+    labels = {s["sensor_type"]: s["sensor_type_label"] for s in result["external_sensors"]}
+    assert labels[11] == "co2"
+    assert labels[21] == "unrecognized (type 21)"
+    values = {s["sensor_type"]: s["value"] for s in result["external_sensors"]}
+    assert values[11] == pytest.approx(450.0)
+    assert values[21] == pytest.approx(85.5)
+
+
 # ============ parse_history_record ============
 
 def test_parse_history_record_divide_by_100(client):

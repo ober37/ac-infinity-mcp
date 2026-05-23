@@ -31,6 +31,28 @@ _SENSOR_TYPE_LABELS: dict[int, str] = {
 }
 
 
+def _sensor_label(sensor_type: int | None) -> str:
+    """Return human-readable label for sensor type, or a safe fallback."""
+    if sensor_type in _SENSOR_TYPE_LABELS:
+        return _SENSOR_TYPE_LABELS[sensor_type]
+    if sensor_type is not None:
+        try:
+            return f"unrecognized (type {int(sensor_type)})"
+        except (ValueError, TypeError):
+            return "unknown"
+    return "unknown"
+
+
+def _should_include_sensor(s: dict) -> bool:
+    """Return True if this sensor entry is non-phantom and should be included."""
+    sensor_type = s.get("sensorType")
+    if sensor_type is None:
+        return False
+    if sensor_type in _SENSOR_TYPE_LABELS:
+        return True  # recognized type: always include (even value=0)
+    return (s.get("sensorData") or 0) != 0  # unrecognized: include only if non-zero
+
+
 class ACInfinityClient:
     """Client for AC Infinity cloud API"""
 
@@ -887,12 +909,11 @@ class ACInfinityClient:
                     {
                         "sensor_id": f"{s.get('accessPort')}.{s.get('sensorType')}",
                         "sensor_type": s.get("sensorType"),
-                        "sensor_type_label": _SENSOR_TYPE_LABELS.get(
-                            s.get("sensorType"), "unknown"
-                        ),
+                        "sensor_type_label": _sensor_label(s.get("sensorType")),
                         "value": s.get("sensorData", 0) / (s.get("sensorPrecision") or 100),
                     }
                     for s in sensors
+                    if _should_include_sensor(s)
                 ]
 
             return {

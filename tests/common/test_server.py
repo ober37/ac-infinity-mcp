@@ -3565,14 +3565,14 @@ def test_external_sensor_type_label_soil_moisture():
 
 
 def test_external_sensor_type_label_unknown():
-    """Unknown sensorType → sensor_type_label='unknown'."""
+    """Unrecognized sensorType with non-zero data → label includes type number."""
     from ac_infinity_mcp.client import ACInfinityClient
     client = ACInfinityClient("test@example.com", "pw")
     device = _device_with_sensors([
         {"accessPort": 1, "sensorType": 99, "sensorData": 100, "sensorPrecision": 100},
     ])
     parsed = client.parse_device_data(device)
-    assert parsed["external_sensors"][0]["sensor_type_label"] == "unknown"
+    assert parsed["external_sensors"][0]["sensor_type_label"] == "unrecognized (type 99)"
 
 
 def test_external_sensor_precision_used():
