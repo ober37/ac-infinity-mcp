@@ -1,6 +1,7 @@
 """Unit tests for server.py async tools and helper functions."""
 
 import asyncio
+import copy
 import json
 from unittest.mock import patch
 
@@ -4628,7 +4629,7 @@ async def test_create_advance_automation_port_zero_error(mock_client):
 
 
 async def test_create_advance_automation_port_not_found_error(mock_client):
-    """dry_run=True with port not on device → not found error."""
+    """dry_run=True with port not on device → not found error with available_ports."""
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await create_advance_automation(
             "C58ZA", "Night Cycle", on_speed=3, port=99, dry_run=True
@@ -4636,6 +4637,85 @@ async def test_create_advance_automation_port_not_found_error(mock_client):
     data = json.loads(result)
     assert "error" in data
     assert "not found" in data["error"]
+    assert "available_ports" in data
+    assert "suggested_reply" in data
+
+
+async def test_create_advance_automation_port_not_found_suggested_reply_content(mock_client):
+    """port not on device → suggested_reply references the missing port number."""
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Night Cycle", on_speed=3, port=5, dry_run=True
+        )
+    data = json.loads(result)
+    assert "Port 5" in data["suggested_reply"]
+
+
+async def test_create_advance_automation_port_not_found_available_ports_contents(mock_client):
+    """port not on device → available_ports lists ports 1-2 from MOCK_DEVICE_LEGACY."""
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Night Cycle", on_speed=3, port=5, dry_run=True
+        )
+    data = json.loads(result)
+    ports = data["available_ports"]
+    assert isinstance(ports, list)
+    assert ports[0]["port"] == 1
+    assert ports[0]["name"] == "Intake Fan"
+    assert ports[1]["port"] == 2
+    assert ports[1]["name"] == "Exhaust Fan"
+
+
+async def test_create_advance_automation_port_not_found_sanitized_port_name(mock_client):
+    """portName with control char → stripped in available_ports."""
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device["deviceInfo"]["ports"][0]["portName"] = "Bad\x00Name"
+    mock_client.get_devices.return_value = [device]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Night Cycle", on_speed=3, port=5, dry_run=True
+        )
+    data = json.loads(result)
+    assert data["available_ports"][0]["name"] == "BadName"
+
+
+async def test_create_advance_automation_port_not_found_all_control_char_portname(mock_client):
+    """portName that is entirely control chars → sanitizer returns '(unnamed)'."""
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device["deviceInfo"]["ports"][0]["portName"] = "\x00\x01"
+    mock_client.get_devices.return_value = [device]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Night Cycle", on_speed=3, port=5, dry_run=True
+        )
+    data = json.loads(result)
+    assert data["available_ports"][0]["name"] == "(unnamed)"
+
+
+async def test_create_advance_automation_port_not_found_no_portname_fallback(mock_client):
+    """portName absent → available_ports uses 'Port N' fallback."""
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device["deviceInfo"]["ports"][0].pop("portName", None)
+    mock_client.get_devices.return_value = [device]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Night Cycle", on_speed=3, port=5, dry_run=True
+        )
+    data = json.loads(result)
+    assert data["available_ports"][0]["name"] == "Port 1"
+
+
+async def test_create_advance_automation_port_not_found_empty_ports_list(mock_client):
+    """Device with no ports in deviceInfo → available_ports is empty list."""
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device["deviceInfo"]["ports"] = []
+    mock_client.get_devices.return_value = [device]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Night Cycle", on_speed=3, port=5, dry_run=True
+        )
+    data = json.loads(result)
+    assert data["available_ports"] == []
 
 
 # ============ Issue #71 — create_advance_automation live creation ============

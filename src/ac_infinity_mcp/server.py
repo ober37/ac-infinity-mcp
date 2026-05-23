@@ -2762,7 +2762,26 @@ async def create_advance_automation(
         ports_list = device.get("deviceInfo", {}).get("ports", [])
         port_obj = next((p for p in ports_list if p.get("port") == port), None)
         if port_obj is None:
-            return json.dumps({"error": f"Port {port} not found on device {device_id}"})
+            available = [
+                {
+                    "port": p.get("port"),
+                    "name": (
+                        _sanitize_api_string(p.get("portName"), 64)
+                        if p.get("portName")
+                        else f"Port {p.get('port')}"
+                    ),
+                }
+                for p in ports_list
+                if p.get("port") is not None
+            ]
+            return json.dumps({
+                "error": f"Port {port} not found on device {device_id}",
+                "available_ports": available,
+                "suggested_reply": (
+                    f"Port {port} isn't in use on this device. "
+                    f"Let me show you what's connected."
+                ),
+            })
 
         raw_port_nm = port_obj.get("portName")
         port_name = _sanitize_api_string(raw_port_nm, 64) if raw_port_nm else f"Port {port}"
