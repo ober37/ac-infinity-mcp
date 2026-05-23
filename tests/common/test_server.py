@@ -4943,3 +4943,142 @@ async def test_create_advance_automation_mixed_255_sentinel_rejected(mock_client
     mock_client.create_advance_automation.assert_not_called()
 
 
+async def test_create_advance_automation_off_speed_out_of_range(mock_client):
+    """off_speed=11 → validation error before any API call."""
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Test", on_speed=5, off_speed=11, port=1, dry_run=True
+        )
+    data = json.loads(result)
+    assert "error" in data
+    assert "off_speed" in data["error"]
+    mock_client.get_devices.assert_not_called()
+
+
+async def test_create_advance_automation_off_speed_negative(mock_client):
+    """off_speed=-1 → validation error before any API call."""
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Test", on_speed=5, off_speed=-1, port=1, dry_run=True
+        )
+    data = json.loads(result)
+    assert "error" in data
+    assert "off_speed" in data["error"]
+    mock_client.get_devices.assert_not_called()
+
+
+async def test_create_advance_automation_begin_time_out_of_range(mock_client):
+    """begin_time=1500 → validation error before any API call."""
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Test", on_speed=5, port=1,
+            begin_time=1500, end_time=1020, dry_run=True
+        )
+    data = json.loads(result)
+    assert "error" in data
+    assert "begin_time" in data["error"]
+    mock_client.get_devices.assert_not_called()
+
+
+async def test_create_advance_automation_end_time_out_of_range(mock_client):
+    """end_time=1500 → validation error before any API call."""
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Test", on_speed=5, port=1,
+            begin_time=0, end_time=1500, dry_run=True
+        )
+    data = json.loads(result)
+    assert "error" in data
+    assert "end_time" in data["error"]
+    mock_client.get_devices.assert_not_called()
+
+
+async def test_create_advance_automation_device_not_found(mock_client):
+    """device_id not in devices list → structured error."""
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "UNKNOWN_DEVICE", "Test", on_speed=5, port=1, dry_run=False
+        )
+    data = json.loads(result)
+    assert "error" in data
+    assert "UNKNOWN_DEVICE" in data["error"]
+    mock_client.create_advance_automation.assert_not_called()
+
+
+async def test_create_advance_automation_device_missing_dev_id(mock_client):
+    """Device found but devId is absent → structured error."""
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device.pop("devId", None)
+    mock_client.get_devices.return_value = [device]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Test", on_speed=5, port=1, dry_run=False
+        )
+    data = json.loads(result)
+    assert "error" in data
+    assert "devId" in data["error"] or "missing" in data["error"]
+    mock_client.create_advance_automation.assert_not_called()
+
+
+async def test_create_advance_automation_all_control_char_name(mock_client):
+    """Name containing only control chars sanitises to '(unnamed)' → rejected."""
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "\x00\x01\x02", on_speed=5, port=1, dry_run=True
+        )
+    data = json.loads(result)
+    assert "error" in data
+    assert "empty" in data["error"]
+    mock_client.get_devices.assert_not_called()
+
+
+async def test_create_advance_automation_device_error(mock_client):
+    """ACInfinityDeviceError from get_devices → error with str(e)."""
+    mock_client.get_devices.side_effect = ACInfinityDeviceError("device offline")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Test", on_speed=5, port=1, dry_run=False
+        )
+    data = json.loads(result)
+    assert "device offline" in data["error"]
+
+
+async def test_create_advance_automation_unexpected_exception(mock_client):
+    """Bare Exception from get_devices → generic error with detail."""
+    mock_client.get_devices.side_effect = RuntimeError("unexpected boom")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Test", on_speed=5, port=1, dry_run=False
+        )
+    data = json.loads(result)
+    assert data["error"] == "Unexpected error"
+    assert data["detail"] == "see server logs"
+
+
+async def test_create_advance_automation_live_missing_adv_id_automation_is_active(mock_client):
+    """No advId in response → error clarifies automation was created and is active."""
+    mock_client.create_advance_automation.return_value = {}
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Night Mode", on_speed=5, port=1, dry_run=False
+        )
+    data = json.loads(result)
+    assert "error" in data
+    assert "Night Mode" in data["error"]
+    assert "active" in data["error"]
+    assert "detail" in data
+
+
+async def test_create_advance_automation_live_automation_id_note_present(mock_client):
+    """Live success response includes automation_id_note to guide Claude away from surfacing ID."""
+    mock_client.create_advance_automation.return_value = {"advId": 9999}
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await create_advance_automation(
+            "C58ZA", "Test", on_speed=5, port=1, dry_run=False
+        )
+    data = json.loads(result)
+    assert data["sent"] is True
+    assert "automation_id_note" in data
+    assert "name" in data["automation_id_note"]
+
+

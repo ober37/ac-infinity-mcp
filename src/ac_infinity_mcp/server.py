@@ -2911,13 +2911,18 @@ async def create_advance_automation(
         if not adv_id:
             logger.error("addGroups succeeded but returned no advId for devId=%s", dev_id)
             return json.dumps({
-                "error": "Automation was created but the device did not return an ID",
+                "error": (
+                    f"Automation '{clean_name}' was created on your device and is active, "
+                    "but the system could not confirm its tracking ID. "
+                    "Check the AC Infinity app — it should appear there."
+                ),
                 "detail": "see server logs",
             })
 
         return json.dumps({
             "action": "create",
             "automation_id": str(adv_id),
+            "automation_id_note": "internal — reference this automation by name to users",
             "name": clean_name,
             "port": port,
             "port_name": port_name,
