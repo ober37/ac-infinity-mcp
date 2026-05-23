@@ -1571,8 +1571,8 @@ async def test_set_port_speed_returns_conflict_for_modeType_15(mock_client):
     assert "automation" in data["summary"].lower() and "controller" in data["summary"].lower()
     assert data["target_port"] == "Intake Fan (Port 1)"
     assert "options" in data
-    assert "1_disable_automation" in data["options"]
-    assert "1_break_out_manually" not in data["options"]
+    assert "1_break_out" in data["options"]
+    assert "1_re_disable_to_clear" not in data["options"]
     assert "human_summary" in data
     assert "error" not in data
 
@@ -4145,9 +4145,9 @@ async def test_build_advance_conflict_response_degraded(mock_client):
     assert data.get("conflict") == "ADVANCE_AUTOMATION"
     assert data.get("automation_name") is None
     assert data.get("active_automations") == []
-    assert "None" not in data["options"]["1_disable_automation"]["instruction"]
-    assert "list_advance_automations" in data["options"]["1_disable_automation"]["instruction"]
-    assert "1_break_out_manually" not in data["options"]
+    assert "None" not in data["options"]["1_find_and_disable"]["instruction"]
+    assert "list_advance_automations" in data["options"]["1_find_and_disable"]["instruction"]
+    assert "1_break_out" not in data["options"]
     assert "suggested_reply" in data
 
 
@@ -4163,16 +4163,16 @@ async def test_conflict_response_summary_is_controller_level(mock_client):
     assert "suggested_reply" in data
 
 
-async def test_conflict_response_option_1_is_disable_automation(mock_client):
-    """Option 1 uses disable_advance_automation tool with available=True."""
+async def test_conflict_response_option_1_is_break_out(mock_client):
+    """Option 1 uses break_out_of_automation tool with available=True."""
     mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
     mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await set_port_off("C58ZA", port=1, dry_run=False)
     data = json.loads(result)
-    assert "1_disable_automation" in data["options"]
-    assert data["options"]["1_disable_automation"]["tool"] == "disable_advance_automation"
-    assert data["options"]["1_disable_automation"]["available"] is True
+    assert "1_break_out" in data["options"]
+    assert data["options"]["1_break_out"]["tool"] == "break_out_of_automation"
+    assert data["options"]["1_break_out"]["available"] is True
     assert "suggested_reply" in data
 
 
@@ -4216,8 +4216,8 @@ async def test_conflict_response_empty_automations_list(mock_client):
     assert "suggested_reply" in data
 
 
-async def test_conflict_response_all_automations_disabled_uses_degraded_path(mock_client):
-    """All automations disabled (isOn=0, runState=0) → governing=None, degraded-path summary."""
+async def test_conflict_response_all_automations_disabled_uses_all_disabled_path(mock_client):
+    """All automations disabled (isOn=0, runState=0) → governing=None, all-disabled-path summary."""
     import copy
     mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
     disabled_automations = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_SINGLE)
@@ -4228,7 +4228,7 @@ async def test_conflict_response_all_automations_disabled_uses_degraded_path(moc
     data = json.loads(result)
     assert data["automation_name"] is None
     assert data["active_automations"] == []
-    assert "list_advance_automations" in data["options"]["1_disable_automation"]["instruction"]
+    assert "list_advance_automations" in data["options"]["1_re_disable_to_clear"]["instruction"]
     assert "suggested_reply" in data
 
 
@@ -4482,6 +4482,9 @@ async def test_get_port_settings_advance_enrichment_governing_found(mock_client)
     assert data["speed_target"] is None
     assert data["current_speed"] == 5  # MOCK_DEVICE_LEGACY port 1 speak=5
     assert "automation_on_speed" in data
+    assert data["automation_running"] is True
+    assert data["automation_configured"] is True
+    assert "human_summary" in data
 
 
 async def test_get_port_settings_advance_enrichment_no_governing(mock_client):
@@ -4500,6 +4503,8 @@ async def test_get_port_settings_advance_enrichment_no_governing(mock_client):
     assert data["automation_name"] is None
     assert data["automation_id"] is None
     assert data["speed_target"] is None
+    assert data["automation_running"] is False
+    assert data["automation_configured"] is True
 
 
 async def test_get_port_settings_advance_secondary_call_fails_degrades(mock_client):
@@ -4513,6 +4518,8 @@ async def test_get_port_settings_advance_secondary_call_fails_degrades(mock_clie
     assert data["advance_automation"] is True
     assert data["automation_name"] is None
     assert "note" in data
+    assert data.get("automation_configured") is None
+    assert data.get("automation_running") is None
 
 
 async def test_get_port_settings_advance_isOpenAutomation_zero_falls_through(mock_client):
@@ -4528,8 +4535,40 @@ async def test_get_port_settings_advance_isOpenAutomation_zero_falls_through(moc
     mock_client.get_advance_automations.assert_not_called()
 
 
+async def test_conflict_response_normal_suggested_reply_discloses_consequence(mock_client):
+    """Normal path suggested_reply discloses that releasing affects all ports on the automation."""
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_off("C58ZA", port=1, dry_run=False)
+    data = json.loads(result)
+    suggested = data["suggested_reply"]
+    assert any(word in suggested.lower() for word in ["all", "other", "ports"])
 
 
+async def test_conflict_response_all_disabled_suggested_reply_force_release(mock_client):
+    """All-disabled path suggested_reply mentions stuck port and force-release."""
+    import copy
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
+    disabled_automations = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_SINGLE)
+    mock_client.get_advance_automations.return_value = disabled_automations
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_off("C58ZA", port=1, dry_run=False)
+    data = json.loads(result)
+    suggested = data["suggested_reply"]
+    assert any(word in suggested.lower() for word in ["stuck", "force", "re-applying", "release"])
+
+
+async def test_get_port_settings_advance_human_summary_present(mock_client):
+    """ADVANCE mode response includes non-empty human_summary."""
+    mock_client.get_mode_settings.return_value = {**MOCK_MODE_SETTINGS_BASIC, "modeType": 15}
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_settings("C58ZA", 1)
+    data = json.loads(result)
+    assert data["mode"] == "ADVANCE"
+    assert "human_summary" in data
+    assert isinstance(data["human_summary"], str)
+    assert len(data["human_summary"]) > 0
 
 
 async def test_get_port_settings_advance_isOpenAutomation_absent_defaults_to_active(mock_client):

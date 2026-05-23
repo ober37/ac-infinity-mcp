@@ -970,12 +970,16 @@ async def _build_advance_conflict_response(
     device_id: str, dev_id: object, port: int, port_name: str
 ) -> str:
     """Build a structured ADVANCE_AUTOMATION conflict response for write tools."""
+    api_call_failed = False
+    automations: list[dict] = []
+    active_automations: list[dict] = []
+    governing = None
     try:
         raw = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
         automations = _group_automations(raw)
         governing = next(
             (a for a in automations if a.get("enabled") or a.get("run_state")),
-            None,  # No fallback to disabled automation
+            None,
         )
         active_automations = [
             {"name": a["name"], "automation_id": a["automation_id"]}
@@ -987,27 +991,44 @@ async def _build_advance_conflict_response(
             device_id,
             type(exc).__name__,
         )
-        governing = None
-        active_automations = []
+        api_call_failed = True
 
-    if governing:
+    if governing is not None:
+        # NORMAL PATH — at least one enabled/running automation found
         auto_name = governing["name"]
         auto_id = governing["automation_id"]
+        current_auto_speed = (
+            governing["port_groups"][0]["on_speed"] if governing["port_groups"] else "?"
+        )
         summary = (
             f"While '{auto_name}' automation is running, all ports on this controller"
             " are locked from manual control."
             " Your change requires resolving this conflict first."
         )
         human_summary = (
-            f"While '{auto_name}' is running, all ports on this controller are locked"
-            " from manual control. Disable the automation first to make manual adjustments."
+            f"'{auto_name}' is actively controlling this port at target speed {current_auto_speed}."
+            " To make manual adjustments, you need to resolve this automation conflict first."
         )
         suggested_reply = (
-            f"'{auto_name}' automation is controlling this port right now."
-            " To make this change, I'll need to disable it first. Shall I go ahead?"
+            f"'{auto_name}' automation is controlling this port right now"
+            f" (target speed: {current_auto_speed}). I can release this port from the automation"
+            f" — but note this will also release all other ports currently on '{auto_name}'."
+            " Alternatively, I could update the automation's speed settings instead."
+            " What would you prefer?"
         )
         opt1: dict = {
-            "description": f"Disable \"{auto_name}\" to regain manual control of this port.",
+            "description": f"Release this port from '{auto_name}' to regain manual control.",
+            "tool": "break_out_of_automation",
+            "instruction": (
+                f"Call break_out_of_automation(device_id='{device_id}', port={port},"
+                " dry_run=True) to preview."
+            ),
+            "available": governing.get("enabled", False),
+        }
+        opt2: dict = {
+            "description": (
+                f"Disable '{auto_name}' entirely — releases all ports on this automation."
+            ),
             "tool": "disable_advance_automation",
             "instruction": (
                 f"Call disable_advance_automation(device_id='{device_id}',"
@@ -1016,7 +1037,41 @@ async def _build_advance_conflict_response(
             ),
             "available": True,
         }
+        opt1_key = "1_break_out"
+    elif not api_call_failed and len(automations) > 0:
+        # ALL-DISABLED PATH — API succeeded but all automations have enabled=False / run_state=False
+        auto_name = None
+        auto_id = None
+        summary = (
+            "An Advance Automation is blocking this port. All configured automations are"
+            " currently disabled, but the port hasn't fully released from automation mode."
+        )
+        human_summary = (
+            "This port is in automation mode, but all automations are disabled."
+            " The port hasn't fully released. Ask me to list your automations for details."
+        )
+        suggested_reply = (
+            "Your automations for this port are all turned off, but the port is still stuck"
+            " in automation mode — it hasn't fully released. I can force-release it by"
+            " re-applying the disable command. Want me to do that?"
+        )
+        opt1 = {
+            "description": "Force-release this port by re-applying the disable command.",
+            "tool": "disable_advance_automation",
+            "instruction": (
+                f"Call list_advance_automations(device_id='{device_id}') to find the"
+                f" automation_id, then call disable_advance_automation(device_id='{device_id}',"
+                " automation_id='<id>', dry_run=True) to preview the force-release."
+            ),
+            "available": True,
+        }
+        opt2 = {
+            "available": False,
+            "status": "All automations already disabled — use option 1 to force-release the port.",
+        }
+        opt1_key = "1_re_disable_to_clear"
     else:
+        # DEGRADED PATH — API call failed OR automation list is empty
         auto_name = None
         auto_id = None
         summary = (
@@ -1025,12 +1080,11 @@ async def _build_advance_conflict_response(
         )
         human_summary = (
             "An active automation is blocking manual port control on this controller."
-            " Disable it first."
+            " Ask me to list your automations to see what's set up."
         )
         suggested_reply = (
             "An active automation is blocking this port."
-            " Let me look up the active automation using list_advance_automations,"
-            " then disable it. Shall I get started?"
+            " Let me look up the active automations to resolve this — shall I get started?"
         )
         opt1 = {
             "description": "Find and disable the active automation, then apply your manual change.",
@@ -1043,6 +1097,11 @@ async def _build_advance_conflict_response(
             ),
             "available": True,
         }
+        opt2 = {
+            "available": False,
+            "status": "Use option 1 first to identify the automation.",
+        }
+        opt1_key = "1_find_and_disable"
 
     return json.dumps({
         "conflict": "ADVANCE_AUTOMATION",
@@ -1060,15 +1119,8 @@ async def _build_advance_conflict_response(
             " to an automation, use create_advance_automation."
         ),
         "options": {
-            "1_disable_automation": opt1,
-            "2_break_out": {
-                "available": False,
-                "status": (
-                    "Use Option 1 (disable_advance_automation) instead —"
-                    " break_out_of_automation is only applicable when the port is confirmed"
-                    " to be inside a specific automation."
-                ),
-            },
+            opt1_key: opt1,
+            "2_disable_automation": opt2,
             "3_fork_automation": {
                 "available": False,
                 "status": "not_yet_implemented",
@@ -1241,6 +1293,7 @@ async def get_port_settings(device_id: str, port: int) -> str:
         ):
             governing = None
             degraded = False
+            adv_grouped: list[dict] = []
             try:
                 raw_adv = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
                 adv_grouped = _group_automations(raw_adv)
@@ -1282,6 +1335,33 @@ async def get_port_settings(device_id: str, port: int) -> str:
                 "timer_on_seconds": None,
                 "timer_off_seconds": None,
             }
+            resp["automation_running"] = (
+                None if degraded
+                else bool(governing.get("run_state", False)) if governing
+                else False
+            )
+            resp["automation_configured"] = None if degraded else len(adv_grouped) > 0
+            if degraded:
+                resp["human_summary"] = (
+                    "Port is in ADVANCE automation mode."
+                    " Automation details could not be retrieved."
+                )
+            elif governing:
+                _target_speed = (
+                    governing["port_groups"][0]["on_speed"]
+                    if governing.get("port_groups") else "?"
+                )
+                resp["human_summary"] = (
+                    f"Port is running under '{governing['name']}' automation"
+                    f" (target speed: {_target_speed}, current live speed: {current_speed})."
+                    " The automation is active."
+                )
+            else:
+                resp["human_summary"] = (
+                    "Port is in automation mode, but all automations are disabled."
+                    " The port hasn't fully released."
+                    " Ask me to list your automations for details."
+                )
             if degraded:
                 resp["note"] = (
                     "Could not fetch automation details."
