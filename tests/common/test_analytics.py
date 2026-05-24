@@ -906,7 +906,7 @@ def test_rule_a_b_c_d_e_together_multi_port_scenario() -> None:
     (0,  24, 1, 0, 1, 0, "zero runtime → excluded"),              # Rule C fires (transitions=0)
     (1,  48, 1, 0, 1, 0, "toggle 0.5 h/day, no load → excluded"), # Rule D fires (speed=1, load=0)
     (1,  30, 1, 0, 1, 0, "toggle 0.8 h/day, no load → excluded"), # Rule D fires (speed=1, load=0)
-    (1,  24, 1, 0, 5, 1, "real fan 1.0 h/day, no load → kept"),   # speed=5, at-boundary (1.0 == threshold, strict < means kept); also guards Rule E strict-< boundary
+    (1,  24, 1, 0, 5, 1, "real fan 1.0 h/day → kept (at Rule E boundary)"),  # strict < not <=
     (2,  24, 1, 0, 5, 1, "real fan 2.0 h/day, no load → kept"),   # speed=5 → Rule D skips
     (1,  48, 1, 5, 5, 1, "0.5 h/day but has load → kept"),        # load>0 → all rules skip
     # Rule E: named port, speed=5 stale config, transitions=1, load=0, sub-threshold runtime
