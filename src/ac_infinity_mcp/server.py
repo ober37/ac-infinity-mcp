@@ -894,7 +894,6 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
             caveat_lines = " ".join(
                 f"{p.name}: Unsupported (current: {_port_state(p.port)})"
                 " - Historical Support Coming Soon"
-                " https://github.com/ober37/ac-infinity-mcp/issues/85"
                 for p in caveat
             )
             port_word = "port" if ports_excluded_count == 1 else "ports"
