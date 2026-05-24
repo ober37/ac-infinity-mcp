@@ -4360,6 +4360,20 @@ async def test_build_advance_conflict_response_degraded(mock_client):
     assert "suggested_reply" in data
 
 
+async def test_build_advance_conflict_response_auth_error(mock_client):
+    """get_advance_automations raises ACInfinityAuthError → auth error JSON returned directly."""
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
+    mock_client.get_advance_automations.side_effect = ACInfinityAuthError("test")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_speed("C58ZA", port=1, speed=5, dry_run=False)
+    data = json.loads(result)
+    assert data.get("error") == (
+        "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD"
+    )
+    assert "conflict" not in data
+    assert "options" not in data
+
+
 async def test_conflict_response_summary_is_controller_level(mock_client):
     """Conflict summary mentions automation and controller — controller-level framing."""
     mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")

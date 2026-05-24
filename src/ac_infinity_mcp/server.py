@@ -1232,6 +1232,14 @@ async def _build_advance_conflict_response(
             {"name": a["name"], "automation_id": a["automation_id"]}
             for a in automations if a.get("enabled") or a.get("run_state")
         ]
+    except ACInfinityAuthError:
+        logger.warning(
+            "Auth error in _build_advance_conflict_response (device=%s)", device_id
+        )
+        return json.dumps({
+            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "detail": "see server logs",
+        })
     except Exception as exc:
         logger.warning(
             "Could not fetch automations for conflict response (device=%s): %s",
