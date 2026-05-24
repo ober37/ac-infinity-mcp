@@ -898,7 +898,7 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
             )
             port_word = "port" if ports_excluded_count == 1 else "ports"
             excl = (
-                f" {ports_excluded_count} {port_word} excluded (no device activity detected)."
+                f" {ports_excluded_count} {port_word} excluded (no power detected)."
                 if ports_excluded_count > 0
                 else ""
             )
