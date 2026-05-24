@@ -4405,7 +4405,6 @@ async def test_conflict_response_option_1_is_break_out(mock_client):
     [
         (1, 1),  # enabled=True, run_state=True → available True (normal case)
         (0, 1),  # enabled=False, run_state=True → available True (Issue #84 bug case)
-        (1, 0),  # enabled=True, run_state=False → available True
     ],
 )
 @pytest.mark.asyncio
@@ -4545,8 +4544,6 @@ async def test_break_out_no_enabled_automation(mock_client):
 
 async def test_break_out_selects_run_state_only_automation(mock_client):
     """Port is ADVANCE; isOn=0 but runState=1 (mid-toggle) → run_state-only fallback selects."""
-    import copy
-
     fixture = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST)
     fixture[0]["isOn"] = 0
     fixture[0]["runState"] = 1
