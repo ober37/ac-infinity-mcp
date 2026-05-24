@@ -877,7 +877,7 @@ def test_rule_a_b_c_d_e_together_multi_port_scenario() -> None:
     readings = []
     for i in range(total_readings):
         h = i % 24
-        # Port 5 "Carbon": 1 on reading, then off — speed=5 stale config, transitions=2
+        # Port 5 "Carbon": 1 on reading, then off — speed=5 stale config, transitions=1
         carbon_on = i == 0  # only first reading on
         carbon_speed = 5 if carbon_on else 0
         readings.append({
@@ -906,12 +906,12 @@ def test_rule_a_b_c_d_e_together_multi_port_scenario() -> None:
     (0,  24, 1, 0, 1, 0, "zero runtime → excluded"),              # Rule C fires (transitions=0)
     (1,  48, 1, 0, 1, 0, "toggle 0.5 h/day, no load → excluded"), # Rule D fires (speed=1, load=0)
     (1,  30, 1, 0, 1, 0, "toggle 0.8 h/day, no load → excluded"), # Rule D fires (speed=1, load=0)
-    (1,  24, 1, 0, 5, 1, "real fan 1.0 h/day, no load → kept"),   # speed=5 → Rule D skips
+    (1,  24, 1, 0, 5, 1, "real fan 1.0 h/day, no load → kept"),   # speed=5, at-boundary (1.0 == threshold, strict < means kept); also guards Rule E strict-< boundary
     (2,  24, 1, 0, 5, 1, "real fan 2.0 h/day, no load → kept"),   # speed=5 → Rule D skips
     (1,  48, 1, 5, 5, 1, "0.5 h/day but has load → kept"),        # load>0 → all rules skip
-    # Rule E: named port, speed=5 stale config, transitions=2, load=0, sub-threshold runtime
+    # Rule E: named port, speed=5 stale config, transitions=1, load=0, sub-threshold runtime
     # on_count=1 out of 48, days=3 → on_hours = 1/48*24*3 = 1.5h; 1.5/3 = 0.5 h/day < 1.0
-    # transitions>0 (1 on then off = 2 transitions); speed=5 → Rule D skips; Rule E fires
+    # transitions>0 (1 on→off = 1 transition); speed=5 → Rule D skips; Rule E fires
     (1,  48, 3, 0, 5, 0, "stale speed=5, load=0, 0.5 h/day → excluded by Rule E"),
 ])
 def test_rule_c_threshold_boundary_named_port(

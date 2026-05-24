@@ -1402,7 +1402,7 @@ async def test_get_port_activity_report_partial_exclusion(mock_client):
 # ============ get_port_activity_report — Rule E (#101) ============
 
 async def test_get_port_activity_report_rule_e_stale_speed_phantom(mock_client):
-    """Rule E: named port 'Filter' (port 4), speed=5, transitions=2, portsLoad=0, sub-threshold
+    """Rule E: named port 'Filter' (port 4), speed=5, transitions=1, portsLoad=0, sub-threshold
     runtime → port excluded (ports==[], ports_excluded_count==1).
 
     Reproduces Issue #101: the history API records the previously-configured speed even after
