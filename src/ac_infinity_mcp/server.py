@@ -1012,7 +1012,11 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
                 if ports_excluded_count > 0
                 else ""
             )
-            preamble = f"Analyzed {days} {day_word} of activity across {len(result)} active ports."
+            active_port_word = "port" if len(result) == 1 else "ports"
+            preamble = (
+                f"Analyzed {days} {day_word} of activity across"
+                f" {len(result)} active {active_port_word}."
+            )
             summary_parts = [preamble]
             if port_lines:
                 summary_parts.append(f"{port_lines}.")

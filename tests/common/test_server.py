@@ -1513,7 +1513,7 @@ async def test_get_port_activity_report_reliable_ports_shown_normally(mock_clien
 
 
 async def test_get_port_activity_report_data_quality_currently_off(mock_client):
-    """Toggle port with portsLoad=0 is filtered by Rule D (not kept as caveat)."""
+    """Toggle hardware (loadType=4) with portsLoad=0 survives Rule D with caveat 'currently OFF'."""
     mock_client.get_devices.return_value = [_make_toggle_device(ports_load=0)]
     readings = _make_toggle_port_readings(72)
     mock_client.get_historical_data.return_value = [{}] * 72
@@ -1529,9 +1529,11 @@ async def test_get_port_activity_report_data_quality_currently_off(mock_client):
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_port_activity_report("C58ZA", 3)
     data = json.loads(result)
-    # Rule D filters ports with portsLoad=0 and avg_speed<=1 — no caveat port survives
+    # Toggle hardware survives Rule D exemption — appears with caveat showing "currently OFF"
     heater_ports = [p for p in data["ports"] if p["name"] == "Heater"]
-    assert len(heater_ports) == 0, "Rule D must filter zero-load toggle port"
+    assert len(heater_ports) == 1, "Toggle hardware must NOT be filtered even when portsLoad=0"
+    assert heater_ports[0]["data_quality"] == "api_constant_speed"
+    assert "currently OFF" in data["human_summary"]
 
 
 async def test_get_port_activity_report_all_caveat_human_summary(mock_client):

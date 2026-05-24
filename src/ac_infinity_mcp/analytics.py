@@ -336,12 +336,18 @@ def build_activity_report(
 
     filtered: list[ActivityReport] = []
     for rep in reports:
-        # Rule A: constant-100%-uptime ghost port with no current draw (unchanged)
+        # Rule A: constant-100%-uptime ghost port with no current draw.
+        # Exempts confirmed toggle hardware (loadType 4/128) — those are flagged with
+        # data_quality="api_constant_speed" instead of filtered.
         if (
             rep.transitions == 0
             and rep.uptime_pct == 100.0
             and port_loads is not None
             and port_loads.get(rep.port, 0) == 0
+            and (
+                port_load_types is None
+                or port_load_types.get(rep.port, 0) not in _TOGGLE_LOAD_TYPES
+            )
         ):
             continue
         # Rule B (enhanced): auto-named port — low avg runtime OR zero load when data available
@@ -359,12 +365,17 @@ def build_activity_report(
         ):
             continue
         # Rule D: named port showing only toggle-speed history with no current draw.
-        # Covers unconnected ports and toggle devices (heaters, lights, humidifiers)
-        # currently off — history is unreliable for these (issues #85, #98).
+        # Exempts confirmed toggle hardware (loadType 4/128) — those ports are flagged
+        # with data_quality="api_constant_speed" instead of filtered, so growers still
+        # see their heater/light even when currently off.
         if (
             port_loads is not None
             and port_loads.get(rep.port, 0) == 0
             and rep.avg_speed_when_running <= 1.0
+            and (
+                port_load_types is None
+                or port_load_types.get(rep.port, 0) not in _TOGGLE_LOAD_TYPES
+            )
         ):
             continue
         filtered.append(rep)

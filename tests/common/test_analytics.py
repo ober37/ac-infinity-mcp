@@ -1052,13 +1052,23 @@ def test_data_quality_not_100pct_uptime():
     assert result[0].uptime_pct == pytest.approx(50.0)
 
 
-def test_data_quality_rule_d_takes_precedence():
-    """Toggle port with portsLoad=0 is filtered by Rule D before data_quality matters."""
+def test_rule_d_exempts_toggle_hardware_currently_off():
+    """Toggle hardware (loadType=4) with portsLoad=0 survives Rule D; appears with data_quality."""
     readings = _toggle_readings(speed=1, on=True)
     result = build_activity_report(
         readings, days=3, port_loads={2: 0}, port_load_types={2: 4}
     )
-    assert len(result) == 0, "Rule D should filter this port entirely"
+    assert len(result) == 1, "Toggle hardware must survive Rule D even when currently off"
+    assert result[0].data_quality == "api_constant_speed"
+
+
+def test_rule_d_still_filters_non_toggle_ghost_ports():
+    """Non-toggle ghost port (loadType=0, portsLoad=0, avg_speed<=1) is filtered by Rule D."""
+    readings = _toggle_readings(name="Port 3", port_num=3, speed=1, on=True)
+    result = build_activity_report(
+        readings, days=3, port_loads={3: 0}, port_load_types={3: 0}
+    )
+    assert len(result) == 0, "Non-toggle ghost port must still be filtered by Rule D"
 
 
 def test_data_quality_none_when_port_load_types_not_provided():
