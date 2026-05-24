@@ -1399,6 +1399,56 @@ async def test_get_port_activity_report_partial_exclusion(mock_client):
     assert "1 port excluded" in data["human_summary"]
 
 
+# ============ get_port_activity_report — Rule E (#101) ============
+
+async def test_get_port_activity_report_rule_e_stale_speed_phantom(mock_client):
+    """Rule E: named port 'Filter' (port 4), speed=5, transitions=2, portsLoad=0, sub-threshold
+    runtime → port excluded (ports==[], ports_excluded_count==1).
+
+    Reproduces Issue #101: the history API records the previously-configured speed even after
+    the port is set to OFF, producing phantom records that pass Rules A–D.
+
+    3 on-readings out of 72 total over 3 days → on_hours = 3/72*24*3 = 3.0h; 3.0/3 = 1.0 h/day.
+    Wait — we need strictly < 1.0 h/day. Use 2 on-readings:
+    2/72*24*3 = 2.0h; 2.0/3 = 0.667 h/day < 1.0 → Rule E fires.
+    """
+    from datetime import datetime, timedelta
+    base = datetime(2024, 4, 18, 0, 0, 0)
+    total = 72  # 3 days × 24 readings/day
+    readings = []
+    for i in range(total):
+        on = i < 2  # first 2 readings on, rest off
+        readings.append({
+            "timestamp": (base + timedelta(hours=i)).isoformat() + "Z",
+            "temperature_c": 24.0,
+            "humidity": 55.0,
+            "vpd": 1.4,
+            "ports": [{"port": 4, "name": "Filter", "speed": 5 if on else 0, "on": on}],
+        })
+    mock_client.get_devices.return_value = [{
+        "devCode": "C58ZA",
+        "devId": "9999999999",
+        "deviceInfo": {
+            "ports": [{"port": 4, "name": "Filter", "portsLoad": 0, "loadType": 0}],
+        },
+    }]
+    mock_client.get_historical_data.return_value = [{}] * total
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        val = readings[idx]
+        idx += 1
+        return val
+
+    mock_client.parse_history_record.side_effect = _side_effect
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 3)
+    data = json.loads(result)
+    assert data["ports"] == [], "Rule E must exclude the stale-speed phantom port"
+    assert data["ports_excluded_count"] == 1
+
+
 # ============ get_port_activity_report — data_quality (#85) ============
 
 def _make_toggle_port_readings(n: int, port_num: int = 2, name: str = "Heater") -> list[dict]:

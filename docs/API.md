@@ -973,7 +973,7 @@ The Advance Automation API returns an `onTimeSwitch` field per group entry. It m
 ### Quirk 22 — Ghost port filtering and toggle-device data quality in `get_port_activity_report`
 
 The history API returns data for all ports on a controller, including ports with no device
-attached. These phantom ports produce misleading activity data. Four filter/caveat rules are
+attached. These phantom ports produce misleading activity data. Five filter/caveat rules are
 applied by `build_activity_report`:
 
 **Ghost-port exclusion rules (port removed from response):**
@@ -986,38 +986,50 @@ applied by `build_activity_report`:
   The portsLoad guard prevents Rule B from missing phantom mirror ports at short windows (e.g.
   days=1) where phantom activity exceeds the 1 h/day threshold.
 - **Rule C** (fixes #88): A named port (not matching `^Port \d+$`) is excluded when
-  `port_loads` is provided AND `portsLoad == 0` AND average on-time is < 1 h/day. Catches
-  physically-disconnected named devices that produce sporadic phantom transitions.
+  `port_loads` is provided AND `portsLoad == 0` AND average on-time is < 1 h/day AND
+  `transitions == 0`. Catches physically-disconnected named devices with no recorded transitions.
+- **Rule D** (ghost filter, fixes #101 partial): A named port is excluded when `port_loads` is
+  provided AND `portsLoad == 0` AND `avg_speed_when_running <= 1.0`. Catches toggle-hardware
+  ghost artifacts where the history API emits speed=1 even when the device is physically off.
+  Toggle devices that are genuinely connected are exempted via the `data_quality` early-exit
+  (see caveat rule below) before this filter evaluates.
+- **Rule E** (fixes #101): A named port with `transitions > 0`, `avg_speed_when_running > 1.0`,
+  `portsLoad == 0`, and average on-time < 1 h/day is excluded. Closes the gap where the
+  history API records a port's previously-configured speed (e.g. speed=5) even after it is
+  set to OFF — producing phantom records with non-zero avg_speed and spurious transitions that
+  pass Rules A–D. The `avg_speed > 1.0` condition ensures Rule E does not overlap with Rule D
+  (toggle-speed devices).
 
-Rule A and Rule D (below) both exempt toggle hardware (loadType 4 or 128) — toggle devices are
-never filtered regardless of uptime or portsLoad, because they appear as always-on in history.
-A toggle device excluded by Rule A would silently vanish from the report even though it is
-physically connected.
+Rule A and the `data_quality` caveat rule (below) both exempt toggle hardware (loadType 4 or
+128) — toggle devices are never ghost-filtered regardless of uptime or portsLoad, because they
+appear as always-on in history. A toggle device excluded by Rule A would silently vanish from
+the report even though it is physically connected.
 
 **Data-quality caveat rule (port kept, flagged):**
 
-- **Rule D** (fixes #85): A named port is kept in the response but flagged with
-  `data_quality = "api_constant_speed"` when ALL of: `transitions == 0`, `uptime_pct == 100.0`,
-  `avg_speed_when_running == 1.0`, AND the port's `loadType` is 4 or 128 (toggle hardware —
-  heaters, lights, humidifiers). The AC Infinity history API records toggle devices as always-on
-  at speed 1 regardless of actual runtime; `on_hours` and `uptime_pct` for these ports are
-  fabricated and must not be presented as real runtime data. The `human_summary` includes a
-  plain-English caveat for each flagged port. The `port_load_types` parameter (from
-  `deviceInfo.ports[].loadType`) flows from `get_port_activity_report` through
-  `build_activity_report` to enable this detection. When `port_load_types` is absent, Rule D
-  is disabled and the port is reported without a caveat.
+- **Data-quality caveat** (fixes #85, formerly labelled Rule D in code comments): A named port
+  is kept in the response but flagged with `data_quality = "api_constant_speed"` when ALL of:
+  `transitions == 0`, `uptime_pct == 100.0`, `avg_speed_when_running == 1.0`, AND the port's
+  `loadType` is 4 or 128 (toggle hardware — heaters, lights, humidifiers). The AC Infinity
+  history API records toggle devices as always-on at speed 1 regardless of actual runtime;
+  `on_hours` and `uptime_pct` for these ports are fabricated and must not be presented as real
+  runtime data. The `human_summary` includes a plain-English caveat for each flagged port. The
+  `port_load_types` parameter (from `deviceInfo.ports[].loadType`) flows from
+  `get_port_activity_report` through `build_activity_report` to enable this detection. When
+  `port_load_types` is absent, the caveat rule is disabled and the port is reported without a
+  caveat.
 
 **When supplementary call fails:**
 
 When `port_loads` is `None` (supplementary `get_devices` call failed), Rules A, B (portsLoad
-guard), C, and the Rule D toggle-exemption in Rule A are all disabled — the report still returns
-but without ghost filtering.
+guard), C, D, E, and the toggle-exemption in the data-quality caveat rule are all disabled —
+the report still returns but without ghost filtering.
 
-**Known limitation (Rule C):** A named device averaging < 1 h/day that draws zero current at
-query time will be filtered. Example: a misting pump running 20 min/day queried while off.
-Growers with low-duty named devices that disappear from the report should verify with
-`get_port_status`. The exclusion message "no load or activity detected at time of report" is
-accurate — it reflects the zero-current-draw state at query time, not a permanent device state.
+**Known limitation (Rules C and E):** A named device averaging < 1 h/day that draws zero
+current at query time will be filtered. Example: a misting pump running 20 min/day queried
+while off. Growers with low-duty named devices that disappear from the report should verify
+with `get_port_status`. The exclusion message "no load or activity detected at time of report"
+is accurate — it reflects the zero-current-draw state at query time, not a permanent device state.
 
 The response includes `ports_excluded_count` (integer count of filtered ports) and
 `human_summary` (plain-English summary for growers). When `ports_excluded_count > 0`, the

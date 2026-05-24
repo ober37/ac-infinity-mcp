@@ -373,5 +373,20 @@ def build_activity_report(
             and rep.avg_speed_when_running <= 1.0
         ):
             continue
+        # Rule E: named port, non-toggle hardware, zero current load, sub-threshold runtime.
+        # transitions > 0 precondition: ports with transitions==0 and load==0 are already
+        # eliminated by Rule C, so Rule E is only reachable when transitions > 0.
+        # The history API records a port's previously-configured speed even after OFF,
+        # producing phantom records with avg_speed>1 and non-zero transitions (Issue #101).
+        # Sub-threshold guard keeps ports that genuinely ran briefly but were polled while off.
+        # days is clamped to min 1 upstream in this function — division is safe.
+        if (
+            rep.transitions > 0
+            and port_loads is not None
+            and port_loads.get(rep.port, 0) == 0
+            and rep.avg_speed_when_running > 1.0
+            and (rep.on_hours / days) < _GHOST_LOAD_ZERO_THRESHOLD
+        ):
+            continue
         filtered.append(rep)
     return filtered
