@@ -41,6 +41,9 @@ issues, audit and update before beginning work.
 | `usability` | Response wording, field ordering, conflict UX, grower-readable output |
 | `api-discovery` | New API endpoints or fields discovered via network capture or reverse engineering |
 
+Multiple labels are encouraged — a `bug` that also affects grower UX should carry both
+`bug` and `usability`.
+
 ### Milestones
 
 | Milestone | When to apply |
@@ -52,34 +55,6 @@ issues, audit and update before beginning work.
 
 Default to `v1.0` for any issue that completes or improves existing tool behavior. Use `v2.0`
 only for net-new tools or major architecture changes agreed with the user.
-
----
-
-## GitHub Issue Hygiene
-
-Every issue must have at least one label applied before a PR is raised against it.
-When creating a new issue, apply labels immediately. When triaging unlabeled issues,
-audit and label before beginning work.
-
-### Labels
-
-| Label | When to apply |
-|---|---|
-| `bug` | Incorrect behavior in an existing tool |
-| `enhancement` | New feature or capability |
-| `documentation` | Doc-only changes (API.md, README, CLAUDE.md, etc.) |
-| `security` | Security vulnerability or hardening |
-| `usability` | Response wording, field ordering, conflict UX, grower-readable output |
-| `api-discovery` | New API endpoints or fields discovered via network capture or reverse engineering |
-
-Multiple labels are encouraged — a `bug` that also affects grower UX should carry both
-`bug` and `usability`.
-
-### Milestones
-
-Assign a milestone when the issue is part of a planned wave or release. If no milestone
-exists yet for the target wave, create it before assigning. Issues without a clear release
-target may be left unassigned.
 
 ### Audit cadence
 
@@ -170,7 +145,7 @@ agent writes no docs.
 
 *Internal docs (gitignored, updated every phase):*
 - `.claude/internal/PROJECT_REPORT.md` — measure and update LOC, test count, coverage, tool
-  count; add phase defect log; add time investment row; add any new lessons
+  count; add any new lessons
 - `.claude/internal/BETA_MANUAL_TESTING.md` — add session entry if live testing occurred;
   add lessons if new patterns emerged
 - `.claude/internal/ac-infinity-mcp-v1-implementation.md` — mark phase complete, update
