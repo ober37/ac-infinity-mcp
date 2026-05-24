@@ -318,11 +318,21 @@ def build_activity_report(
                 continue
             if port_loads is not None and port_loads.get(rep.port, 0) == 0:
                 continue
-        # Rule C (new): named port with zero current draw and sub-threshold cumulative runtime
+        # Rule C: named port with zero transitions, zero load, sub-threshold runtime
+        if (
+            rep.transitions == 0
+            and port_loads is not None
+            and port_loads.get(rep.port, 0) == 0
+            and (rep.on_hours / days) < _GHOST_LOAD_ZERO_THRESHOLD
+        ):
+            continue
+        # Rule D: named port showing only toggle-speed history with no current draw.
+        # Covers unconnected ports and toggle devices (heaters, lights, humidifiers)
+        # currently off — history is unreliable for these (issues #85, #98).
         if (
             port_loads is not None
             and port_loads.get(rep.port, 0) == 0
-            and (rep.on_hours / days) < _GHOST_LOAD_ZERO_THRESHOLD
+            and rep.avg_speed_when_running <= 1.0
         ):
             continue
         filtered.append(rep)

@@ -694,14 +694,14 @@ def test_build_activity_report_empty_port_loads_normalized() -> None:
 # ============ Rule C tests (#88) — named ports with zero load ============
 
 def _named_port_readings(name: str, on_count: int, off_count: int, days: int = 3) -> list[dict]:
-    """Generate readings for a named port with the given on/off split."""
+    """Generate readings for a named ghost port — speed=1 mirrors the toggle-nibble artifact."""
     readings = []
     for i in range(on_count):
         readings.append({
             "timestamp": _ts(i % 24, day=25 + i // 24),
             "temperature_c": 24.0, "temperature_f": 75.2,
             "humidity": 60.0, "vpd": 1.24,
-            "ports": [_port(1, name, 5, True)],
+            "ports": [_port(1, name, 1, True)],
         })
     for i in range(off_count):
         readings.append({
@@ -714,24 +714,17 @@ def _named_port_readings(name: str, on_count: int, off_count: int, days: int = 3
 
 
 def test_rule_c_excludes_named_ghost_live_example() -> None:
-    """Rule C: named port with portsLoad=0, on_hours=1.63 over 3 days → excluded.
+    """Ghost port (toggle-speed=1, portsLoad=0, 0.67 h/day) is excluded by Rule D.
 
-    Real-world case: 1.63 h/day < 1.0 h/day threshold? No — 1.63/3 = 0.54 h/day < 1.0. Excluded.
+    on_count=2 out of 72 readings → 0.67 h/day; speed=1 (toggle-nibble artifact) → Rule D fires.
     """
-    # on_hours = 1.63, days = 3 → 1.63/3 = 0.543 h/day < 1.0 → excluded
-    # Simulate: total readings = 72, on_count such that on_hours ≈ 1.63
-    # on_hours = on_count/total * 24 * days → 1.63 = on_count/72 * 72 → on_count ≈ 5 (approx)
-    # Use on_count=5, off_count=67, days=3: on_hours = 5/72 * 24 * 3 = 5.0, per day = 1.67
-    # Adjust: on_count=4 → on_hours = 4/72 * 72 = 4.0, per day = 1.33 — still > 1.0
-    # Use on_count=2, off_count=70: on_hours = 2/72 * 24 * 3 = 2.0, per day = 0.67 < 1.0 ✓
     readings = _named_port_readings("Humidifier", on_count=2, off_count=70, days=3)
     result = build_activity_report(readings, days=3, port_loads={1: 0})
-    assert len(result) == 0, "Rule C must exclude named port with zero load and < 1 h/day runtime"
+    assert len(result) == 0, "ghost port with toggle-speed and zero load must be excluded"
 
 
 def test_rule_c_excludes_named_ghost_very_low_runtime() -> None:
-    """Rule C: named port with portsLoad=0, on_hours/days ≈ 0.02 → excluded."""
-    # 1 on reading out of 50 total, days=3: on_hours = 1/50 * 24 * 3 = 1.44; per day = 0.48 < 1.0
+    """Ghost port (toggle-speed=1, portsLoad=0, 0.48 h/day) is excluded by Rule D."""
     readings = _named_port_readings("Humidifier", on_count=1, off_count=49, days=3)
     result = build_activity_report(readings, days=3, port_loads={1: 0})
     assert len(result) == 0
@@ -858,12 +851,11 @@ def test_rule_b_enhanced_does_not_fire_when_port_loads_none() -> None:
 # ============ Interaction tests ============
 
 def test_rule_c_fires_for_named_port_not_caught_by_rule_b() -> None:
-    """Confirms Rule C catches named ports; Rule B only fires on auto-named 'Port N'."""
-    # 1 on reading out of 50 total, days=3: on_hours = 1/50 * 24 * 3 = 1.44; per day = 0.48 < 1.0
-    # Port named "Humidifier" (not "Port N") → Rule B never fires; Rule C fires for zero load
+    """Rule B only fires on auto-named 'Port N'; named ghost ports are caught by Rule D."""
+    # speed=1 (toggle-nibble) + portsLoad=0 → Rule D fires even though name isn't "Port N"
     readings = _named_port_readings("Humidifier", on_count=1, off_count=49, days=3)
     result = build_activity_report(readings, days=3, port_loads={1: 0})
-    assert len(result) == 0  # Rule C excluded it
+    assert len(result) == 0  # Rule D excluded it
 
 
 def test_rule_a_b_c_together_multi_port_scenario() -> None:
@@ -890,7 +882,7 @@ def test_rule_a_b_c_together_multi_port_scenario() -> None:
                 _port(1, "Exhaust Fan", 5, True),        # survivor: named, load>0, good uptime
                 _port(2, "Port 2", 5, True),                   # Rule A: 100% uptime, load=0
                 _port(3, "Port 3", 5 if i == 0 else 0, i == 0),  # Rule B: 1/48*24*2/2=0.5 h/day
-                _port(4, "Misting Pump", 5 if i == 0 else 0, i == 0),  # Rule C: same, load=0
+                _port(4, "Misting Pump", 1 if i == 0 else 0, i == 0),  # Rule D: speed=1, load=0
             ],
         })
     port_loads = {1: 5, 2: 0, 3: 0, 4: 0}
@@ -901,23 +893,23 @@ def test_rule_a_b_c_together_multi_port_scenario() -> None:
 
 # ============ Parametrized threshold boundary ============
 
-@pytest.mark.parametrize("on_count,total,days,port_load,expected_count,label", [
-    # on_hours = on_count/total * 24 * days; per_day = on_hours / days = on_count/total * 24
-    (0,  24, 1, 0, 0, "zero runtime → excluded"),        # 0/24*24 = 0.0 h/day < 1.0
-    (1,  48, 1, 0, 0, "0.5 h/day → excluded"),           # 1/48*24 = 0.5 h/day < 1.0
-    (1,  30, 1, 0, 0, "0.8 h/day → excluded"),           # 1/30*24 = 0.8 h/day < 1.0
-    (1,  24, 1, 0, 1, "1.0 h/day → NOT excluded"),       # 1/24*24 = 1.0 h/day (at boundary)
-    (2,  24, 1, 0, 1, "2.0 h/day → NOT excluded"),       # 2/24*24 = 2.0 h/day > 1.0
-    (1,  48, 1, 5, 1, "0.5 h/day but has load → kept"),  # low runtime but non-zero load
+@pytest.mark.parametrize("on_count,total,days,port_load,speed,expected_count,label", [
+    # speed=1 → toggle-nibble artifact (ghost/toggle device) → Rule D fires when portsLoad=0
+    # speed=5 → real fan → Rule D skips; Rule C requires transitions==0 to fire
+    (0,  24, 1, 0, 1, 0, "zero runtime → excluded"),              # Rule C fires (transitions=0)
+    (1,  48, 1, 0, 1, 0, "toggle 0.5 h/day, no load → excluded"), # Rule D fires (speed=1, load=0)
+    (1,  30, 1, 0, 1, 0, "toggle 0.8 h/day, no load → excluded"), # Rule D fires (speed=1, load=0)
+    (1,  24, 1, 0, 5, 1, "real fan 1.0 h/day, no load → kept"),   # speed=5 → Rule D skips
+    (2,  24, 1, 0, 5, 1, "real fan 2.0 h/day, no load → kept"),   # speed=5 → Rule D skips
+    (1,  48, 1, 5, 5, 1, "0.5 h/day but has load → kept"),        # load>0 → all rules skip
 ])
 def test_rule_c_threshold_boundary_named_port(
-    on_count: int, total: int, days: int, port_load: int, expected_count: int, label: str
+    on_count: int, total: int, days: int, port_load: int, speed: int,
+    expected_count: int, label: str
 ) -> None:
-    """Rule C threshold boundary: named port excluded only when < 1.0 h/day AND load=0."""
+    """Ghost port filter boundary: excluded by Rule D (toggle-speed) or Rule C (zero-runtime)."""
     assert _GHOST_LOAD_ZERO_THRESHOLD == 1.0  # guard: test is calibrated to this value
 
-    # Use enough off readings to guarantee a transition (defeats Rule A)
-    # Total readings = on_count + off_count; off_count = total - on_count
     off_count = total - on_count
     readings = []
     for i in range(on_count):
@@ -925,7 +917,7 @@ def test_rule_c_threshold_boundary_named_port(
             "timestamp": _ts(i % 24, day=25 + i // 24),
             "temperature_c": 24.0, "temperature_f": 75.2,
             "humidity": 60.0, "vpd": 1.24,
-            "ports": [_port(1, "Humidifier", 5, True)],
+            "ports": [_port(1, "Humidifier", speed, True)],
         })
     for i in range(off_count):
         readings.append({
@@ -938,6 +930,6 @@ def test_rule_c_threshold_boundary_named_port(
     result = build_activity_report(readings, days=days, port_loads={1: port_load})
     on_hours_per_day = (on_count / total * 24 * days) / days
     assert len(result) == expected_count, (
-        f"{label}: on_hours_per_day={on_hours_per_day:.2f}, port_load={port_load}: "
+        f"{label}: on_hours_per_day={on_hours_per_day:.2f}, speed={speed}, port_load={port_load}: "
         f"expected {expected_count} port(s), got {len(result)}"
     )
