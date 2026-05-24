@@ -502,7 +502,7 @@ devId=REDACTED_DEV_ID&externalPort=1&onSpead=5&modeType=2&offSpead=0&...
 
 ---
 
-## All 21 Known API Quirks
+## All 23 Known API Quirks
 
 ### Quirk 1 — Auth typo: `appPasswordl`
 

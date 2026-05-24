@@ -1074,21 +1074,44 @@ def test_rule_d_exempts_toggle_hardware_currently_off():
     assert result[0].data_quality == "api_constant_speed"
 
 
-def test_rule_d_filters_toggle_hardware_with_artifact_transitions():
-    """Toggle hardware with spurious transitions (API co-runs with other ports) is filtered.
+def test_rule_d_keeps_toggle_hardware_with_genuine_transitions():
+    """Confirmed toggle hardware (loadType=4) with transitions > 0 is kept by Rule D, not dropped.
 
-    Real scenario: heater/humidifier ports emit speed=1 ghost readings whenever any other
-    port on the device runs — creating transitions>0 and sub-100% uptime.  These ports have
-    no actual load and must be filtered, not preserved.
+    Rule D is exempt for confirmed toggle hardware that ran — the grower should see the data.
+    The data_quality early-exit handles the 100%-uptime constant-speed artifact; any toggle
+    port with transitions > 0 (an actual on→off cycle) is a genuine runner.
+    Gate 5 (PR #114, Issue #101): Heater ran 2+ days then turned off; Rule D was incorrectly
+    dropping it because avg_speed=1.0 (expected for toggle hardware) and portsLoad=0 (now off).
     """
-    # 4 on readings then 68 off — produces transitions=2, uptime<100%, avg_speed=1.0
+    # 4 on readings then 68 off — transitions=1, uptime<100%, avg_speed=1.0
     readings = _toggle_readings(speed=1, on=True, count=4) + _toggle_readings(
         speed=0, on=False, count=68
     )
     result = build_activity_report(
         readings, days=3, port_loads={2: 0}, port_load_types={2: 4}
     )
-    assert len(result) == 0, "Toggle ghost with artifact transitions must be filtered by Rule D"
+    assert len(result) == 1, "Confirmed toggle hardware with transitions>0 must survive Rule D"
+    assert result[0].data_quality is None  # ran briefly but not the constant-speed artifact
+
+
+def test_rule_d_keeps_genuine_toggle_runner_currently_off():
+    """Toggle hardware (loadType=4) that ran significantly and is now off is kept.
+
+    Regression for Gate 5 T4 (PR #114 / Issue #101): Heater ran ~2.5 days in a 7-day
+    window (transitions=1, on_hours≈60h, avg_speed=1.0), then portsLoad dropped to 0.
+    Rule D must not silently discard it — the grower needs to see the runtime data.
+    Simulated with 60 on + 108 off out of 168 total readings over 7 days.
+    """
+    readings = _toggle_readings(speed=1, on=True, count=60) + _toggle_readings(
+        speed=0, on=False, count=108
+    )
+    result = build_activity_report(
+        readings, days=7, port_loads={2: 0}, port_load_types={2: 4}
+    )
+    assert len(result) == 1, "Toggle hardware with significant runtime must survive Rule D"
+    assert result[0].name == "Heater"
+    assert result[0].transitions == 1
+    assert result[0].data_quality is None
 
 
 def test_rule_d_still_filters_non_toggle_ghost_ports():

@@ -894,8 +894,9 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         Five rules apply: Rule A (constant 100%% uptime + zero load), Rule B
         (auto-named Port N with low average runtime or zero load), Rule C (named
         port with zero transitions + zero load + < 1 h/day average runtime), Rule D
-        (named port with toggle-speed history ≤ 1 and zero load — see Quirk 22 in
-        docs/API.md), and Rule E (named port, non-toggle hardware, zero current load,
+        (non-toggle named port with speed history ≤ 1 and zero load — confirmed toggle
+        hardware with transitions > 0 is exempt; see Quirk 22 in docs/API.md), and Rule E
+        (named port, non-toggle hardware, zero current load,
         sub-threshold runtime — stale configured speed from a port previously set to
         OFF). The human_summary field already includes a brief note about excluded ports
         when ports_excluded_count > 0. Do not repeat the exclusion count in prose response.

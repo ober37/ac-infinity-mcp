@@ -364,11 +364,19 @@ def build_activity_report(
             and (rep.on_hours / days) < _GHOST_LOAD_ZERO_THRESHOLD
         ):
             continue
-        # Rule D: named port showing only toggle-speed history with no current draw.
-        # Toggle hardware that meets all four data_quality conditions was already returned
-        # above via the early-exit, so any port reaching this rule is a ghost artifact.
+        # Rule D: non-toggle named port with speed history ≤ 1 and no current draw.
+        # Confirmed toggle hardware (loadType 4/128) with transitions > 0 is exempt —
+        # it ran and the grower should see the data. The data_quality early-exit above
+        # handles the 100%-uptime constant-speed artifact for toggle hardware. Any
+        # non-toggle port reaching this point with avg_speed ≤ 1.0 and zero load is a
+        # ghost artifact (stale nibble 0xF recorded after the device was off).
+        is_toggle = (
+            port_load_types is not None
+            and port_load_types.get(rep.port) in _TOGGLE_LOAD_TYPES
+        )
         if (
-            port_loads is not None
+            not is_toggle
+            and port_loads is not None
             and port_loads.get(rep.port, 0) == 0
             and rep.avg_speed_when_running <= 1.0
         ):
