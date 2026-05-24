@@ -1395,22 +1395,24 @@ and the report is still returned.
 {
   "device_id": "C58ZA",
   "days_analyzed": 7,
+  "window_start_local": "May 17, 10:35 AM CDT",
+  "window_end_local": "May 24, 10:35 AM CDT",
   "readings_used": 1440,
   "ports": [
     {
       "port": 1,
       "name": "Inline Fan",
-      "on_hours": 12.5,
-      "off_hours": 11.5,
-      "transitions": 4,
+      "on_hours": 87.5,
+      "off_hours": 80.5,
+      "transitions": 14,
       "avg_speed_when_running": 5.2,
       "uptime_pct": 52.1,
-      "peak_hour_local": 9,
+      "peak_hour_local": "May 20, 4:00 PM CDT",
       "data_quality": null
     },
     {
       "port": 2,
-      "name": "Humidifier",
+      "name": "Heater",
       "on_hours": 168.0,
       "off_hours": 0.0,
       "transitions": 0,
@@ -1421,19 +1423,20 @@ and the report is still returned.
     }
   ],
   "ports_excluded_count": 2,
-  "human_summary": "Analyzed 7 days of activity across 1 reliable port and 1 port with a data caveat. Inline Fan (Port 1) ran 52.1% uptime (12.5h total). Humidifier (Port 2): the AC Infinity history API cannot distinguish configured speed from actual runtime for toggle hardware — on_hours and uptime are not reliable for this port. 2 ports excluded (no device activity detected)."
+  "human_summary": "Analyzed 7 days (May 17 – May 24) of activity across 1 active port. Inline Fan (Port 1) ran 52.1% uptime (87.5h total), most active around May 20, 4:00 PM CDT. Heater (Port 2): activity data not supported (currently OFF). 2 ports excluded (no power detected)."
 }
 ```
 
 **Field notes:**
-- `on_hours` / `off_hours` — cumulative total hours over the full `days` window (not hours per day); total is `days * 24` when full data is available. Present to growers as total elapsed hours, e.g. "ran 36.0 hours over the past 3 days (50%)." **Do not quote `on_hours` or `uptime_pct` for ports where `data_quality` is `"api_constant_speed"`.**
+- `window_start_local` / `window_end_local` — the exact local time range analyzed, formatted in the device's timezone (e.g. "May 17, 10:35 AM CDT"). Use these fields when explaining why a report spans multiple calendar days — the window is a rolling `days`×24 h span starting from the current time, not a calendar-day boundary.
+- `on_hours` / `off_hours` — cumulative total hours over the full `days` window (not hours per day); total is `days * 24` when full data is available. Present to growers as total elapsed hours, e.g. "ran 87.5 hours over the past 7 days (52%)."
 - `transitions` — number of on↔off state changes in the period
 - `avg_speed_when_running` — average `onSpead` value (1–10) across on-readings with non-zero speed
 - `uptime_pct` — `on_hours / (on_hours + off_hours) * 100`, rounded to 1 decimal
-- `peak_hour_local` — local hour (0–23, in device timezone from `zoneId`) with the most on-readings; `null` when port never ran (always_off case). Falls back to UTC hour when `zoneId` is absent (Quirk 23). Describe to growers as 'most active around {peak_hour_local}:00 local time'.
-- `data_quality` — `null` for ports with reliable history. `"api_constant_speed"` for toggle hardware (heaters, lights, humidifiers — loadType 4 or 128) where the AC Infinity history API conflates the device's configured speed with its actual runtime state. The history API records these devices as always-on at speed 1, regardless of whether they were actually running. For these ports, `on_hours` and `uptime_pct` are fabricated and MUST NOT be presented to the grower as actual runtime data. Relay the `human_summary` caveat text for the port verbatim instead. `port_load_types` (from `deviceInfo.ports[].loadType`) flows through `build_activity_report` to enable this detection. See Quirk 22.
+- `peak_hour_local` — device-local time string with the most on-readings; includes a date prefix when the window spans multiple calendar days (e.g. "May 20, 4:00 PM CDT"), or just the time for a single-day window (e.g. "4:00 PM CDT"); `null` when port never ran (always_off case). Falls back to UTC when `zoneId` is absent (Quirk 23).
+- `data_quality` — `null` for ports with reliable history; `"api_constant_speed"` for toggle hardware (heaters, lights, humidifiers — loadType 4 or 128) where the AC Infinity API cannot distinguish configured speed from actual runtime state. When `data_quality` is `"api_constant_speed"`, `on_hours` and `uptime_pct` are fabricated and **must not** be quoted to growers as runtime data. Relay the `human_summary` caveat text for these ports verbatim.
 - `ports_excluded_count` — number of ports removed by the ghost-port filter (see Quirk 22). Do not repeat this count in prose when presenting `human_summary` to a grower.
-- `human_summary` — plain-English activity summary; includes an exclusion note when `ports_excluded_count > 0` and a data-quality caveat for any toggle-hardware ports. When `ports` is empty, contains a full explanation for the grower. Relay the caveat text for `data_quality = "api_constant_speed"` ports verbatim — do not estimate runtime from `on_hours`.
+- `human_summary` — plain-English activity summary; preamble includes the date range (e.g. "Analyzed 7 days (May 17 – May 24)"); includes an exclusion note when `ports_excluded_count > 0`. When `ports` is empty, contains a full explanation for the grower.
 
 ---
 

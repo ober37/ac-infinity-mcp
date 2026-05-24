@@ -53,9 +53,6 @@ class TrendReport:
     alert: bool
 
 
-_TOGGLE_LOAD_TYPES: frozenset[int] = frozenset({4, 128})
-
-
 @dataclass
 class ActivityReport:
     port: int
