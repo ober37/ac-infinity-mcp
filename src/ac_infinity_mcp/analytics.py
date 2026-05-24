@@ -25,6 +25,10 @@ STAGE_TARGETS: dict[str, dict[str, tuple[float, float]]] = {
 
 _DEFAULT_STAGE = "veg"
 
+# AC Infinity loadType values for toggle hardware (heaters, lights, humidifiers).
+# These devices always emit speed=1 in the history API even when physically OFF.
+_TOGGLE_LOAD_TYPES: frozenset[int] = frozenset({4, 128})
+
 
 @dataclass
 class HealthScore:

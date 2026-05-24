@@ -890,9 +890,11 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         JSON with window_start_local and window_end_local (the exact local time range
         analyzed, e.g. 'May 23, 10:35 AM CDT' to 'May 24, 10:35 AM CDT'), per-port
         on_hours (total hours ON over the full period), off_hours, transitions,
-        avg_speed_when_running, uptime_pct, and peak_hour_local (device-local time
+        avg_speed_when_running, uptime_pct, peak_hour_local (device-local time
         string, e.g. 'May 23, 4:00 PM CDT' when window spans multiple calendar days,
-        or '4:00 PM CDT' for a single-day window; null if the port never ran).
+        or '4:00 PM CDT' for a single-day window; null if the port never ran), and
+        data_quality (null for reliable history; 'api_constant_speed' for toggle
+        hardware whose history is unreliable — heaters, lights, humidifiers).
         ports_excluded_count is the number of ports removed by the ghost-port filter.
         Five rules apply: Rule A (constant 100%% uptime + zero load), Rule B
         (auto-named Port N with low average runtime or zero load), Rule C (named
