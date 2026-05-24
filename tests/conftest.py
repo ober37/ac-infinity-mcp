@@ -21,11 +21,13 @@ MOCK_DEVICE_LEGACY: dict = {
     "devPortCount": 8,
     "firmwareVersion": "3.5.28",
     "hardwareVersion": "1.0",
+    "zoneId": "America/Chicago",
     "deviceInfo": {
         "temperature": 2350,
         "temperatureF": 7430,
         "humidity": 6000,
         "vpdnums": 124,
+        "unit": 1,
         "ports": [
             {"port": 1, "portName": "Intake Fan", "speak": 5, "portsLoad": 1,
              "loadState": 1, "curMode": 3, "remainTime": 0},
@@ -82,6 +84,8 @@ def mock_client():
         "vpd": 1.24,
         "ports": [],
         "external_sensors": [],
+        "zone_id": "America/Chicago",
+        "temp_unit_raw": 1,
     })
     # Advance Automation defaults.
     client.get_advance_automations.return_value = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST)

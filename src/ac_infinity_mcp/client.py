@@ -926,6 +926,8 @@ class ACInfinityClient:
                 "vpd": vpd,
                 "ports": ports,
                 "external_sensors": external,
+                "zone_id": device_data.get("zoneId"),            # IANA string or None
+                "temp_unit_raw": info.get("unit"),               # 0=°F, 1=°C, or None
             }
         except (TypeError, ValueError, AttributeError) as e:
             logger.warning(

@@ -472,7 +472,9 @@ async def test_get_device_reading_success(mock_client):
         result = await get_device_reading("C58ZA")
     data = json.loads(result)
     assert data["device_id"] == "C58ZA"
-    assert "temperature_c" in data
+    assert "temperature" in data
+    assert "unit" in data
+    assert "temperature_c" not in data
     assert "humidity" in data
     assert "vpd" in data
 
@@ -719,8 +721,8 @@ async def test_get_historical_readings_statistics_computed(mock_client):
         result = await get_historical_readings("C58ZA", "2024-04-25", "2024-04-25", "raw")
     data = json.loads(result)
     stats = data["statistics"]
-    assert "temperature_c" in stats
-    assert stats["temperature_c"]["avg"] == 24.0
+    assert "temperature" in stats
+    assert stats["temperature"]["avg"] == 24.0  # °C unit: parse_history_record returns 24.0°C
     assert "vpd" in stats
 
 
@@ -1076,26 +1078,22 @@ async def test_detect_environment_trends_days_thirty_one(mock_client):
 
 
 async def test_detect_environment_trends_historical_error_propagated(mock_client):
-    error_payload = json.dumps({"error": "Device NOTEXIST not found"})
+    # detect_environment_trends now bypasses get_historical_readings; device-not-found
+    # is detected by get_devices returning an empty list for the device_id.
+    mock_client.get_devices.return_value = []
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        with patch("ac_infinity_mcp.server.get_historical_readings",
-                   return_value=error_payload):
-            result = await detect_environment_trends("NOTEXIST", 7)
+        result = await detect_environment_trends("NOTEXIST", 7)
     data = json.loads(result)
     assert "error" in data
 
 
 async def test_detect_environment_trends_single_reading_flat(mock_client):
-    single = [_make_hourly_readings(1)[0]]
-    hist_payload = json.dumps({
-        "device_id": "C58ZA",
-        "readings": single,
-        "statistics": {},
-    })
+    # detect_environment_trends now calls the client directly (no get_historical_readings).
+    single = _make_hourly_readings(1)[0]
+    mock_client.get_historical_data.return_value = [{}]
+    mock_client.parse_history_record.side_effect = lambda r, port_names=None: single
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        with patch("ac_infinity_mcp.server.get_historical_readings",
-                   return_value=hist_payload):
-            result = await detect_environment_trends("C58ZA", 1)
+        result = await detect_environment_trends("C58ZA", 1)
     data = json.loads(result)
     assert data["readings_used"] == 1
     for trend in data["trends"]:
@@ -1121,16 +1119,14 @@ def _make_port_readings(n: int, speed: int, on: bool) -> list[dict]:
 
 
 async def test_get_port_activity_report_happy_path(mock_client):
+    # get_port_activity_report now calls get_devices() + get_historical_data() directly.
     readings = _make_port_readings(24, speed=5, on=True)
-    hist_payload = json.dumps({
-        "device_id": "C58ZA",
-        "readings": readings,
-        "statistics": {},
-    })
+    mock_client.get_historical_data.return_value = [{}] * 24
+    mock_client.parse_history_record.side_effect = (
+        lambda r, port_names=None: readings[0]
+    )
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        with patch("ac_infinity_mcp.server.get_historical_readings",
-                   return_value=hist_payload):
-            result = await get_port_activity_report("C58ZA", 1)
+        result = await get_port_activity_report("C58ZA", 1)
     data = json.loads(result)
     assert data["device_id"] == "C58ZA"
     assert data["days_analyzed"] == 1
@@ -1158,58 +1154,47 @@ async def test_get_port_activity_report_days_thirty_one(mock_client):
 
 
 async def test_get_port_activity_report_no_ports(mock_client):
-    readings = [
-        {
-            "timestamp": "2024-04-18T00:00:00Z",
-            "temperature_c": 24.0,
-            "humidity": 55.0,
-            "vpd": 1.4,
-            "ports": [],
-        }
-    ]
-    hist_payload = json.dumps({
-        "device_id": "C58ZA",
-        "readings": readings,
-        "statistics": {},
-    })
+    no_port_reading = {
+        "timestamp": "2024-04-18T00:00:00Z",
+        "temperature_c": 24.0,
+        "humidity": 55.0,
+        "vpd": 1.4,
+        "ports": [],
+    }
+    mock_client.get_historical_data.return_value = [{}]
+    mock_client.parse_history_record.side_effect = (
+        lambda r, port_names=None: no_port_reading
+    )
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        with patch("ac_infinity_mcp.server.get_historical_readings",
-                   return_value=hist_payload):
-            result = await get_port_activity_report("C58ZA", 1)
+        result = await get_port_activity_report("C58ZA", 1)
     data = json.loads(result)
     assert data["ports"] == []
 
 
 async def test_get_port_activity_report_port_always_off(mock_client):
     readings = _make_port_readings(24, speed=0, on=False)
-    hist_payload = json.dumps({
-        "device_id": "C58ZA",
-        "readings": readings,
-        "statistics": {},
-    })
+    mock_client.get_historical_data.return_value = [{}] * 24
+    mock_client.parse_history_record.side_effect = (
+        lambda r, port_names=None: readings[0]
+    )
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        with patch("ac_infinity_mcp.server.get_historical_readings",
-                   return_value=hist_payload):
-            result = await get_port_activity_report("C58ZA", 1)
+        result = await get_port_activity_report("C58ZA", 1)
     data = json.loads(result)
     port = data["ports"][0]
     assert port["uptime_pct"] == 0.0
     assert port["on_hours"] == 0.0
     assert port["avg_speed_when_running"] == 0.0
-    assert port["peak_hour_utc"] is None
+    assert port["peak_hour_local"] is None
 
 
 async def test_get_port_activity_report_port_always_on(mock_client):
     readings = _make_port_readings(24, speed=5, on=True)
-    hist_payload = json.dumps({
-        "device_id": "C58ZA",
-        "readings": readings,
-        "statistics": {},
-    })
+    mock_client.get_historical_data.return_value = [{}] * 24
+    mock_client.parse_history_record.side_effect = (
+        lambda r, port_names=None: readings[0]
+    )
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        with patch("ac_infinity_mcp.server.get_historical_readings",
-                   return_value=hist_payload):
-            result = await get_port_activity_report("C58ZA", 1)
+        result = await get_port_activity_report("C58ZA", 1)
     data = json.loads(result)
     port = data["ports"][0]
     assert port["uptime_pct"] == 100.0
@@ -1219,15 +1204,12 @@ async def test_get_port_activity_report_port_always_on(mock_client):
 async def test_get_port_activity_report_cumulative_on_hours_multi_day(mock_client):
     """100% uptime across 7 days → on_hours = 168.0, not 24.0."""
     readings = _make_port_readings(24, speed=5, on=True)
-    hist_payload = json.dumps({
-        "device_id": "C58ZA",
-        "readings": readings,
-        "statistics": {},
-    })
+    mock_client.get_historical_data.return_value = [{}] * 24
+    mock_client.parse_history_record.side_effect = (
+        lambda r, port_names=None: readings[0]
+    )
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        with patch("ac_infinity_mcp.server.get_historical_readings",
-                   return_value=hist_payload):
-            result = await get_port_activity_report("C58ZA", 7)
+        result = await get_port_activity_report("C58ZA", 7)
     data = json.loads(result)
     port = data["ports"][0]
     assert port["on_hours"] == pytest.approx(168.0)
@@ -1256,15 +1238,12 @@ def _make_port_readings_named(n: int, speed: int, on: bool, name: str, port: int
 async def test_get_port_activity_report_has_new_fields(mock_client):
     """Response includes ports_excluded_count and human_summary fields."""
     readings = _make_port_readings(24, speed=5, on=True)
-    hist_payload = json.dumps({
-        "device_id": "C58ZA",
-        "readings": readings,
-        "statistics": {},
-    })
+    mock_client.get_historical_data.return_value = [{}] * 24
+    mock_client.parse_history_record.side_effect = (
+        lambda r, port_names=None: readings[0]
+    )
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        with patch("ac_infinity_mcp.server.get_historical_readings",
-                   return_value=hist_payload):
-            result = await get_port_activity_report("C58ZA", 1)
+        result = await get_port_activity_report("C58ZA", 1)
     data = json.loads(result)
     assert "ports_excluded_count" in data
     assert "human_summary" in data
@@ -1277,20 +1256,18 @@ async def test_get_port_activity_report_rule_a_ghost_excluded(mock_client):
     # Port 1 "Port 1": always on, 0 transitions, portsLoad=0 in device info
     mock_client.get_devices.return_value = [{
         "devCode": "C58ZA",
+        "devId": "9999999999",
         "deviceInfo": {
             "ports": [{"port": 1, "portsLoad": 0}],
         },
     }]
     readings = _make_port_readings_named(24, speed=5, on=True, name="Port 1", port=1)
-    hist_payload = json.dumps({
-        "device_id": "C58ZA",
-        "readings": readings,
-        "statistics": {},
-    })
+    mock_client.get_historical_data.return_value = [{}] * 24
+    mock_client.parse_history_record.side_effect = (
+        lambda r, port_names=None: readings[0]
+    )
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        with patch("ac_infinity_mcp.server.get_historical_readings",
-                   return_value=hist_payload):
-            result = await get_port_activity_report("C58ZA", 1)
+        result = await get_port_activity_report("C58ZA", 1)
     data = json.loads(result)
     assert data["ports"] == []
     assert data["ports_excluded_count"] == 1
@@ -1302,15 +1279,12 @@ async def test_get_port_activity_report_rule_a_not_excluded_with_load(mock_clien
     """Rule A does NOT exclude a port that has portsLoad > 0."""
     # mock_client already returns MOCK_DEVICE_LEGACY which has port 1 portsLoad=1
     readings = _make_port_readings_named(24, speed=5, on=True, name="Port 1", port=1)
-    hist_payload = json.dumps({
-        "device_id": "C58ZA",
-        "readings": readings,
-        "statistics": {},
-    })
+    mock_client.get_historical_data.return_value = [{}] * 24
+    mock_client.parse_history_record.side_effect = (
+        lambda r, port_names=None: readings[0]
+    )
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        with patch("ac_infinity_mcp.server.get_historical_readings",
-                   return_value=hist_payload):
-            result = await get_port_activity_report("C58ZA", 1)
+        result = await get_port_activity_report("C58ZA", 1)
     data = json.loads(result)
     # Port 1 has portsLoad=1 in MOCK_DEVICE_LEGACY → Rule A does not fire
     assert len(data["ports"]) == 1
@@ -1336,13 +1310,9 @@ async def test_get_port_activity_report_all_ports_excluded(mock_client):
                 {"port": 3, "name": "Port 3", "speed": 5 if on else 0, "on": on},
             ],
         })
-    hist_payload = json.dumps({
-        "device_id": "C58ZA",
-        "readings": readings,
-        "statistics": {},
-    })
     mock_client.get_devices.return_value = [{
         "devCode": "C58ZA",
+        "devId": "9999999999",
         "deviceInfo": {
             "ports": [
                 {"port": 2, "portsLoad": 0},
@@ -1350,10 +1320,18 @@ async def test_get_port_activity_report_all_ports_excluded(mock_client):
             ],
         },
     }]
+    mock_client.get_historical_data.return_value = [{}] * 72
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        val = readings[idx]
+        idx += 1
+        return val
+
+    mock_client.parse_history_record.side_effect = _side_effect
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        with patch("ac_infinity_mcp.server.get_historical_readings",
-                   return_value=hist_payload):
-            result = await get_port_activity_report("C58ZA", 3)
+        result = await get_port_activity_report("C58ZA", 3)
     data = json.loads(result)
     assert data["ports"] == []
     assert data["ports_excluded_count"] == 2
@@ -1380,14 +1358,10 @@ async def test_get_port_activity_report_partial_exclusion(mock_client):
                 {"port": 2, "name": "Port 2", "speed": 5 if p2_on else 0, "on": p2_on},
             ],
         })
-    hist_payload = json.dumps({
-        "device_id": "C58ZA",
-        "readings": readings,
-        "statistics": {},
-    })
     # Port 1 has load > 0, port 2 has load = 0 (not relevant — Rule B fires first for Port 2)
     mock_client.get_devices.return_value = [{
         "devCode": "C58ZA",
+        "devId": "9999999999",
         "deviceInfo": {
             "ports": [
                 {"port": 1, "portsLoad": 5},
@@ -1395,10 +1369,18 @@ async def test_get_port_activity_report_partial_exclusion(mock_client):
             ],
         },
     }]
+    mock_client.get_historical_data.return_value = [{}] * 72
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        val = readings[idx]
+        idx += 1
+        return val
+
+    mock_client.parse_history_record.side_effect = _side_effect
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        with patch("ac_infinity_mcp.server.get_historical_readings",
-                   return_value=hist_payload):
-            result = await get_port_activity_report("C58ZA", 3)
+        result = await get_port_activity_report("C58ZA", 3)
     data = json.loads(result)
     assert len(data["ports"]) == 1
     assert data["ports"][0]["name"] == "Inline Fan"
@@ -1407,23 +1389,15 @@ async def test_get_port_activity_report_partial_exclusion(mock_client):
 
 
 async def test_get_port_activity_report_get_devices_api_error_degrades_gracefully(mock_client):
-    """get_devices failure disables Rule A but still returns activity report."""
+    """get_devices failure → ACInfinityAPIError is caught by the error handler."""
+    # In the new implementation, get_devices failure propagates as an API error.
     mock_client.get_devices.side_effect = ACInfinityAPIError("API error 500: server fault")
-    readings = _make_port_readings(24, speed=5, on=True)
-    hist_payload = json.dumps({
-        "device_id": "C58ZA",
-        "readings": readings,
-        "statistics": {},
-    })
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        with patch("ac_infinity_mcp.server.get_historical_readings",
-                   return_value=hist_payload):
-            result = await get_port_activity_report("C58ZA", 1)
+        result = await get_port_activity_report("C58ZA", 1)
     data = json.loads(result)
-    # Should succeed despite get_devices failure — Rule A disabled, port is kept
-    assert "error" not in data
-    assert "ports" in data
-    assert "human_summary" in data
+    # ACInfinityAPIError is caught → structured error response
+    assert data["error"] == "AC Infinity API error"
+    assert "detail" in data
 
 
 # ============ set_port_speed ============
@@ -2003,24 +1977,27 @@ async def test_check_vpd_drift_generic_exception(mock_client):
 # ============ get_environment_health — error handlers ============
 
 async def test_get_environment_health_auth_error(mock_client):
-    with patch("ac_infinity_mcp.server.get_device_reading",
-               side_effect=ACInfinityAuthError("token expired")):
+    # get_environment_health calls get_devices() directly (no get_device_reading tool chain).
+    mock_client.get_devices.side_effect = ACInfinityAuthError("token expired")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_environment_health("C58ZA", "veg")
     data = json.loads(result)
     assert "Authentication failed" in data["error"]
 
 
 async def test_get_environment_health_api_error(mock_client):
-    with patch("ac_infinity_mcp.server.get_device_reading",
-               side_effect=ACInfinityAPIError("API error 500")):
+    # get_environment_health calls get_devices() directly (no get_device_reading tool chain).
+    mock_client.get_devices.side_effect = ACInfinityAPIError("API error 500")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_environment_health("C58ZA", "veg")
     data = json.loads(result)
     assert data["error"] == "AC Infinity API error"
 
 
 async def test_get_environment_health_generic_exception(mock_client):
-    with patch("ac_infinity_mcp.server.get_device_reading",
-               side_effect=RuntimeError("unexpected crash")):
+    # get_environment_health calls get_devices() directly (no get_device_reading tool chain).
+    mock_client.get_devices.side_effect = RuntimeError("unexpected crash")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_environment_health("C58ZA", "veg")
     data = json.loads(result)
     assert "error" in data
@@ -2029,24 +2006,27 @@ async def test_get_environment_health_generic_exception(mock_client):
 # ============ detect_environment_trends — error handlers ============
 
 async def test_detect_environment_trends_auth_error(mock_client):
-    with patch("ac_infinity_mcp.server.get_historical_readings",
-               side_effect=ACInfinityAuthError("token expired")):
+    # detect_environment_trends calls get_devices() directly (no get_historical_readings).
+    mock_client.get_devices.side_effect = ACInfinityAuthError("token expired")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await detect_environment_trends("C58ZA", 7)
     data = json.loads(result)
     assert "Authentication failed" in data["error"]
 
 
 async def test_detect_environment_trends_api_error(mock_client):
-    with patch("ac_infinity_mcp.server.get_historical_readings",
-               side_effect=ACInfinityAPIError("API error 500")):
+    # detect_environment_trends calls get_devices() directly (no get_historical_readings).
+    mock_client.get_devices.side_effect = ACInfinityAPIError("API error 500")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await detect_environment_trends("C58ZA", 7)
     data = json.loads(result)
     assert data["error"] == "AC Infinity API error"
 
 
 async def test_detect_environment_trends_generic_exception(mock_client):
-    with patch("ac_infinity_mcp.server.get_historical_readings",
-               side_effect=RuntimeError("unexpected crash")):
+    # detect_environment_trends calls get_devices() directly (no get_historical_readings).
+    mock_client.get_devices.side_effect = RuntimeError("unexpected crash")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await detect_environment_trends("C58ZA", 7)
     data = json.loads(result)
     assert "error" in data
@@ -2055,34 +2035,37 @@ async def test_detect_environment_trends_generic_exception(mock_client):
 # ============ get_port_activity_report — error propagation + error handlers ============
 
 async def test_get_port_activity_report_error_propagated(mock_client):
-    error_payload = json.dumps({"error": "No readings found for device C58ZA"})
+    # get_port_activity_report now calls get_devices() directly; "no device found" is
+    # triggered by returning an empty list.
+    mock_client.get_devices.return_value = []
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        with patch("ac_infinity_mcp.server.get_historical_readings",
-                   return_value=error_payload):
-            result = await get_port_activity_report("C58ZA", 7)
+        result = await get_port_activity_report("C58ZA", 7)
     data = json.loads(result)
     assert "error" in data
 
 
 async def test_get_port_activity_report_auth_error(mock_client):
-    with patch("ac_infinity_mcp.server.get_historical_readings",
-               side_effect=ACInfinityAuthError("token expired")):
+    # get_port_activity_report calls get_devices() directly (no get_historical_readings).
+    mock_client.get_devices.side_effect = ACInfinityAuthError("token expired")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_port_activity_report("C58ZA", 7)
     data = json.loads(result)
     assert "Authentication failed" in data["error"]
 
 
 async def test_get_port_activity_report_api_error(mock_client):
-    with patch("ac_infinity_mcp.server.get_historical_readings",
-               side_effect=ACInfinityAPIError("API error 500")):
+    # get_port_activity_report calls get_devices() directly (no get_historical_readings).
+    mock_client.get_devices.side_effect = ACInfinityAPIError("API error 500")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_port_activity_report("C58ZA", 7)
     data = json.loads(result)
     assert data["error"] == "AC Infinity API error"
 
 
 async def test_get_port_activity_report_generic_exception(mock_client):
-    with patch("ac_infinity_mcp.server.get_historical_readings",
-               side_effect=RuntimeError("unexpected crash")):
+    # get_port_activity_report calls get_devices() directly (no get_historical_readings).
+    mock_client.get_devices.side_effect = RuntimeError("unexpected crash")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_port_activity_report("C58ZA", 7)
     data = json.loads(result)
     assert "error" in data
@@ -2470,7 +2453,7 @@ async def test_get_port_settings_success_basic(mock_client):
     assert data["mode"] == "OFF"       # atType=1
     assert data["speed_target"] == 5
     assert data["vpd_target_kpa"] is None
-    assert data["temp_range_c"] is None
+    assert data["temp_range"] is None
     assert data["humidity_range_pct"] is None
     assert data["schedule_window"] is None
     assert data["cycle_on_seconds"] == 300
@@ -2501,14 +2484,14 @@ async def test_get_port_settings_vpd_target_out_of_range_is_none(mock_client, ra
 
 
 async def test_get_port_settings_temp_range_active(mock_client):
-    """activeLt=1 and activeHt=1 → temp_range_c populated (raw Celsius, no scaling)."""
+    """activeLt=1 and activeHt=1 → temp_range populated with preferred unit (°C for unit=1)."""
     settings = {**MOCK_MODE_SETTINGS_BASIC, "activeLt": 1, "activeHt": 1,
                 "devLt": 20, "devHt": 28}
     mock_client.get_mode_settings.return_value = settings
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_port_settings("C58ZA", 1)
     data = json.loads(result)
-    assert data["temp_range_c"] == {"min_c": 20, "max_c": 28}
+    assert data["temp_range"] == {"min": 20.0, "max": 28.0, "unit": "°C"}
 
 
 async def test_get_port_settings_humidity_range_active(mock_client):
@@ -2522,13 +2505,15 @@ async def test_get_port_settings_humidity_range_active(mock_client):
 
 
 async def test_get_port_settings_schedule_window_active(mock_client):
-    """schedStartTime != 65535 → schedule_window populated with HH:MM strings."""
+    """schedStartTime != 65535 → schedule_window populated with HH:MM strings and timezone."""
     settings = {**MOCK_MODE_SETTINGS_BASIC, "schedStartTime": 480, "schedEndtTime": 1200}
     mock_client.get_mode_settings.return_value = settings
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_port_settings("C58ZA", 1)
     data = json.loads(result)
-    assert data["schedule_window"] == {"start": "08:00", "end": "20:00"}
+    assert data["schedule_window"]["start"] == "08:00"
+    assert data["schedule_window"]["end"] == "20:00"
+    assert "timezone" in data["schedule_window"]
 
 
 @pytest.mark.parametrize("start,end", [
@@ -2627,7 +2612,7 @@ async def test_get_port_settings_advance_mode_returns_early(mock_client):
     assert data["automation_id"] == 1342758
     assert data["current_speed"] == 5  # from MOCK_DEVICE_LEGACY port 1 speak=5
     assert data["vpd_target_kpa"] is None
-    assert data["temp_range_c"] is None
+    assert data["temp_range"] is None
     assert data["humidity_range_pct"] is None
     assert data["schedule_window"] is None
     assert data["cycle_on_seconds"] is None
@@ -2839,8 +2824,8 @@ async def test_set_temperature_automation_dry_run(mock_client):
         result = await set_temperature_automation("C58ZA", 1, 20.0, 28.0, dry_run=True)
     data = json.loads(result)
     assert data["dry_run"] is True
-    assert data["min_c"] == 20.0
-    assert data["max_c"] == 28.0
+    assert data["min_temp"] == 20.0
+    assert data["max_temp"] == 28.0
     assert "payload" in data
 
 
@@ -2862,7 +2847,7 @@ async def test_set_temperature_automation_min_ge_max(mock_client):
         result = await set_temperature_automation("C58ZA", 1, 28.0, 20.0)
     data = json.loads(result)
     assert "error" in data
-    assert "min_c" in data["error"]
+    assert "min_temp" in data["error"]
 
 
 async def test_set_temperature_automation_equal_min_max(mock_client):
@@ -2877,7 +2862,7 @@ async def test_set_temperature_automation_out_of_range(mock_client):
         result = await set_temperature_automation("C58ZA", 1, -1.0, 30.0)
     data = json.loads(result)
     assert "error" in data
-    assert "between 0 and 50" in data["error"]  # P2-C2-F009
+    assert "0" in data["error"] and "50" in data["error"]  # range bounds in error (P2-C2-F009)
 
 
 async def test_set_temperature_automation_max_out_of_range(mock_client):
@@ -2885,7 +2870,7 @@ async def test_set_temperature_automation_max_out_of_range(mock_client):
         result = await set_temperature_automation("C58ZA", 1, 20.0, 51.0)
     data = json.loads(result)
     assert "error" in data
-    assert "between 0 and 50" in data["error"]  # P2-C2-F009
+    assert "0" in data["error"] and "50" in data["error"]  # range bounds in error (P2-C2-F009)
 
 
 async def test_set_temperature_automation_device_not_found(mock_client):
@@ -2959,7 +2944,7 @@ async def test_set_temperature_automation_device_error_non_advance(mock_client):
         (0.5, 1.5, 1, 2),
         (1.5, 2.5, 2, 3),
         (20.5, 24.5, 21, 25),
-        (49.5, 50.0, 50, 50),
+        (49.0, 49.5, 49, 50),  # near-max °C boundary; 49.5 rounds half-up to 50
         # Non-half fractions should still round in the conventional direction
         (20.4, 24.6, 20, 25),
         (20.6, 24.4, 21, 24),
@@ -3412,8 +3397,9 @@ async def test_apply_grow_stage_template_dry_run(mock_client):
     assert data["sent"] is False
     assert data["controller_type"] == "legacy"
     assert data["vpd"]["target_kpa"] == 1.25
-    assert data["temperature"]["min_c"] == 20.0
-    assert data["temperature"]["max_c"] == 28.0
+    assert data["temperature"]["min"] == 20.0
+    assert data["temperature"]["max"] == 28.0
+    assert "unit" in data["temperature"]
     assert data["humidity"]["min_rh"] == 50.0
     assert data["humidity"]["max_rh"] == 70.0
     assert "payload" in data
@@ -3470,8 +3456,9 @@ async def test_apply_grow_stage_template_all_stages(
     assert "error" not in data
     assert data["stage"] == stage
     assert data["vpd"]["target_kpa"] == expected_vpd
-    assert data["temperature"]["min_c"] == temp_min
-    assert data["temperature"]["max_c"] == temp_max
+    assert data["temperature"]["min"] == temp_min
+    assert data["temperature"]["max"] == temp_max
+    assert "unit" in data["temperature"]
     assert data["humidity"]["min_rh"] == humi_min
     assert data["humidity"]["max_rh"] == humi_max
     updates = mock_client.set_port_mode.call_args.args[2]

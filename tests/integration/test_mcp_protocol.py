@@ -67,7 +67,7 @@ SCHEMA_CASES: list[tuple[str, list[str], list[str]]] = [
     ("set_port_on", ["device_id", "port"], ["dry_run"]),
     ("set_port_off", ["device_id", "port"], ["dry_run"]),
     ("set_vpd_automation", ["device_id", "port", "target_vpd"], ["dry_run"]),
-    ("set_temperature_automation", ["device_id", "port", "min_c", "max_c"], ["dry_run"]),
+    ("set_temperature_automation", ["device_id", "port", "min_temp", "max_temp"], ["dry_run"]),
     ("set_humidity_automation", ["device_id", "port", "min_rh", "max_rh"], ["dry_run"]),
     (
         "set_port_mode",
@@ -259,7 +259,8 @@ async def test_protocol_call_get_device_reading_happy_path(mock_client: MagicMoc
             result = await session.call_tool("get_device_reading", {"device_id": "C58ZA"})
     assert result.isError is False
     data = json.loads(result.content[0].text)
-    assert "temperature_c" in data
+    assert "temperature" in data
+    assert "unit" in data
     assert "humidity" in data
     assert "vpd" in data
     assert "error" not in data

@@ -1,4 +1,5 @@
 import asyncio
+import calendar
 import dataclasses
 import json
 import logging
@@ -7,6 +8,7 @@ import re
 import sys
 import unicodedata
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from mcp.server.fastmcp import FastMCP
 
@@ -24,7 +26,6 @@ from ac_infinity_mcp.schema import (
     ACInfinityAPIError,
     ACInfinityAuthError,
     ACInfinityDeviceError,
-    ACIReading,
 )
 
 _VALID_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
@@ -259,6 +260,10 @@ async def discover_devices() -> str:
                 "port_count": d.get("devPortCount"),
                 "firmware_version": d.get("firmwareVersion"),
                 "hardware_version": d.get("hardwareVersion"),
+                "zone_id": _sanitize_api_string(d.get("zoneId") or "", 64) or None,
+                "temp_unit": _unit_label(
+                    _effective_unit(d.get("deviceInfo", {}).get("unit"))
+                ),
             }
             for d in devices
         ]
@@ -295,13 +300,13 @@ async def get_device_reading(device_id: str) -> str:
         JSON example::
 
             {
-              "timestamp": "2026-05-20T14:32:00Z",
               "device_id": "C58ZA",
               "device_name": "Towlie Tent",
-              "temperature_c": 24.3,
-              "temperature_f": 75.7,
+              "temperature": 75.7,
+              "unit": "°F",
               "humidity": 58.2,
               "vpd": 1.31,
+              "timestamp": "2026-05-20T09:32:00 CDT",
               "ports": [
                 {"port": 1, "name": "Inline Fan", "speed": 5, "load": 0},
                 ...
@@ -309,6 +314,9 @@ async def get_device_reading(device_id: str) -> str:
               "external_sensors": []
             }
 
+        Temperature and timestamp use the device's own unit preference and timezone
+        (from ``deviceInfo.unit`` and ``zoneId`` in the API response). Devices
+        without a configured timezone fall back to UTC.
         ``external_sensors`` excludes phantom entries (API-reported sensor slots
         with no physical hardware connected — see API Quirk 20).
         On failure returns ``{"error": "...", "detail": "..."}``.
@@ -321,9 +329,22 @@ async def get_device_reading(device_id: str) -> str:
             return json.dumps({"error": f"Device {device_id} not found"})
 
         parsed = _client().parse_device_data(device)
-        reading = ACIReading(**parsed)
+        tz = _effective_tz(parsed.get("zone_id"))
+        unit = _effective_unit(parsed.get("temp_unit_raw"))
 
-        return json.dumps(reading.to_dict(), indent=2)
+        output = {
+            "device_id": device_id,
+            "device_name": parsed.get("device_name"),
+            "temperature": _to_preferred_temp(parsed.get("temperature_c", 0.0), unit),
+            "unit": _unit_label(unit),
+            "humidity": parsed.get("humidity"),
+            "vpd": parsed.get("vpd"),
+            "timestamp": _utc_iso_to_local(parsed.get("timestamp"), tz),
+            "ports": parsed.get("ports", []),
+            "external_sensors": parsed.get("external_sensors", []),
+        }
+
+        return json.dumps(output, indent=2)
 
     except ACInfinityAuthError as e:
         logger.warning("Auth error in get_device_reading: %s", e)
@@ -365,6 +386,8 @@ async def get_historical_readings(
         time_start: Optional UTC time filter in HH:MM format (e.g., "16:00").
             If provided, only readings at or after this time are returned.
             Invalid HH:MM strings return a structured error.
+            Note: time_start/time_end filters are in UTC. Use discover_devices
+            to get the device's timezone for conversion.
         time_end: Optional UTC time filter in HH:MM format (e.g., "16:15").
             If provided, only readings at or before this time are returned.
             Invalid HH:MM strings return a structured error.
@@ -420,7 +443,11 @@ async def get_historical_readings(
         if not device:
             return json.dumps({"error": f"Device {device_id} not found"})
 
-        import calendar
+        zone_id = device.get("zoneId")
+        temp_unit_raw = device.get("deviceInfo", {}).get("unit")
+        tz = _effective_tz(zone_id)
+        unit = _effective_unit(temp_unit_raw)
+
         start_ts = int(calendar.timegm(start.timetuple()))
         end_ts = int(calendar.timegm(end.replace(hour=23, minute=59, second=59).timetuple()))
 
@@ -463,9 +490,21 @@ async def get_historical_readings(
                 sampled, time_start, time_end
             )
 
+        # Convert per-reading temperature and timestamp to preferred unit/timezone.
+        # temperature_c is kept in the dict for apply_sampling/average_readings to work
+        # on the raw records; we project to preferred unit in the output only.
+        output_readings = [
+            {
+                **{k: v for k, v in r.items() if k not in ("temperature_c", "temperature_f")},
+                "temperature": _to_preferred_temp(r.get("temperature_c", 0.0), unit),
+                "unit": _unit_label(unit),
+                "timestamp": _utc_iso_to_local(r.get("timestamp"), tz),
+            }
+            for r in sampled
+        ]
+
         if sampled:
             temps_c = [r.get("temperature_c", 0) for r in sampled if "temperature_c" in r]
-            temps_f = [r.get("temperature_f", 0) for r in sampled if "temperature_f" in r]
             humidities = [r.get("humidity", 0) for r in sampled if "humidity" in r]
             vpds = [r.get("vpd", 0) for r in sampled if "vpd" in r]
 
@@ -485,19 +524,19 @@ async def get_historical_readings(
                 if any(s > 0 for s in speeds)
             }
 
+            temps_preferred = [_to_preferred_temp(tc, unit) for tc in temps_c]
             stats = {
                 "readings_count": len(sampled),
                 "sample_interval": sample_interval,
                 "date_range": {"start": start_date, "end": end_date},
-                "temperature_c": {
-                    "min": round(min(temps_c), 2) if temps_c else None,
-                    "avg": round(sum(temps_c) / len(temps_c), 2) if temps_c else None,
-                    "max": round(max(temps_c), 2) if temps_c else None,
-                },
-                "temperature_f": {
-                    "min": round(min(temps_f), 2) if temps_f else None,
-                    "avg": round(sum(temps_f) / len(temps_f), 2) if temps_f else None,
-                    "max": round(max(temps_f), 2) if temps_f else None,
+                "temperature": {
+                    "min": round(min(temps_preferred), 2) if temps_preferred else None,
+                    "avg": (
+                        round(sum(temps_preferred) / len(temps_preferred), 2)
+                        if temps_preferred else None
+                    ),
+                    "max": round(max(temps_preferred), 2) if temps_preferred else None,
+                    "unit": _unit_label(unit),
                 },
                 "humidity": {
                     "min": round(min(humidities), 2) if humidities else None,
@@ -516,7 +555,7 @@ async def get_historical_readings(
 
         response: dict = {
             "device_id": device_id,
-            "readings": sampled,
+            "readings": output_readings,
             "statistics": stats,
         }
         if dropped_readings:
@@ -654,11 +693,18 @@ async def get_all_device_readings() -> str:
             device_id = device.get("devCode")
             try:
                 parsed = _client().parse_device_data(device)
-                reading = ACIReading(**parsed)
+                tz = _effective_tz(parsed.get("zone_id"))
+                unit = _effective_unit(parsed.get("temp_unit_raw"))
                 readings.append({
                     "device_id": device_id,
-                    "device_name": device.get("devName"),
-                    **reading.to_dict(),
+                    "device_name": parsed.get("device_name"),
+                    "temperature": _to_preferred_temp(parsed.get("temperature_c", 0.0), unit),
+                    "unit": _unit_label(unit),
+                    "humidity": parsed.get("humidity"),
+                    "vpd": parsed.get("vpd"),
+                    "timestamp": _utc_iso_to_local(parsed.get("timestamp"), tz),
+                    "ports": parsed.get("ports", []),
+                    "external_sensors": parsed.get("external_sensors", []),
                 })
             except Exception as e:
                 readings.append({
@@ -705,15 +751,21 @@ async def get_environment_health(device_id: str, stage: str = "veg") -> str:
             valid = ", ".join(STAGE_TARGETS)
             return json.dumps({"error": f"Unknown stage: {stage}. Valid: {valid}"})
 
-        reading_json = await get_device_reading(device_id)
-        reading = json.loads(reading_json)
-        if "error" in reading:
-            return json.dumps(reading)
+        devices = await asyncio.to_thread(_client().get_devices)
+        device = next((d for d in devices if d.get("devCode") == device_id), None)
+        if not device:
+            return json.dumps({"error": f"Device {device_id} not found"})
 
-        health = calculate_health_score(reading, stage)
+        parsed = _client().parse_device_data(device)  # has temperature_c — analytics safe
+        temp_unit_raw = parsed.get("temp_unit_raw")
+        unit = _effective_unit(temp_unit_raw)
+
+        health = calculate_health_score(parsed, stage)  # reads temperature_c — unchanged
         result = dataclasses.asdict(health)
         result["device_id"] = device_id
         result["stage"] = stage
+        result["temperature"] = _to_preferred_temp(parsed.get("temperature_c", 0.0), unit)
+        result["unit"] = _unit_label(unit)
         return json.dumps(result, indent=2)
 
     except ACInfinityAuthError as e:
@@ -754,23 +806,56 @@ async def detect_environment_trends(device_id: str, days: int = 7) -> str:
         if not 1 <= days <= 30:
             return json.dumps({"error": "days must be between 1 and 30"})
 
+        devices = await asyncio.to_thread(_client().get_devices)
+        device = next((d for d in devices if d.get("devCode") == device_id), None)
+        if not device:
+            return json.dumps({"error": f"Device {device_id} not found"})
+
+        dev_id = device.get("devId")
+        temp_unit_raw = device.get("deviceInfo", {}).get("unit")
+        unit = _effective_unit(temp_unit_raw)
+
         today = datetime.now(UTC).replace(tzinfo=None)
-        start_date = (today - timedelta(days=days)).strftime("%Y-%m-%d")
-        end_date = today.strftime("%Y-%m-%d")
+        start_dt = today - timedelta(days=days)
+        start_ts = int(calendar.timegm(start_dt.timetuple()))
+        end_ts = int(calendar.timegm(today.replace(hour=23, minute=59, second=59).timetuple()))
 
-        hist_json = await get_historical_readings(device_id, start_date, end_date, "1h")
-        hist = json.loads(hist_json)
-        if "error" in hist:
-            return json.dumps(hist)
+        port_names: dict[int, str] = {}
+        for p in device.get("deviceInfo", {}).get("ports", []):
+            pn = p.get("port")
+            if pn is not None:
+                port_names[pn] = p.get("portName", f"Port {pn}")
 
-        readings = hist.get("readings", [])
-        trends = detect_trends(readings, days)
+        raw_records = await asyncio.to_thread(
+            _client().get_historical_data, dev_id, start_ts, end_ts
+        ) if dev_id else []
+        readings = [
+            _client().parse_history_record(r, port_names=port_names)
+            for r in (raw_records or [])
+        ]
+        readings = apply_sampling(readings, "1h")
+
+        if not readings:
+            return json.dumps({"error": f"No readings available for device {device_id}"})
+
+        trends = detect_trends(readings, days)  # reads temperature_c — analytics unchanged
+
+        trend_output = []
+        for t in trends:
+            d = dataclasses.asdict(t)
+            if d["metric"] == "temperature_c":
+                d["metric"] = "temperature"
+                d["slope"] = round(d["slope"] * 9 / 5, 4) if unit == "F" else d["slope"]
+                d["seven_day_projection"] = _to_preferred_temp(d["seven_day_projection"], unit)
+                d["slope_unit"] = f"{_unit_label(unit)}/hr"
+                d["projection_unit"] = _unit_label(unit)
+            trend_output.append(d)
 
         return json.dumps({
             "device_id": device_id,
             "days_analyzed": days,
             "readings_used": len(readings),
-            "trends": [dataclasses.asdict(t) for t in trends],
+            "trends": trend_output,
         }, indent=2)
 
     except ACInfinityAuthError as e:
@@ -801,10 +886,8 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
 
     Returns:
         JSON with per-port on_hours (total hours ON over the full period), off_hours,
-        transitions, avg_speed_when_running, uptime_pct, and peak_hour_utc (UTC hour
-        0–23 of highest activity, or null if the port never ran). If peak_hour_utc is
-        not null, describe it as 'most active around {peak_hour_utc}:00 UTC'; always
-        note that this is UTC time and growers should convert to their local timezone.
+        transitions, avg_speed_when_running, uptime_pct, and peak_hour_local
+        (device-local time string, e.g. '5:00 PM CDT', or null if the port never ran).
         ports_excluded_count is the number of ports removed by the ghost-port filter
         (constant 100%% uptime with no load, or auto-named Port N with < 1 hour/day
         average activity). The human_summary field already includes a brief note about
@@ -816,47 +899,42 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         - When presenting on_hours to a grower, translate it from raw hours to natural
           language, e.g.: "The fan ran for 36.0 hours over the past 3 days (about 50%
           of the time)." Do NOT describe on_hours as hours per day.
+        - peak_hour_local is already in device-local time (e.g. '5:00 PM CDT').
     """
     try:
         if not 1 <= days <= 30:
             return json.dumps({"error": "days must be between 1 and 30"})
 
+        devices = await asyncio.to_thread(_client().get_devices)
+        device = next((d for d in devices if d.get("devCode") == device_id), None)
+        if not device:
+            return json.dumps({"error": f"Device {device_id} not found"})
+
+        dev_id = device.get("devId")
+        zone_id = device.get("zoneId")
+        tz = _effective_tz(zone_id)
+
+        # port_loads for ghost-port Rule A filter
+        port_loads: dict[int, int] = {}
+        port_names: dict[int, str] = {}
+        for p in device.get("deviceInfo", {}).get("ports", []):
+            pn = p.get("port")
+            if pn is not None:
+                port_loads[pn] = p.get("portsLoad") or 0
+                port_names[pn] = p.get("portName", f"Port {pn}")
+
         today = datetime.now(UTC).replace(tzinfo=None)
-        start_date = (today - timedelta(days=days)).strftime("%Y-%m-%d")
-        end_date = today.strftime("%Y-%m-%d")
+        start_ts = int(calendar.timegm((today - timedelta(days=days)).timetuple()))
+        end_ts = int(calendar.timegm(today.replace(hour=23, minute=59, second=59).timetuple()))
 
-        hist_json = await get_historical_readings(device_id, start_date, end_date, "raw")
-        hist = json.loads(hist_json)
-        if "error" in hist:
-            return json.dumps(hist)
-
-        readings = hist.get("readings", [])
-
-        # Supplementary call for port load data (used by ghost-port Rule A filter)
-        port_loads: dict[int, int] | None = None
-        try:
-            devices = await asyncio.to_thread(_client().get_devices)
-            device = next((d for d in devices if d.get("devCode") == device_id), None)
-            if device:
-                port_loads = {}
-                for p in device.get("deviceInfo", {}).get("ports", []):
-                    pn = p.get("port")
-                    if isinstance(pn, int):
-                        port_loads[pn] = p.get("portsLoad") or 0
-                if not port_loads:
-                    port_loads = None  # belt-and-suspenders; analytics.py also normalizes
-            else:
-                port_loads = None
-        except ACInfinityAuthError:
-            raise  # auth failure = no valid token, cannot return any data
-        except Exception as e:
-            # ACInfinityAPIError or unexpected error: degrade gracefully, disable Rule A
-            logger.warning(
-                "Could not fetch port loads for %s: %s",
-                device_id.replace("\n", "\\n"),
-                type(e).__name__,
-            )
-            port_loads = None
+        raw_records = await asyncio.to_thread(
+            _client().get_historical_data, dev_id, start_ts, end_ts
+        ) if dev_id else []
+        readings = [
+            _client().parse_history_record(r, port_names=port_names)
+            for r in (raw_records or [])
+        ]
+        # No sampling — build_activity_report needs raw granularity
 
         unique_port_count = len({
             p["port"]
@@ -865,14 +943,39 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
             if isinstance(p.get("port"), int)
         })
 
-        result = build_activity_report(readings, days=days, port_loads=port_loads)
+        result = build_activity_report(
+            readings, days=days, port_loads=port_loads if port_loads else None
+        )
         ports_excluded_count = max(0, unique_port_count - len(result))
+
+        # Build output with peak_hour_local instead of peak_hour_utc
+        port_dicts = [
+            {
+                "port": p.port,
+                "name": p.name,
+                "on_hours": p.on_hours,
+                "off_hours": p.off_hours,
+                "transitions": p.transitions,
+                "avg_speed_when_running": p.avg_speed_when_running,
+                "uptime_pct": p.uptime_pct,
+                "peak_hour_local": (
+                    _utc_hour_to_local(p.peak_hour_utc, tz)
+                    if p.peak_hour_utc is not None else None
+                ),
+            }
+            for p in result
+        ]
 
         day_word = "day" if days == 1 else "days"
         if result:
             port_lines = "; ".join(
-                f"{p.name} (Port {p.port}) ran {p.uptime_pct}% uptime ({p.on_hours}h total)"
-                for p in result
+                f"{p['name']} (Port {p['port']}) ran {p['uptime_pct']}% uptime "
+                f"({p['on_hours']}h total)"
+                + (
+                    f", most active around {p['peak_hour_local']}"
+                    if p["peak_hour_local"] else ""
+                )
+                for p in port_dicts
             )
             port_word = "port" if ports_excluded_count == 1 else "ports"
             excl = (
@@ -896,7 +999,7 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
             "device_id": device_id,
             "days_analyzed": days,
             "readings_used": len(readings),
-            "ports": [dataclasses.asdict(p) for p in result],
+            "ports": port_dicts,
             "ports_excluded_count": ports_excluded_count,
             "human_summary": human_summary,
         }, indent=2)
@@ -1010,6 +1113,56 @@ def _sanitize_api_string(value: str | None, max_len: int = 64) -> str:
     )
     cleaned = cleaned[:max_len]
     return cleaned if cleaned else "(unnamed)"
+
+
+# ============ Timezone and Unit Helpers ============
+
+
+def _effective_tz(zone_id: str | None) -> ZoneInfo:
+    """Return a ZoneInfo for the given IANA zone string, or UTC on any error."""
+    if zone_id:
+        try:
+            return ZoneInfo(_sanitize_api_string(zone_id, 64))
+        except (ZoneInfoNotFoundError, ValueError, KeyError):
+            pass
+    return ZoneInfo("UTC")
+
+
+def _effective_unit(unit_raw: int | None) -> str:
+    """Return 'C' for Celsius devices (unit=1) or 'F' for all others."""
+    return "C" if unit_raw == 1 else "F"
+
+
+def _to_preferred_temp(c: float, unit: str) -> float:
+    """Convert a Celsius value to the preferred unit, rounded to 1 decimal place."""
+    return round(c * 9 / 5 + 32, 1) if unit == "F" else round(c, 1)
+
+
+def _unit_label(unit: str) -> str:
+    """Return the display label for the given unit code."""
+    return "°F" if unit == "F" else "°C"
+
+
+def _utc_iso_to_local(utc_iso: str | None, tz: ZoneInfo) -> str | None:
+    """Convert a UTC ISO 8601 string to a local timezone string, or None if input is None."""
+    if not utc_iso:
+        return None
+    dt = datetime.fromisoformat(utc_iso.rstrip("Z")).replace(tzinfo=UTC)
+    return dt.astimezone(tz).strftime("%Y-%m-%dT%H:%M:%S %Z")
+
+
+def _utc_hour_to_local(utc_hour: int, tz: ZoneInfo) -> str:
+    """Convert a UTC integer hour (0–23) to a local time string like '5:00 PM CDT'.
+
+    Uses floor-of-whole-hours UTC offset. Sub-hour offsets (UTC+5:30, UTC-3:30)
+    display the floor-whole-hours equivalent — accepted per Quirk 23.
+    """
+    offset_hours = int(datetime.now(tz).utcoffset().total_seconds() // 3600)  # type: ignore[union-attr]
+    local_hour = (utc_hour + offset_hours) % 24
+    period = "AM" if local_hour < 12 else "PM"
+    display_hour = local_hour % 12 or 12
+    tz_name = datetime.now(tz).strftime("%Z")
+    return f"{display_hour}:00 {period} {tz_name}"
 
 
 async def _check_advance_mode(dev_id: str | None, port: int, fallback: str) -> str:
@@ -1433,7 +1586,7 @@ async def get_port_settings(device_id: str, port: int) -> str:
                 "current_speed": current_speed,
                 "speed_target": None,
                 "vpd_target_kpa": None,
-                "temp_range_c": None,
+                "temp_range": None,
                 "humidity_range_pct": None,
                 "schedule_window": None,
                 "cycle_on_seconds": None,
@@ -1493,11 +1646,19 @@ async def get_port_settings(device_id: str, port: int) -> str:
                 logger.warning("targetVpd is non-numeric (%r) — returning null", raw)
                 vpd_target = None
 
+        _zone_id = device.get("zoneId")
+        _temp_unit_raw = device.get("deviceInfo", {}).get("unit")
+        _unit = _effective_unit(_temp_unit_raw)
+        _unit_lbl = _unit_label(_unit)
+
         temp_range = None
         if settings.get("activeLt") or settings.get("activeHt"):
+            min_c_raw = settings.get("devLt", 0)
+            max_c_raw = settings.get("devHt", 0)
             temp_range = {
-                "min_c": settings.get("devLt", 0),
-                "max_c": settings.get("devHt", 0),
+                "min": _to_preferred_temp(float(min_c_raw), _unit),
+                "max": _to_preferred_temp(float(max_c_raw), _unit),
+                "unit": _unit_lbl,
             }
 
         humi_range = None
@@ -1513,24 +1674,46 @@ async def get_port_settings(device_id: str, port: int) -> str:
         # window — return None rather than {"start": "...", "end": None}, which
         # forces the caller to interpret a confusing partial state.
         schedule_window = (
-            {"start": sched_start, "end": sched_end}
+            {"start": sched_start, "end": sched_end, "timezone": _zone_id or "UTC"}
             if sched_start is not None and sched_end is not None
             else None
         )
 
+        # Build human_summary for non-ADVANCE path
+        mode_str = _decode_mode(settings.get("atType"))
+        _port_name_str = (
+            port_data.get("portName", f"Port {port}") if port_data else f"Port {port}"
+        )
+        if temp_range:
+            _t_min = temp_range["min"]
+            _t_max = temp_range["max"]
+            human_summary = (
+                f"Temperature automation: {_t_min}–{_t_max}{_unit_lbl}. "
+                f"Fan speeds up above {_t_max}{_unit_lbl} and slows below {_t_min}{_unit_lbl}."
+            )
+        elif vpd_target is not None:
+            human_summary = f"VPD automation: target {vpd_target} kPa."
+        elif humi_range:
+            human_summary = (
+                f"Humidity automation: {humi_range['min_pct']}–{humi_range['max_pct']}%."
+            )
+        else:
+            human_summary = f"Port is in {mode_str} mode."
+
         return json.dumps({
             "device_id": device_id,
             "port": port,
-            "mode": _decode_mode(settings.get("atType")),
+            "mode": mode_str,
             "speed_target": settings.get("onSpead", 0),
             "vpd_target_kpa": vpd_target,
-            "temp_range_c": temp_range,
+            "temp_range": temp_range,
             "humidity_range_pct": humi_range,
             "schedule_window": schedule_window,
             "cycle_on_seconds": settings.get("activeCycleOn", 0),
             "cycle_off_seconds": settings.get("activeCycleOff", 0),
             "timer_on_seconds": settings.get("acitveTimerOn", 0),
             "timer_off_seconds": settings.get("acitveTimerOff", 0),
+            "human_summary": human_summary,
         }, indent=2)
 
     except ACInfinityAuthError as e:
@@ -1952,54 +2135,89 @@ async def set_vpd_automation(
 async def set_temperature_automation(
     device_id: str,
     port: int,
-    min_c: float,
-    max_c: float,
+    min_temp: float,
+    max_temp: float,
     dry_run: bool = True,
 ) -> str:
     """Enable temperature automation on a port using the built-in temperature sensor.
 
     Switches the port to AUTO mode (atType=3) and sets the temperature thresholds.
-    The controller speeds up when temperature exceeds max_c and slows down below
-    min_c. Uses read-before-write. Defaults to dry_run=True.
+    The controller speeds up when temperature exceeds max_temp and slows down below
+    min_temp. Uses read-before-write. Defaults to dry_run=True.
+
+    Pass values in the device's preferred unit (°F or °C). Call ``discover_devices``
+    first to check ``temp_unit``. Valid range: 32–122°F or 0–50°C (device API cap = 50°C).
 
     Args:
         device_id: Device code from discover_devices (e.g. "C58ZA").
         port: 1-based port number.
-        min_c: Minimum temperature threshold in °C, range 0–50. Sub-degree values
-            are rounded to the nearest integer (e.g. 20.5 → 21).
-        max_c: Maximum temperature threshold in °C, range 0–50. Must exceed min_c.
+        min_temp: Minimum temperature threshold in the device's preferred unit.
             Sub-degree values are rounded to the nearest integer.
+        max_temp: Maximum temperature threshold in the device's preferred unit.
+            Must exceed min_temp. Sub-degree values are rounded to the nearest integer.
         dry_run: If True (default), returns the payload that would be sent
             without writing.
 
     Returns:
-        JSON with action, device_id, port, min_c, max_c, dry_run,
+        JSON with action, device_id, port, min_temp, max_temp, unit, dry_run,
         controller_type, sent, and payload (when dry_run=True).
         On failure returns ``{"error": "..."}``.
     """
     try:
         if port < 1:
             return json.dumps({"error": "port must be a positive integer"})
-        if not (0 <= min_c <= 50 and 0 <= max_c <= 50):
-            return json.dumps({"error": "min_c and max_c must be between 0 and 50°C"})
-        if min_c >= max_c:
-            return json.dumps({"error": "min_c must be less than max_c"})
 
         devices = await asyncio.to_thread(_client().get_devices)
         device = next((d for d in devices if d.get("devCode") == device_id), None)
         if not device:
             return json.dumps({"error": f"Device {device_id} not found"})
 
+        temp_unit_raw = device.get("deviceInfo", {}).get("unit")
+        unit = _effective_unit(temp_unit_raw)
+        unit_label = _unit_label(unit)
+
+        if unit == "F":
+            if not (32.0 <= min_temp <= 122.0 and 32.0 <= max_temp <= 122.0):
+                return json.dumps({
+                    "error": "min_temp and max_temp must be between 32–122°F for this device"
+                })
+            c_lo = round((min_temp - 32) * 5 / 9)
+            c_hi = round((max_temp - 32) * 5 / 9)
+        else:
+            if not (0.0 <= min_temp <= 50.0 and 0.0 <= max_temp <= 50.0):
+                return json.dumps({
+                    "error": "min_temp and max_temp must be between 0–50°C for this device"
+                })
+            c_lo = int(min_temp + 0.5)  # round-half-up (not banker's rounding)
+            c_hi = int(max_temp + 0.5)
+
+        if min_temp >= max_temp:
+            return json.dumps({"error": "min_temp must be less than max_temp"})
+
+        # Post-conversion collapse guard
+        if c_lo >= c_hi:
+            return json.dumps({
+                "error": (
+                    f"Temperature range too narrow — min and max round to the same °C value "
+                    f"({c_lo}°C). Widen the range by at least 2°F (or 1°C)."
+                )
+            })
+
         updates = {
             "atType": 3,  # AUTO mode
-            # raw °C integer — no ×100 scaling. int(x + 0.5) is round-half-up;
-            # round() uses banker's rounding and would silently disagree with
-            # the docstring at half-integer inputs (e.g. round(20.5) == 20).
-            "devLt": int(min_c + 0.5),
-            "devHt": int(max_c + 0.5),
+            # raw °C integer — no ×100 scaling. Converted above with round() (banker's rounding)
+            # which is acceptable since we control the conversion; edge cases handled by
+            # the collapse guard above.
+            "devLt": c_lo,
+            "devHt": c_hi,
             "activeLt": 1,
             "activeHt": 1,
         }
+        # When °F device, also send the F values for informational storage
+        if unit == "F":
+            updates["devLtf"] = round(min_temp)
+            updates["devHtf"] = round(max_temp)
+
         write_result = await asyncio.to_thread(
             _client().set_port_mode, device, port, updates, dry_run
         )
@@ -2008,11 +2226,12 @@ async def set_temperature_automation(
             return _ai_plus_unsupported_error(device_id, port, write_result["controller_type"])
 
         response: dict = {
-            "action": f"set port {port} temperature automation {min_c}–{max_c}°C",
+            "action": f"set port {port} temperature automation {min_temp}–{max_temp}{unit_label}",
             "device_id": device_id,
             "port": port,
-            "min_c": min_c,
-            "max_c": max_c,
+            "min_temp": min_temp,
+            "max_temp": max_temp,
+            "unit": unit_label,
             "dry_run": write_result["dry_run"],
             "controller_type": write_result["controller_type"],
             "sent": write_result["sent"],
@@ -2452,6 +2671,10 @@ async def apply_grow_stage_template(
     if write_result.get("ai_plus_write_unsupported"):
         return _ai_plus_unsupported_error(device_id, port, write_result["controller_type"])
 
+    _temp_unit_raw = device.get("deviceInfo", {}).get("unit")
+    _unit = _effective_unit(_temp_unit_raw)
+    _unit_lbl = _unit_label(_unit)
+
     response: dict = {
         "action": "apply grow stage template",
         "device_id": device_id,
@@ -2461,7 +2684,11 @@ async def apply_grow_stage_template(
         "controller_type": write_result["controller_type"],
         "sent": write_result["sent"],
         "vpd": {"target_kpa": target_vpd},
-        "temperature": {"min_c": temp_min, "max_c": temp_max},
+        "temperature": {
+            "min": _to_preferred_temp(temp_min, _unit),
+            "max": _to_preferred_temp(temp_max, _unit),
+            "unit": _unit_lbl,
+        },
         "humidity": {"min_rh": humi_min, "max_rh": humi_max},
     }
     if write_result["dry_run"]:
@@ -2632,12 +2859,19 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
             begin_str = None
             end_str = None
 
+        _adv_zone_id = device.get("zoneId")
+        _tz_label = _adv_zone_id or "unknown"
+        _tz_suffix = (
+            f" ({_tz_label})" if _adv_zone_id
+            else " (timezone unknown — times are device-local)"
+        )
+
         if len(port_groups) == 1:
             speed = port_groups[0]["on_speed"]
             if is_scheduled and begin_str and end_str:
                 human_summary = (
-                    f"'{name}' runs at speed {speed} from {begin_str} to {end_str}, "
-                    f"currently {state_str}."
+                    f"'{name}' runs at speed {speed} from {begin_str} to {end_str}"
+                    f"{_tz_suffix}, currently {state_str}."
                 )
             else:
                 human_summary = (
@@ -2658,7 +2892,9 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
                 else "multiple ports"
             )
             schedule_suffix = (
-                f" from {begin_str} to {end_str}" if is_scheduled and begin_str and end_str else ""
+                f" from {begin_str} to {end_str}{_tz_suffix}"
+                if is_scheduled and begin_str and end_str
+                else ""
             )
             human_summary = (
                 f"'{name}' controls {port_list_str} at varying speeds.{schedule_suffix}"
@@ -2669,6 +2905,7 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
             "mode": "scheduled" if is_scheduled else "continuous",
             "begin_time": begin_str,
             "end_time": end_str,
+            "timezone": _tz_label,
         }
 
         return json.dumps({
