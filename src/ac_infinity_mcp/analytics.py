@@ -114,10 +114,10 @@ def calculate_health_score(reading: dict[str, Any], stage: str) -> HealthScore:
         top_recommendation = "All metrics within target range. No action needed."
     elif worst_metric == "vpd":
         if vpd < vpd_low:
-            top_recommendation = "VPD is low — lower fan speed or increase humidity to raise VPD."
+            top_recommendation = "VPD is low — lower humidity or raise temperature to increase VPD."
         else:
             top_recommendation = (
-                "VPD is high — increase air circulation or reduce humidity to lower VPD."
+                "VPD is high — raise humidity or lower temperature to reduce VPD."
             )
     elif worst_metric == "temp":
         if temp_c < temp_low:
