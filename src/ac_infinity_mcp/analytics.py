@@ -5,6 +5,7 @@ Pure functions — no API calls. All data comes from client.py responses.
 
 from __future__ import annotations
 
+import re
 import statistics
 from dataclasses import dataclass
 from datetime import datetime
@@ -209,13 +210,19 @@ def detect_trends(readings: list[dict[str, Any]], days: int) -> list[TrendReport
 
 
 def build_activity_report(
-    readings: list[dict[str, Any]], days: int = 1
+    readings: list[dict[str, Any]],
+    days: int = 1,
+    port_loads: dict[int, int] | None = None,
 ) -> list[ActivityReport]:
     """Build per-port runtime activity report from parsed history readings.
 
     Each reading is treated as one equal time slice.
     on_hours/off_hours are cumulative hours over the full ``days`` window.
     """
+    days = max(days, 1)  # defense-in-depth: prevents ZeroDivisionError in Rule B
+    if not port_loads:
+        # normalizes {} to None — empty dict would enable Rule A with all-zero defaults
+        port_loads = None
     if not readings:
         return []
 
@@ -292,4 +299,18 @@ def build_activity_report(
             )
         )
 
-    return reports
+    filtered: list[ActivityReport] = []
+    for rep in reports:
+        # Rule A: constant-100%-uptime ghost port with no current draw
+        if (
+            rep.transitions == 0
+            and rep.uptime_pct == 100.0
+            and port_loads is not None
+            and port_loads.get(rep.port, 0) == 0
+        ):
+            continue
+        # Rule B: auto-named port with < 1 hour/day average activity
+        if re.match(r"^Port \d+$", str(rep.name)) and (rep.on_hours / days) < 1.0:
+            continue
+        filtered.append(rep)
+    return filtered

@@ -805,6 +805,11 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         0–23 of highest activity, or null if the port never ran). If peak_hour_utc is
         not null, describe it as 'most active around {peak_hour_utc}:00 UTC'; always
         note that this is UTC time and growers should convert to their local timezone.
+        ports_excluded_count is the number of ports removed by the ghost-port filter
+        (constant 100%% uptime with no load, or auto-named Port N with < 1 hour/day
+        average activity). The human_summary field already includes a brief note about
+        excluded ports when ports_excluded_count > 0. Do not repeat the exclusion count
+        in prose response.
 
     Presentation guidance:
         - Always refer to ports as 'Name (Port N)', e.g., 'Exhaust Fan (Port 3)'.
@@ -826,13 +831,74 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
             return json.dumps(hist)
 
         readings = hist.get("readings", [])
-        ports = build_activity_report(readings, days=days)
+
+        # Supplementary call for port load data (used by ghost-port Rule A filter)
+        port_loads: dict[int, int] | None = None
+        try:
+            devices = await asyncio.to_thread(_client().get_devices)
+            device = next((d for d in devices if d.get("devCode") == device_id), None)
+            if device:
+                port_loads = {}
+                for p in device.get("deviceInfo", {}).get("ports", []):
+                    pn = p.get("port")
+                    if isinstance(pn, int):
+                        port_loads[pn] = p.get("portsLoad") or 0
+                if not port_loads:
+                    port_loads = None  # belt-and-suspenders; analytics.py also normalizes
+            else:
+                port_loads = None
+        except ACInfinityAuthError:
+            raise  # auth failure = no valid token, cannot return any data
+        except Exception as e:
+            # ACInfinityAPIError or unexpected error: degrade gracefully, disable Rule A
+            logger.warning(
+                "Could not fetch port loads for %s: %s",
+                device_id.replace("\n", "\\n"),
+                type(e).__name__,
+            )
+            port_loads = None
+
+        unique_port_count = len({
+            p["port"]
+            for r in readings
+            for p in r.get("ports", [])
+            if isinstance(p.get("port"), int)
+        })
+
+        result = build_activity_report(readings, days=days, port_loads=port_loads)
+        ports_excluded_count = max(0, unique_port_count - len(result))
+
+        day_word = "day" if days == 1 else "days"
+        if result:
+            port_lines = "; ".join(
+                f"{p.name} (Port {p.port}) ran {p.uptime_pct}% uptime ({p.on_hours}h total)"
+                for p in result
+            )
+            port_word = "port" if ports_excluded_count == 1 else "ports"
+            excl = (
+                f" {ports_excluded_count} {port_word} excluded (no device activity detected)."
+                if ports_excluded_count > 0
+                else ""
+            )
+            human_summary = (
+                f"Analyzed {days} {day_word} of activity across {len(result)} active ports. "
+                f"{port_lines}.{excl}"
+            )
+        else:
+            human_summary = (
+                f"No active port activity was detected over the past {days} {day_word}. "
+                "This can happen if all devices were off, unplugged, or no scheduled activity "
+                "occurred during the analysis window. If you expected activity, verify that your "
+                "devices are connected and scheduled to run in the AC Infinity app."
+            )
 
         return json.dumps({
             "device_id": device_id,
             "days_analyzed": days,
             "readings_used": len(readings),
-            "ports": [dataclasses.asdict(p) for p in ports],
+            "ports": [dataclasses.asdict(p) for p in result],
+            "ports_excluded_count": ports_excluded_count,
+            "human_summary": human_summary,
         }, indent=2)
 
     except ACInfinityAuthError as e:

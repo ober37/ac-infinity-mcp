@@ -968,6 +968,24 @@ The Advance Automation API returns an `onTimeSwitch` field per group entry. It m
 (switch "off") means the time-window restriction is in effect (scheduled). See
 `_group_automations()` — `on_time_switch` key.
 
+### Quirk 22 — Ghost port filtering in `get_port_activity_report`
+
+The history API returns data for all ports on a controller, including ports with no device
+attached. These phantom ports produce misleading 100% uptime with zero power draw. Two filter
+rules are applied by `build_activity_report` to suppress them:
+
+- **Rule A**: A port is excluded when ALL of: `transitions == 0`, `uptime_pct == 100.0`,
+  `port_loads` is provided (not `None`), and `portsLoad == 0`. Rule A requires a supplementary
+  `get_devices` call to obtain `portsLoad` values; if that call fails, Rule A is disabled and
+  the port is kept.
+- **Rule B**: A port is excluded when its name matches the auto-generated pattern `^Port \d+$`
+  AND its average on-time is less than 1 hour per day. User-named ports are never excluded
+  by Rule B.
+
+The response includes `ports_excluded_count` (integer count of filtered ports) and
+`human_summary` (plain-English summary for growers). When `ports_excluded_count > 0`, the
+`human_summary` already contains a note about excluded ports — do not repeat the count in prose.
+
 ---
 
 ## v2.0 API Endpoints Reference
@@ -1269,7 +1287,9 @@ Detect linear trends in temperature, humidity, and VPD with a 7-day projection.
 ### `get_port_activity_report(device_id, days=7)`
 
 Build a per-port runtime activity report from historical data. Calls `get_historical_readings`
-internally then runs pure analytics calculations — no additional API calls.
+internally and makes a supplementary `get_devices` call to obtain `portsLoad` values for the
+ghost-port Rule A filter (see Quirk 22). If the supplementary call fails, Rule A is disabled
+and the report is still returned.
 
 **Parameters:**
 | Parameter | Type | Description |
@@ -1294,7 +1314,9 @@ internally then runs pure analytics calculations — no additional API calls.
       "uptime_pct": 52.1,
       "peak_hour_utc": 14
     }
-  ]
+  ],
+  "ports_excluded_count": 2,
+  "human_summary": "Analyzed 7 days of activity across 1 active ports. Inline Fan (Port 1) ran 52.1% uptime (12.5h total). 2 ports excluded (no device activity detected)."
 }
 ```
 
@@ -1304,6 +1326,8 @@ internally then runs pure analytics calculations — no additional API calls.
 - `avg_speed_when_running` — average `onSpead` value (1–10) across on-readings with non-zero speed
 - `uptime_pct` — `on_hours / (on_hours + off_hours) * 100`, rounded to 1 decimal
 - `peak_hour_utc` — UTC hour (0–23) with the most on-readings; `null` when port never ran (always_off case). Describe to growers as 'most active around {peak_hour_utc}:00 UTC' and remind them to convert to their local timezone.
+- `ports_excluded_count` — number of ports removed by the ghost-port filter (see Quirk 22). Do not repeat this count in prose when presenting `human_summary` to a grower.
+- `human_summary` — plain-English activity summary; includes an exclusion note when `ports_excluded_count > 0`. When `ports` is empty, contains a full explanation for the grower.
 
 ---
 

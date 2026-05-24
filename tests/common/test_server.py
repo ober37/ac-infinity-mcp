@@ -1235,6 +1235,197 @@ async def test_get_port_activity_report_cumulative_on_hours_multi_day(mock_clien
     assert port["uptime_pct"] == 100.0
 
 
+# ============ get_port_activity_report — ghost port filter (#86) ============
+
+def _make_port_readings_named(n: int, speed: int, on: bool, name: str, port: int = 1) -> list[dict]:
+    """Like _make_port_readings but with a configurable port name and port number."""
+    from datetime import datetime, timedelta
+    base = datetime(2024, 4, 18, 0, 0, 0)
+    return [
+        {
+            "timestamp": (base + timedelta(hours=i)).isoformat() + "Z",
+            "temperature_c": 24.0,
+            "humidity": 55.0,
+            "vpd": 1.4,
+            "ports": [{"port": port, "name": name, "speed": speed, "on": on}],
+        }
+        for i in range(n)
+    ]
+
+
+async def test_get_port_activity_report_has_new_fields(mock_client):
+    """Response includes ports_excluded_count and human_summary fields."""
+    readings = _make_port_readings(24, speed=5, on=True)
+    hist_payload = json.dumps({
+        "device_id": "C58ZA",
+        "readings": readings,
+        "statistics": {},
+    })
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        with patch("ac_infinity_mcp.server.get_historical_readings",
+                   return_value=hist_payload):
+            result = await get_port_activity_report("C58ZA", 1)
+    data = json.loads(result)
+    assert "ports_excluded_count" in data
+    assert "human_summary" in data
+    assert isinstance(data["ports_excluded_count"], int)
+    assert isinstance(data["human_summary"], str)
+
+
+async def test_get_port_activity_report_rule_a_ghost_excluded(mock_client):
+    """Rule A: constant 100% uptime + portsLoad=0 → port excluded."""
+    # Port 1 "Port 1": always on, 0 transitions, portsLoad=0 in device info
+    mock_client.get_devices.return_value = [{
+        "devCode": "C58ZA",
+        "deviceInfo": {
+            "ports": [{"port": 1, "portsLoad": 0}],
+        },
+    }]
+    readings = _make_port_readings_named(24, speed=5, on=True, name="Port 1", port=1)
+    hist_payload = json.dumps({
+        "device_id": "C58ZA",
+        "readings": readings,
+        "statistics": {},
+    })
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        with patch("ac_infinity_mcp.server.get_historical_readings",
+                   return_value=hist_payload):
+            result = await get_port_activity_report("C58ZA", 1)
+    data = json.loads(result)
+    assert data["ports"] == []
+    assert data["ports_excluded_count"] == 1
+    # When all ports are filtered, human_summary reports no active activity
+    assert "No active port activity" in data["human_summary"]
+
+
+async def test_get_port_activity_report_rule_a_not_excluded_with_load(mock_client):
+    """Rule A does NOT exclude a port that has portsLoad > 0."""
+    # mock_client already returns MOCK_DEVICE_LEGACY which has port 1 portsLoad=1
+    readings = _make_port_readings_named(24, speed=5, on=True, name="Port 1", port=1)
+    hist_payload = json.dumps({
+        "device_id": "C58ZA",
+        "readings": readings,
+        "statistics": {},
+    })
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        with patch("ac_infinity_mcp.server.get_historical_readings",
+                   return_value=hist_payload):
+            result = await get_port_activity_report("C58ZA", 1)
+    data = json.loads(result)
+    # Port 1 has portsLoad=1 in MOCK_DEVICE_LEGACY → Rule A does not fire
+    assert len(data["ports"]) == 1
+    assert data["ports_excluded_count"] == 0
+
+
+async def test_get_port_activity_report_all_ports_excluded(mock_client):
+    """All ports excluded → empty ports list with informative human_summary."""
+    # Two auto-named ports with < 1 hour/day activity over 3 days
+    # 2 on out of 72 total → on_hours/days = (2/72 * 24 * 3) / 3 = 0.67 < 1.0
+    from datetime import datetime, timedelta
+    base = datetime(2024, 4, 18, 0, 0, 0)
+    readings = []
+    for i in range(72):
+        on = i < 2  # first 2 readings on, rest off
+        readings.append({
+            "timestamp": (base + timedelta(hours=i)).isoformat() + "Z",
+            "temperature_c": 24.0,
+            "humidity": 55.0,
+            "vpd": 1.4,
+            "ports": [
+                {"port": 2, "name": "Port 2", "speed": 5 if on else 0, "on": on},
+                {"port": 3, "name": "Port 3", "speed": 5 if on else 0, "on": on},
+            ],
+        })
+    hist_payload = json.dumps({
+        "device_id": "C58ZA",
+        "readings": readings,
+        "statistics": {},
+    })
+    mock_client.get_devices.return_value = [{
+        "devCode": "C58ZA",
+        "deviceInfo": {
+            "ports": [
+                {"port": 2, "portsLoad": 0},
+                {"port": 3, "portsLoad": 0},
+            ],
+        },
+    }]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        with patch("ac_infinity_mcp.server.get_historical_readings",
+                   return_value=hist_payload):
+            result = await get_port_activity_report("C58ZA", 3)
+    data = json.loads(result)
+    assert data["ports"] == []
+    assert data["ports_excluded_count"] == 2
+    # human_summary should describe 0 active ports
+    assert "No active port activity" in data["human_summary"]
+
+
+async def test_get_port_activity_report_partial_exclusion(mock_client):
+    """One active port kept, one auto-named low-activity port excluded."""
+    from datetime import datetime, timedelta
+    base = datetime(2024, 4, 18, 0, 0, 0)
+    readings = []
+    for i in range(72):
+        # Port 1 "Inline Fan": on for all 72 readings (high activity)
+        # Port 2 "Port 2": on for first 2 readings only (low activity)
+        p2_on = i < 2
+        readings.append({
+            "timestamp": (base + timedelta(hours=i)).isoformat() + "Z",
+            "temperature_c": 24.0,
+            "humidity": 55.0,
+            "vpd": 1.4,
+            "ports": [
+                {"port": 1, "name": "Inline Fan", "speed": 5, "on": True},
+                {"port": 2, "name": "Port 2", "speed": 5 if p2_on else 0, "on": p2_on},
+            ],
+        })
+    hist_payload = json.dumps({
+        "device_id": "C58ZA",
+        "readings": readings,
+        "statistics": {},
+    })
+    # Port 1 has load > 0, port 2 has load = 0 (not relevant — Rule B fires first for Port 2)
+    mock_client.get_devices.return_value = [{
+        "devCode": "C58ZA",
+        "deviceInfo": {
+            "ports": [
+                {"port": 1, "portsLoad": 5},
+                {"port": 2, "portsLoad": 0},
+            ],
+        },
+    }]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        with patch("ac_infinity_mcp.server.get_historical_readings",
+                   return_value=hist_payload):
+            result = await get_port_activity_report("C58ZA", 3)
+    data = json.loads(result)
+    assert len(data["ports"]) == 1
+    assert data["ports"][0]["name"] == "Inline Fan"
+    assert data["ports_excluded_count"] == 1
+    assert "1 port excluded" in data["human_summary"]
+
+
+async def test_get_port_activity_report_get_devices_api_error_degrades_gracefully(mock_client):
+    """get_devices failure disables Rule A but still returns activity report."""
+    mock_client.get_devices.side_effect = ACInfinityAPIError("API error 500: server fault")
+    readings = _make_port_readings(24, speed=5, on=True)
+    hist_payload = json.dumps({
+        "device_id": "C58ZA",
+        "readings": readings,
+        "statistics": {},
+    })
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        with patch("ac_infinity_mcp.server.get_historical_readings",
+                   return_value=hist_payload):
+            result = await get_port_activity_report("C58ZA", 1)
+    data = json.loads(result)
+    # Should succeed despite get_devices failure — Rule A disabled, port is kept
+    assert "error" not in data
+    assert "ports" in data
+    assert "human_summary" in data
+
+
 # ============ set_port_speed ============
 
 MOCK_SET_PORT_MODE_DRY = {

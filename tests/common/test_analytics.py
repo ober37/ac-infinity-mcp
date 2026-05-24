@@ -272,7 +272,7 @@ def test_build_activity_report_always_on():
         }
         for h in range(10)
     ]
-    result = build_activity_report(readings)
+    result = build_activity_report(readings, port_loads={1: 5})
     assert len(result) == 1
     assert result[0].uptime_pct == 100.0
     assert result[0].off_hours == 0.0
@@ -320,7 +320,7 @@ def test_build_activity_report_avg_speed():
         }
         for h in range(4)
     ]
-    result = build_activity_report(readings)
+    result = build_activity_report(readings, port_loads={1: 5})
     assert result[0].avg_speed_when_running == 5.0
 
 
@@ -334,7 +334,7 @@ def test_build_activity_report_peak_hour_utc():
             "humidity": 60.0, "vpd": 1.24,
             "ports": [_port(1, "Fan", 5, True)],
         })
-    result = build_activity_report(readings)
+    result = build_activity_report(readings, port_loads={1: 5})
     assert result[0].peak_hour_utc == 14
 
 
@@ -353,7 +353,7 @@ def test_build_activity_report_multiple_ports():
         }
         for h in range(5)
     ]
-    result = build_activity_report(readings)
+    result = build_activity_report(readings, port_loads={1: 5, 2: 5})
     assert len(result) == 4
     assert [r.port for r in result] == [1, 2, 3, 4]
 
@@ -555,3 +555,129 @@ def test_build_activity_report_single_day_unchanged():
     assert result[0].on_hours == pytest.approx(24.0)
     assert result[0].off_hours == pytest.approx(0.0)
     assert result[0].uptime_pct == 100.0
+
+
+# ---- Issue #86: ghost port filter tests ----
+
+def test_build_activity_report_rule_a_excludes_ghost_constant() -> None:
+    """Rule A: port with 0 transitions, 100% uptime, portsLoad=0 is excluded."""
+    readings = [
+        {
+            "timestamp": _ts(h),
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [_port(1, "Port 1", 5, True)],
+        }
+        for h in range(24)
+    ]
+    result = build_activity_report(readings, days=1, port_loads={1: 0})
+    assert len(result) == 0
+
+
+@pytest.mark.parametrize(
+    "on_pattern,port_loads,expected_excluded",
+    [
+        # All on: 0 transitions, 100% uptime, load=0 → excluded
+        ([True] * 24, {1: 0}, True),
+        # One off at end: 1 transition, <100% uptime, load=0 → NOT excluded (has transition)
+        ([True] * 23 + [False], {1: 0}, False),
+        # All on, load > 0 → NOT excluded
+        ([True] * 24, {1: 5}, False),
+        # All on, port_loads=None → Rule A disabled → NOT excluded
+        ([True] * 24, None, False),
+        # All on, port_loads={} → normalized to None → NOT excluded
+        ([True] * 24, {}, False),
+    ],
+)
+def test_build_activity_report_rule_a_boundary(
+    on_pattern: list[bool],
+    port_loads: "dict[int, int] | None",
+    expected_excluded: bool,
+) -> None:
+    """Rule A boundary: all four conditions must be met for exclusion."""
+    readings = [
+        {
+            "timestamp": _ts(i % 24, day=25 + i // 24),
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [_port(1, "Port 1", 5 if on else 0, on)],
+        }
+        for i, on in enumerate(on_pattern)
+    ]
+    result = build_activity_report(readings, days=1, port_loads=port_loads)
+    if expected_excluded:
+        assert len(result) == 0
+    else:
+        assert len(result) == 1
+
+
+def test_build_activity_report_rule_b_excludes_low_activity_auto_named() -> None:
+    """Rule B: auto-named 'Port N' with < 1 hour/day average is excluded."""
+    # 2 on readings out of 72 total, days=3: on_hours/days = (2/72*24*3)/3 = 0.67 < 1.0
+    readings = (
+        [
+            {
+                "timestamp": _ts(i % 24, day=25 + i // 24),
+                "temperature_c": 24.0, "temperature_f": 75.2,
+                "humidity": 60.0, "vpd": 1.24,
+                "ports": [_port(1, "Port 1", 5, True)],
+            }
+            for i in range(2)
+        ]
+        + [
+            {
+                "timestamp": _ts(i % 24, day=25 + (i + 2) // 24),
+                "temperature_c": 24.0, "temperature_f": 75.2,
+                "humidity": 60.0, "vpd": 1.24,
+                "ports": [_port(1, "Port 1", 0, False)],
+            }
+            for i in range(70)
+        ]
+    )
+    result = build_activity_report(readings, days=3)
+    assert len(result) == 0
+
+
+def test_build_activity_report_rule_b_does_not_exclude_user_named() -> None:
+    """Rule B must not exclude a user-named port (name != 'Port N' pattern)."""
+    # Same low-activity scenario but with a custom name → should NOT be excluded
+    readings = (
+        [
+            {
+                "timestamp": _ts(i % 24, day=25 + i // 24),
+                "temperature_c": 24.0, "temperature_f": 75.2,
+                "humidity": 60.0, "vpd": 1.24,
+                "ports": [_port(1, "Humidifier", 5, True)],
+            }
+            for i in range(2)
+        ]
+        + [
+            {
+                "timestamp": _ts(i % 24, day=25 + (i + 2) // 24),
+                "temperature_c": 24.0, "temperature_f": 75.2,
+                "humidity": 60.0, "vpd": 1.24,
+                "ports": [_port(1, "Humidifier", 0, False)],
+            }
+            for i in range(70)
+        ]
+    )
+    result = build_activity_report(readings, days=3)
+    assert len(result) == 1
+    assert result[0].name == "Humidifier"
+
+
+def test_build_activity_report_empty_port_loads_normalized() -> None:
+    """port_loads={} is normalized to None so Rule A is disabled (no false exclusions)."""
+    readings = [
+        {
+            "timestamp": _ts(h),
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [_port(1, "Port 1", 5, True)],
+        }
+        for h in range(24)
+    ]
+    # port_loads={} means we don't have load data — Rule A must be disabled
+    result = build_activity_report(readings, days=1, port_loads={})
+    # Port 1 with 100% uptime and 0 transitions but port_loads={} → NOT excluded
+    assert len(result) == 1
