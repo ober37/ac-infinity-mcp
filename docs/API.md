@@ -1772,8 +1772,16 @@ structured conflict response instead of an error string. This response is return
 `set_port_speed`, `set_port_on`, `set_port_off`, `set_port_mode`, `set_vpd_automation`,
 `set_temperature_automation`, `set_humidity_automation`, and `apply_grow_stage_template`.
 
-The conflict response has three distinct paths depending on what the secondary automation
+The conflict response has four distinct paths depending on what the secondary automation
 lookup finds:
+
+**Auth-error path (secondary lookup raises `ACInfinityAuthError`):**
+```json
+{
+  "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+  "detail": "see server logs"
+}
+```
 
 **Normal path (governing automation found and enabled):**
 ```json
@@ -1876,8 +1884,9 @@ lookup finds:
 ```
 
 **Key field notes:**
+- **Auth-error path** — when `ACInfinityAuthError` is raised during the secondary automation lookup, none of the standard conflict fields (`conflict`, `options`, etc.) are present; only `error` and `detail` are returned. The caller must re-authenticate before retrying.
 - `active_automations` — list of `{"name": ..., "automation_id": ...}` objects for all enabled automations on this controller (empty list in all-disabled and degraded paths)
-- `human_summary` — plain-language summary suitable for display to the grower; always present
+- `human_summary` — plain-language summary suitable for display to the grower; always present in the normal/all-disabled/degraded paths (absent in auth-error path)
 - `suggested_reply` — pre-written reply text the LLM can use verbatim to inform the user what action it would take next; avoids exposing tool call syntax to the grower
   - Normal path: names the specific automation and its target speed; asks whether to break out or update the automation settings
   - All-disabled path: explains the stuck-in-automation-mode situation and offers to force-release via re-apply
