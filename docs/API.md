@@ -981,6 +981,14 @@ rules are applied by `build_activity_report` to suppress them:
 - **Rule B**: A port is excluded when its name matches the auto-generated pattern `^Port \d+$`
   AND its average on-time is less than 1 hour per day. User-named ports are never excluded
   by Rule B.
+- **Rule C**: A port is **flagged** (not excluded) when ALL of: `transitions == 0`,
+  `uptime_pct == 100.0`, and every observed running-speed record equals 1 (the decoded value
+  of the `0xF` toggle-on nibble — see Quirk 5). This pattern identifies toggle devices
+  (heaters, lights, humidifiers) where the history API always emits `0xF` regardless of actual
+  on/off state — the API conflates "configured speed" with "currently running" for these device
+  types. The port is kept in the `ports` list with `data_quality: "api_constant_speed"`.
+  `human_summary` includes a plain-English caveat. `on_hours` and `uptime_pct` for Rule C
+  ports are fabricated and must NOT be presented to growers as actual runtime.
 
 The response includes `ports_excluded_count` (integer count of filtered ports) and
 `human_summary` (plain-English summary for growers). When `ports_excluded_count > 0`, the
@@ -1312,11 +1320,23 @@ and the report is still returned.
       "transitions": 4,
       "avg_speed_when_running": 5.2,
       "uptime_pct": 52.1,
-      "peak_hour_utc": 14
+      "peak_hour_utc": 14,
+      "data_quality": null
+    },
+    {
+      "port": 2,
+      "name": "Heater",
+      "on_hours": 168.0,
+      "off_hours": 0.0,
+      "transitions": 0,
+      "avg_speed_when_running": 1.0,
+      "uptime_pct": 100.0,
+      "peak_hour_utc": null,
+      "data_quality": "api_constant_speed"
     }
   ],
-  "ports_excluded_count": 2,
-  "human_summary": "Analyzed 7 days of activity across 1 active ports. Inline Fan (Port 1) ran 52.1% uptime (12.5h total). 2 ports excluded (no device activity detected)."
+  "ports_excluded_count": 1,
+  "human_summary": "Analyzed 7 days of activity across 2 active ports. Inline Fan (Port 1) ran 52.1% uptime (12.5h total). Note: Heater (Port 2) shows constant-speed history — the AC Infinity app does not record actual on/off runtime for this device type (heaters, lights, humidifiers); treat its uptime figure as unreliable. 1 port excluded (no device activity detected)."
 }
 ```
 
@@ -1326,8 +1346,9 @@ and the report is still returned.
 - `avg_speed_when_running` — average `onSpead` value (1–10) across on-readings with non-zero speed
 - `uptime_pct` — `on_hours / (on_hours + off_hours) * 100`, rounded to 1 decimal
 - `peak_hour_utc` — UTC hour (0–23) with the most on-readings; `null` when port never ran (always_off case). Describe to growers as 'most active around {peak_hour_utc}:00 UTC' and remind them to convert to their local timezone.
+- `data_quality` — `null` for reliable ports. `"api_constant_speed"` when the history API always emits `0xF` (speed=1) for this port regardless of actual state (toggle devices: heaters, lights, humidifiers — see Quirk 5, Quirk 22 Rule C). When set, **do not present `on_hours` or `uptime_pct` to the grower as real runtime data**; instead say "The AC Infinity app does not record runtime for this device type."
 - `ports_excluded_count` — number of ports removed by the ghost-port filter (see Quirk 22). Do not repeat this count in prose when presenting `human_summary` to a grower.
-- `human_summary` — plain-English activity summary; includes an exclusion note when `ports_excluded_count > 0`. When `ports` is empty, contains a full explanation for the grower.
+- `human_summary` — plain-English activity summary; includes an exclusion note when `ports_excluded_count > 0`, and a caveat for any Rule C (constant-speed) ports. When `ports` is empty, contains a full explanation for the grower.
 
 ---
 
