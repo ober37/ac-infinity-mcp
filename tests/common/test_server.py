@@ -1829,6 +1829,7 @@ MOCK_SET_PORT_MODE_DRY = {
     "dry_run": True,
     "controller_type": "legacy",
     "sent": False,
+    "prior_mode_type": 2,
 }
 
 MOCK_SET_PORT_MODE_LIVE = {
@@ -1836,6 +1837,7 @@ MOCK_SET_PORT_MODE_LIVE = {
     "dry_run": False,
     "controller_type": "legacy",
     "sent": True,
+    "prior_mode_type": 2,
 }
 
 
@@ -1946,6 +1948,39 @@ async def test_set_port_speed_uses_asyncio_to_thread(mock_client):
     # asyncio.to_thread should have been called at least twice:
     # once for get_devices and once for set_port_mode
     assert mock_thread.call_count >= 2
+
+
+async def test_set_port_speed_off_mode_warning_modeType_0(mock_client):
+    """modeType=0 (uninitialised OFF) in prior state triggers a warning field."""
+    mock_result = {**MOCK_SET_PORT_MODE_DRY, "prior_mode_type": 0}
+    mock_client.set_port_mode.return_value = mock_result
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_speed("C58ZA", 2, 5, dry_run=True)
+    data = json.loads(result)
+    assert "warning" in data
+    assert "OFF mode" in data["warning"]
+    assert "set_port_mode" in data["warning"]
+
+
+async def test_set_port_speed_off_mode_warning_modeType_1(mock_client):
+    """modeType=1 (explicit OFF) in prior state triggers a warning field."""
+    mock_result = {**MOCK_SET_PORT_MODE_DRY, "prior_mode_type": 1}
+    mock_client.set_port_mode.return_value = mock_result
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_speed("C58ZA", 2, 5, dry_run=True)
+    data = json.loads(result)
+    assert "warning" in data
+    assert "OFF mode" in data["warning"]
+    assert "set_port_mode" in data["warning"]
+
+
+async def test_set_port_speed_no_warning_when_on_mode(mock_client):
+    """modeType=2 (ON) — no warning is included in the response."""
+    mock_client.set_port_mode.return_value = {**MOCK_SET_PORT_MODE_DRY, "prior_mode_type": 2}
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_speed("C58ZA", 2, 5, dry_run=True)
+    data = json.loads(result)
+    assert "warning" not in data
 
 
 # ============ set_port_on ============

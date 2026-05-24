@@ -1910,6 +1910,15 @@ async def set_port_speed(
         if write_result["dry_run"]:
             response["payload"] = write_result["payload"]
 
+        prior_mode_type = write_result.get("prior_mode_type")
+        if prior_mode_type in (0, 1):
+            port_name = _get_port_name_from_device(device, port)
+            response["warning"] = (
+                f"{port_name} is currently in OFF mode — speed was stored but the port "
+                "will not run until the mode is changed to ON. "
+                "Call set_port_mode with mode='ON' to activate it."
+            )
+
         return json.dumps(response, indent=2)
 
     except ACInfinityAuthError as e:
