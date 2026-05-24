@@ -336,18 +336,18 @@ def build_activity_report(
 
     filtered: list[ActivityReport] = []
     for rep in reports:
+        # Ports with the api_constant_speed caveat are never ghost-filtered — the caveat
+        # is the right signal for the grower, not silence. This must run before Rules A/D
+        # because both rules would otherwise filter the same toggle-hardware pattern.
+        if rep.data_quality == "api_constant_speed":
+            filtered.append(rep)
+            continue
         # Rule A: constant-100%-uptime ghost port with no current draw.
-        # Exempts confirmed toggle hardware (loadType 4/128) — those are flagged with
-        # data_quality="api_constant_speed" instead of filtered.
         if (
             rep.transitions == 0
             and rep.uptime_pct == 100.0
             and port_loads is not None
             and port_loads.get(rep.port, 0) == 0
-            and (
-                port_load_types is None
-                or port_load_types.get(rep.port, 0) not in _TOGGLE_LOAD_TYPES
-            )
         ):
             continue
         # Rule B (enhanced): auto-named port — low avg runtime OR zero load when data available
@@ -365,17 +365,12 @@ def build_activity_report(
         ):
             continue
         # Rule D: named port showing only toggle-speed history with no current draw.
-        # Exempts confirmed toggle hardware (loadType 4/128) — those ports are flagged
-        # with data_quality="api_constant_speed" instead of filtered, so growers still
-        # see their heater/light even when currently off.
+        # Toggle hardware that meets all four data_quality conditions was already returned
+        # above via the early-exit, so any port reaching this rule is a ghost artifact.
         if (
             port_loads is not None
             and port_loads.get(rep.port, 0) == 0
             and rep.avg_speed_when_running <= 1.0
-            and (
-                port_load_types is None
-                or port_load_types.get(rep.port, 0) not in _TOGGLE_LOAD_TYPES
-            )
         ):
             continue
         filtered.append(rep)

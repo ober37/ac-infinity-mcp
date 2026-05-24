@@ -1053,13 +1053,31 @@ def test_data_quality_not_100pct_uptime():
 
 
 def test_rule_d_exempts_toggle_hardware_currently_off():
-    """Toggle hardware (loadType=4) with portsLoad=0 survives Rule D; appears with data_quality."""
+    """Toggle hardware (loadType=4) with portsLoad=0 and the 100%-uptime artifact survives via
+    the data_quality early-exit and appears with the api_constant_speed caveat."""
     readings = _toggle_readings(speed=1, on=True)
     result = build_activity_report(
         readings, days=3, port_loads={2: 0}, port_load_types={2: 4}
     )
-    assert len(result) == 1, "Toggle hardware must survive Rule D even when currently off"
+    assert len(result) == 1, "Toggle hardware must survive even when currently off"
     assert result[0].data_quality == "api_constant_speed"
+
+
+def test_rule_d_filters_toggle_hardware_with_artifact_transitions():
+    """Toggle hardware with spurious transitions (API co-runs with other ports) is filtered.
+
+    Real scenario: heater/humidifier ports emit speed=1 ghost readings whenever any other
+    port on the device runs — creating transitions>0 and sub-100% uptime.  These ports have
+    no actual load and must be filtered, not preserved.
+    """
+    # 4 on readings then 68 off — produces transitions=2, uptime<100%, avg_speed=1.0
+    readings = _toggle_readings(speed=1, on=True, count=4) + _toggle_readings(
+        speed=0, on=False, count=68
+    )
+    result = build_activity_report(
+        readings, days=3, port_loads={2: 0}, port_load_types={2: 4}
+    )
+    assert len(result) == 0, "Toggle ghost with artifact transitions must be filtered by Rule D"
 
 
 def test_rule_d_still_filters_non_toggle_ghost_ports():
