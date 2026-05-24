@@ -823,9 +823,8 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         - When presenting on_hours to a grower, translate it from raw hours to natural
           language, e.g.: "The fan ran for 36.0 hours over the past 3 days (about 50%
           of the time)." Do NOT describe on_hours as hours per day.
-        - When data_quality is "api_constant_speed", do NOT quote on_hours or
-          uptime_pct — instead say: "The AC Infinity app does not record runtime for
-          this device type, so I can't tell you how long it actually ran."
+        - When data_quality is "api_constant_speed", use the human_summary's
+          "Unsupported" message as-is — do not quote on_hours or uptime_pct.
     """
     try:
         if not 1 <= days <= 30:
@@ -887,10 +886,15 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
                 f"{p.name} (Port {p.port}) ran {p.uptime_pct}% uptime ({p.on_hours}h total)"
                 for p in reliable
             )
+            def _port_state(port_num: int) -> str:
+                if port_loads is None:
+                    return "unknown"
+                return "ON" if port_loads.get(port_num, 0) > 0 else "OFF"
+
             caveat_lines = " ".join(
-                f"Note: {p.name} (Port {p.port}) shows constant-speed history"
-                " — the AC Infinity app does not record actual on/off runtime for this device"
-                " type (heaters, lights, humidifiers); treat its uptime figure as unreliable."
+                f"{p.name}: Unsupported (current: {_port_state(p.port)})"
+                " - Historical Support Coming Soon"
+                " https://github.com/ober37/ac-infinity-mcp/issues/85"
                 for p in caveat
             )
             port_word = "port" if ports_excluded_count == 1 else "ports"

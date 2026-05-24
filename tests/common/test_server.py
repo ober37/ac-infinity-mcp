@@ -1453,9 +1453,9 @@ async def test_get_port_activity_report_rule_c_toggle_device_flagged_in_response
     assert len(data["ports"]) == 1
     port = data["ports"][0]
     assert port["data_quality"] == "api_constant_speed"
-    # human_summary must contain the caveat, not a false uptime claim
-    assert "constant-speed history" in data["human_summary"]
-    assert "AC Infinity app does not record" in data["human_summary"]
+    # human_summary must contain the simplified unsupported message
+    assert "Heater: Unsupported" in data["human_summary"]
+    assert "Historical Support Coming Soon" in data["human_summary"]
     # ports_excluded_count unchanged (Rule C does not filter)
     assert data["ports_excluded_count"] == 0
 
@@ -1507,8 +1507,9 @@ async def test_get_port_activity_report_rule_c_caveat_not_in_port_lines(mock_cli
     # human_summary includes the fan uptime claim
     assert "Inline Fan" in data["human_summary"]
     assert "100.0% uptime" in data["human_summary"]
-    # human_summary includes the heater caveat
-    assert "Heater (Port 2) shows constant-speed history" in data["human_summary"]
+    # human_summary includes the simplified unsupported message for the heater
+    assert "Heater: Unsupported" in data["human_summary"]
+    assert "Historical Support Coming Soon" in data["human_summary"]
 
 
 # ============ set_port_speed ============
