@@ -3574,16 +3574,19 @@ async def break_out_of_automation(
         )
         grouped = _group_automations(raw_automations)
 
-        # Find the first enabled+running automation; fall back to first enabled.
-        automation = next(
-            (g for g in grouped if g["enabled"] and g["run_state"]), None
-        ) or next((g for g in grouped if g["enabled"]), None)
+        # Find the first enabled+running automation; fall back to first enabled-only,
+        # then to first run_state-only (mid-toggle transient where isOn=0 but runState=1).
+        automation = (
+            next((g for g in grouped if g["enabled"] and g["run_state"]), None)
+            or next((g for g in grouped if g["enabled"]), None)
+            or next((g for g in grouped if g["run_state"]), None)
+        )
 
         if automation is None:
             return json.dumps({
                 "error": (
                     "Could not identify governing automation. "
-                    "No enabled automations found on this device."
+                    "No enabled or actively running automations found on this device."
                 ),
             })
 
