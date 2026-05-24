@@ -149,6 +149,8 @@ userId=<appId>
 | `deviceInfo.humidity` | Raw value ÷ 100 = % RH (Quirk 4) |
 | `deviceInfo.vpdnums` | Raw value ÷ 100 = VPD in kPa. Note lowercase `n` (Quirk 10) |
 | `deviceInfo.ports[].speak` | Port speed 0–10 (Quirk 5 decoding applies in history records, not here) |
+| `zoneId` | IANA timezone string (e.g. `"America/Chicago"`) — used by MCP tools to localise timestamps and schedule windows. Absent on some older firmware; falls back to UTC (Quirk 23) |
+| `deviceInfo.unit` | Temperature unit preference: `0` = °F, `1` = °C. Absent on some devices; falls back to °C (Quirk 23) |
 | `appEmail` | User's email exposed in every device record — never log raw API responses (Security Note) |
 
 ---
@@ -986,6 +988,37 @@ The response includes `ports_excluded_count` (integer count of filtered ports) a
 `human_summary` (plain-English summary for growers). When `ports_excluded_count > 0`, the
 `human_summary` already contains a note about excluded ports — do not repeat the count in prose.
 
+### Quirk 23 — Timezone-aware and unit-aware responses
+
+All grower-facing temperature values and timestamps are localised using two fields from the
+device record:
+
+- **`zoneId`** (top-level string) — IANA timezone identifier, e.g. `"America/Chicago"`.
+  Used to convert UTC timestamps to local time in `get_device_reading`,
+  `get_historical_readings`, `get_port_activity_report`, and `detect_environment_trends`.
+  Also used to provide the `"timezone"` key in `get_port_settings.schedule_window`.
+  Falls back to UTC when the field is absent or contains an unrecognized zone string.
+
+- **`deviceInfo.unit`** (integer) — temperature unit preference: `0` = °F, `1` = °C.
+  Used by `get_device_reading`, `get_historical_readings`, `get_port_settings`,
+  `set_temperature_automation`, and `apply_grow_stage_template` to display or accept
+  temperatures in the grower's preferred unit. Falls back to °C when the field is absent.
+
+**Impact on tool output fields:**
+
+| Old field name | New field name | Notes |
+|---|---|---|
+| `temperature_c` | `temperature` | Value in preferred unit; `unit` field added |
+| `temperature_c` statistics key | `temperature` | In `get_historical_readings` statistics |
+| `temp_range_c` | `temp_range` | `{"min": N, "max": N, "unit": "°C"/"°F"}` |
+| `peak_hour_utc` | `peak_hour_local` | Local hour in device timezone |
+| `min_c` / `max_c` parameters | `min_temp` / `max_temp` | `set_temperature_automation` |
+| `schedule_window` | `schedule_window` | Added `"timezone"` key |
+
+**No impact on write encoding:** The API always stores temperature as raw °C integers. The
+MCP server converts °F inputs to °C before writing. `detect_environment_trends` trend
+metrics use `"temperature"` as the metric key (matching the read-side field name).
+
 ---
 
 ## v2.0 API Endpoints Reference
@@ -1085,11 +1118,11 @@ Get current sensor readings (temp, humidity, VPD) and port states for one device
 **Response:**
 ```json
 {
-  "timestamp": "2026-05-20T14:32:00Z",
+  "timestamp": "2026-05-20T09:32:00-05:00",
   "device_id": "C58ZA",
   "device_name": "Towlie Tent",
-  "temperature_c": 24.3,
-  "temperature_f": 75.7,
+  "temperature": 24.3,
+  "unit": "°C",
   "humidity": 58.2,
   "vpd": 1.31,
   "ports": [
@@ -1100,7 +1133,9 @@ Get current sensor readings (temp, humidity, VPD) and port states for one device
 ```
 
 **Field notes:**
-- `temperature_c` / `temperature_f` — decoded from raw API value ÷ 100 (Quirk 4)
+- `temperature` — current temperature in the device's preferred unit (`deviceInfo.unit`); decoded from raw API value ÷ 100 (Quirk 4, Quirk 23)
+- `unit` — `"°C"` or `"°F"` matching `deviceInfo.unit`; falls back to `"°C"` when the field is absent (Quirk 23)
+- `timestamp` — ISO 8601 in device local time with UTC offset (from `zoneId`); falls back to UTC `"Z"` suffix when `zoneId` is absent (Quirk 23)
 - `vpd` — decoded from `vpdnums ÷ 100` (Quirk 4, Quirk 10)
 - `ports[].speed` — current port speed 0–10 from `speak` field
 - `external_sensors` — list of UIS sensor readings when sensors are attached; phantom entries (API-reported but no hardware connected) are filtered out (Quirk 20); empty `[]` for built-in-only devices
@@ -1120,7 +1155,8 @@ Get current sensor readings for all devices at once.
     {
       "device_id": "C58ZA",
       "device_name": "Towlie Tent",
-      "temperature_c": 24.3,
+      "temperature": 24.3,
+      "unit": "°C",
       "humidity": 58.2,
       "vpd": 1.31,
       "ports": [...],
@@ -1131,7 +1167,7 @@ Get current sensor readings for all devices at once.
 ```
 
 **Field notes:**
-- Each entry has the same shape as `get_device_reading`
+- Each entry has the same shape as `get_device_reading` (including `temperature` / `unit` in device-preferred units)
 - Devices that fail to parse individually include `"error"` instead of sensor fields
 - Useful for a dashboard view across multiple tents/controllers
 - `external_sensors` — phantom sensor entries (sensors present in the API response but with no hardware connected) are filtered out; see Quirk 20
@@ -1158,9 +1194,9 @@ Query historical environment data with configurable bucketing and optional time-
   "device_id": "C58ZA",
   "readings": [
     {
-      "timestamp": "2026-05-20T14:00:00Z",
-      "temperature_c": 24.1,
-      "temperature_f": 75.4,
+      "timestamp": "2026-05-20T09:00:00-05:00",
+      "temperature": 24.1,
+      "unit": "°C",
       "humidity": 58.0,
       "vpd": 1.30,
       "ports": [{"port": 1, "name": "Inline Fan", "speed": 5}]
@@ -1170,7 +1206,7 @@ Query historical environment data with configurable bucketing and optional time-
     "readings_count": 168,
     "sample_interval": "1h",
     "date_range": {"start": "2026-05-13", "end": "2026-05-20"},
-    "temperature_c": {"min": 20.1, "avg": 23.8, "max": 27.4},
+    "temperature": {"min": 20.1, "avg": 23.8, "max": 27.4},
     "humidity": {"min": 52.0, "avg": 58.2, "max": 65.1},
     "vpd": {"min": 1.01, "avg": 1.28, "max": 1.72},
     "port_statistics": {
@@ -1266,7 +1302,7 @@ Detect linear trends in temperature, humidity, and VPD with a 7-day projection.
   "readings_used": 168,
   "trends": [
     {
-      "metric": "temperature_c",
+      "metric": "temperature",
       "slope_per_hour": 0.03,
       "direction": "rising",
       "projection_7d": 25.1,
@@ -1312,7 +1348,7 @@ and the report is still returned.
       "transitions": 4,
       "avg_speed_when_running": 5.2,
       "uptime_pct": 52.1,
-      "peak_hour_utc": 14
+      "peak_hour_local": 9
     }
   ],
   "ports_excluded_count": 2,
@@ -1325,7 +1361,7 @@ and the report is still returned.
 - `transitions` — number of on↔off state changes in the period
 - `avg_speed_when_running` — average `onSpead` value (1–10) across on-readings with non-zero speed
 - `uptime_pct` — `on_hours / (on_hours + off_hours) * 100`, rounded to 1 decimal
-- `peak_hour_utc` — UTC hour (0–23) with the most on-readings; `null` when port never ran (always_off case). Describe to growers as 'most active around {peak_hour_utc}:00 UTC' and remind them to convert to their local timezone.
+- `peak_hour_local` — local hour (0–23, in device timezone from `zoneId`) with the most on-readings; `null` when port never ran (always_off case). Falls back to UTC hour when `zoneId` is absent (Quirk 23). Describe to growers as 'most active around {peak_hour_local}:00 local time'.
 - `ports_excluded_count` — number of ports removed by the ghost-port filter (see Quirk 22). Do not repeat this count in prose when presenting `human_summary` to a grower.
 - `human_summary` — plain-English activity summary; includes an exclusion note when `ports_excluded_count > 0`. When `ports` is empty, contains a full explanation for the grower.
 
@@ -1381,7 +1417,7 @@ Get the full automation configuration for a port from `/api/dev/getdevModeSettin
   "mode": "VPD",
   "speed_target": 5,
   "vpd_target_kpa": 1.4,
-  "temp_range_c": null,
+  "temp_range": null,
   "humidity_range_pct": null,
   "schedule_window": null,
   "cycle_on_seconds": 0,
@@ -1404,7 +1440,7 @@ Get the full automation configuration for a port from `/api/dev/getdevModeSettin
   "current_speed": 5,
   "speed_target": null,
   "vpd_target_kpa": null,
-  "temp_range_c": null,
+  "temp_range": null,
   "humidity_range_pct": null,
   "schedule_window": null,
   "cycle_on_seconds": null,
@@ -1430,7 +1466,7 @@ Get the full automation configuration for a port from `/api/dev/getdevModeSettin
   "current_speed": 0,
   "speed_target": null,
   "vpd_target_kpa": null,
-  "temp_range_c": null,
+  "temp_range": null,
   "humidity_range_pct": null,
   "schedule_window": null,
   "cycle_on_seconds": null,
@@ -1456,7 +1492,7 @@ Get the full automation configuration for a port from `/api/dev/getdevModeSettin
   "current_speed": 0,
   "speed_target": null,
   "vpd_target_kpa": null,
-  "temp_range_c": null,
+  "temp_range": null,
   "humidity_range_pct": null,
   "schedule_window": null,
   "cycle_on_seconds": null,
@@ -1479,14 +1515,14 @@ Get the full automation configuration for a port from `/api/dev/getdevModeSettin
 - `automation_running` — `true` if the governing automation has `run_state=True`; `false` if an automation was found but not running (all disabled); `null` when the secondary API call failed (degraded)
 - `automation_configured` — `true` if the automations list is non-empty; `false` if empty; `null` when degraded (secondary call failed)
 - `human_summary` — grower-readable description of the ADVANCE state; always present
-- `vpd_target_kpa`, `temp_range_c`, `humidity_range_pct`, `schedule_window`, cycle/timer fields — all `null` in ADVANCE mode
+- `vpd_target_kpa`, `temp_range`, `humidity_range_pct`, `schedule_window`, cycle/timer fields — all `null` in ADVANCE mode
 - When the secondary automation lookup fails (API error), a `note` field is added: `"Could not fetch automation details. Use list_advance_automations to view active automations."`
 
 **Non-ADVANCE field notes:**
 - `vpd_target_kpa` — non-null only when VPD automation active; decoded as `targetVpd ÷ 10` (Quirk 4 analogue)
-- `temp_range_c` — `{"min_c": N, "max_c": N}` when temp thresholds enabled; raw °C integers (no scaling)
+- `temp_range` — `{"min": N, "max": N, "unit": "°C"}` (or `"°F"`) when temp thresholds enabled; values in the device's preferred unit. Internally stored as raw °C integers; converted to °F when `deviceInfo.unit=0` (Quirk 23, no ×100 scaling)
 - `humidity_range_pct` — `{"min_pct": N, "max_pct": N}` when humidity thresholds enabled; raw % RH integers
-- `schedule_window` — `{"start": "HH:MM", "end": "HH:MM"}` in **device local time** (not UTC); `null` when disabled
+- `schedule_window` — `{"start": "HH:MM", "end": "HH:MM", "timezone": "America/Chicago"}` in device local time; includes `"timezone"` key from `zoneId` (falls back to `"UTC"` when absent) (Quirk 23); `null` when disabled
 - `timer_on_seconds` / `timer_off_seconds` — from `acitveTimerOn` / `acitveTimerOff` (API typo: `acitve`)
 
 ---
@@ -1589,23 +1625,24 @@ Also sets `vpdSettingMode=1`, `targetVpdSwitch=1`, `atType=8`.
 
 ---
 
-### `set_temperature_automation(device_id, port, min_c, max_c, dry_run=True)`
+### `set_temperature_automation(device_id, port, min_temp, max_temp, dry_run=True)`
 
 Enable temperature automation using the built-in temperature sensor.
 Switches the port to AUTO mode (`atType=3`) and sets temperature thresholds.
-The controller speeds up when temperature exceeds `max_c` and slows below `min_c`.
+The controller speeds up when temperature exceeds `max_temp` and slows below `min_temp`.
 
 **Parameters:**
 | Parameter | Type | Description |
 |---|---|---|
 | `device_id` | `str` | Device code from `discover_devices` |
 | `port` | `int` | 1-based port number |
-| `min_c` | `float` | Minimum threshold °C, range 0–50. Sub-degree values rounded to nearest int |
-| `max_c` | `float` | Maximum threshold °C, range 0–50. Must exceed `min_c` |
+| `min_temp` | `float` | Minimum threshold in device-preferred unit (°C or °F). Range: 0–50°C (32–122°F). Sub-degree values rounded to nearest int |
+| `max_temp` | `float` | Maximum threshold in device-preferred unit. Must exceed `min_temp` |
 | `dry_run` | `bool` | Default `True` — returns payload without writing |
 
-**Encoding:** `devLt = round(min_c)`, `devHt = round(max_c)` — raw °C integers, no ×100 scaling.
-Also sets `activeLt=1`, `activeHt=1`, `atType=3`.
+**Encoding:** Values accepted in device-preferred unit; converted to °C internally if needed.
+`devLt = int(min_c + 0.5)`, `devHt = int(max_c + 0.5)` — raw °C integers, no ×100 scaling.
+Also sets `activeLt=1`, `activeHt=1`, `atType=3`. (Quirk 23)
 
 **Response:**
 ```json
@@ -1613,8 +1650,8 @@ Also sets `activeLt=1`, `activeHt=1`, `atType=3`.
   "action": "set port 1 temperature automation 20–26°C",
   "device_id": "C58ZA",
   "port": 1,
-  "min_c": 20.0,
-  "max_c": 26.0,
+  "min_temp": 20.0,
+  "max_temp": 26.0,
   "dry_run": true,
   "controller_type": "legacy",
   "sent": false,
@@ -1860,8 +1897,8 @@ and `set_humidity_automation` in sequence using the VPD midpoint and full ranges
 
 **Response:** JSON with flat `sent`, `controller_type`, and `payload` (when `dry_run=True`)
 fields. The `vpd`, `temperature`, and `humidity` sub-objects carry the per-target
-display values (`target_kpa`, `min_c`/`max_c`, `min_rh`/`max_rh`) but not their own
-`sent`/`payload` keys. The call is atomic: it succeeds or fails as a single write, so
+display values (`target_kpa`, `min`/`max`/`unit`, `min_rh`/`max_rh`) but not their own
+`sent`/`payload` keys. Temperature values in `temperature` are in the device-preferred unit (Quirk 23). The call is atomic: it succeeds or fails as a single write, so
 there is no partial-failure state to surface — either all the stage's targets land on
 the controller, or the prior state is preserved.
 
