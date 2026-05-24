@@ -811,11 +811,21 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         excluded ports when ports_excluded_count > 0. Do not repeat the exclusion count
         in prose response.
 
+        data_quality is null for reliable ports. When data_quality is
+        "api_constant_speed", the AC Infinity API cannot distinguish the configured
+        port speed from actual runtime for this device type (heaters, lights,
+        humidifiers) — on_hours and uptime_pct are fabricated and must not be
+        presented to the grower as actual runtime. The human_summary already contains
+        a caveat for these ports; do not present their uptime figures as real data.
+
     Presentation guidance:
         - Always refer to ports as 'Name (Port N)', e.g., 'Exhaust Fan (Port 3)'.
         - When presenting on_hours to a grower, translate it from raw hours to natural
           language, e.g.: "The fan ran for 36.0 hours over the past 3 days (about 50%
           of the time)." Do NOT describe on_hours as hours per day.
+        - When data_quality is "api_constant_speed", do NOT quote on_hours or
+          uptime_pct — instead say: "The AC Infinity app does not record runtime for
+          this device type, so I can't tell you how long it actually ran."
     """
     try:
         if not 1 <= days <= 30:
@@ -870,9 +880,18 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
 
         day_word = "day" if days == 1 else "days"
         if result:
+            reliable = [p for p in result if p.data_quality is None]
+            caveat = [p for p in result if p.data_quality == "api_constant_speed"]
+
             port_lines = "; ".join(
                 f"{p.name} (Port {p.port}) ran {p.uptime_pct}% uptime ({p.on_hours}h total)"
-                for p in result
+                for p in reliable
+            )
+            caveat_lines = " ".join(
+                f"Note: {p.name} (Port {p.port}) shows constant-speed history"
+                " — the AC Infinity app does not record actual on/off runtime for this device"
+                " type (heaters, lights, humidifiers); treat its uptime figure as unreliable."
+                for p in caveat
             )
             port_word = "port" if ports_excluded_count == 1 else "ports"
             excl = (
@@ -880,10 +899,16 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
                 if ports_excluded_count > 0
                 else ""
             )
-            human_summary = (
-                f"Analyzed {days} {day_word} of activity across {len(result)} active ports. "
-                f"{port_lines}.{excl}"
-            )
+            summary_parts = [
+                f"Analyzed {days} {day_word} of activity across {len(result)} active ports."
+            ]
+            if port_lines:
+                summary_parts.append(port_lines + ".")
+            if caveat_lines:
+                summary_parts.append(caveat_lines)
+            if excl:
+                summary_parts.append(excl.strip())
+            human_summary = " ".join(summary_parts)
         else:
             human_summary = (
                 f"No active port activity was detected over the past {days} {day_word}. "

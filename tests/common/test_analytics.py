@@ -681,3 +681,180 @@ def test_build_activity_report_empty_port_loads_normalized() -> None:
     result = build_activity_report(readings, days=1, port_loads={})
     # Port 1 with 100% uptime and 0 transitions but port_loads={} → NOT excluded
     assert len(result) == 1
+
+
+# ---- Issue #85: Rule C — toggle device constant-speed data quality flag ----
+
+def test_build_activity_report_rule_c_toggle_device_flagged() -> None:
+    """Rule C: port with 0 transitions, 100% uptime, all speeds=1 gets data_quality flag."""
+    # Speed=1 is the decoded value for 0xF (toggle-on nibble in portSpead bitmask, Quirk 5).
+    # This pattern identifies heaters/lights/humidifiers that the API always reports as "on".
+    readings = [
+        {
+            "timestamp": _ts(h),
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [_port(1, "Heater", 1, True)],
+        }
+        for h in range(24)
+    ]
+    result = build_activity_report(readings, days=1)
+    assert len(result) == 1
+    assert result[0].data_quality == "api_constant_speed"
+    # Port is kept in results (not filtered)
+    assert result[0].name == "Heater"
+    assert result[0].uptime_pct == 100.0
+
+
+def test_build_activity_report_rule_c_fan_not_flagged() -> None:
+    """Rule C must not fire for fan ports with variable speed (not toggle-device pattern)."""
+    readings = [
+        {
+            "timestamp": _ts(h),
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [_port(1, "Inline Fan", 5, True)],
+        }
+        for h in range(24)
+    ]
+    result = build_activity_report(readings, days=1)
+    assert len(result) == 1
+    assert result[0].data_quality is None
+
+
+def test_build_activity_report_rule_c_not_flagged_when_transitions_exist() -> None:
+    """Rule C must not fire when transitions > 0 (toggle device on a timer cycles correctly)."""
+    # Humidifier alternates on/off — transitions exist, not constant-speed phantom
+    states = [True, False, True, False, True, False]
+    readings = [
+        {
+            "timestamp": _ts(i),
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [_port(1, "Humidifier", 1 if on else 0, on)],
+        }
+        for i, on in enumerate(states)
+    ]
+    result = build_activity_report(readings, days=1)
+    assert len(result) == 1
+    assert result[0].data_quality is None
+    assert result[0].transitions == 5
+
+
+def test_build_activity_report_rule_c_not_flagged_when_uptime_not_100() -> None:
+    """Rule C must not fire when uptime_pct < 100.0 (some off records present)."""
+    readings = (
+        [
+            {
+                "timestamp": _ts(i),
+                "temperature_c": 24.0, "temperature_f": 75.2,
+                "humidity": 60.0, "vpd": 1.24,
+                "ports": [_port(1, "Heater", 1, True)],
+            }
+            for i in range(12)
+        ]
+        + [
+            {
+                "timestamp": _ts(i + 12),
+                "temperature_c": 24.0, "temperature_f": 75.2,
+                "humidity": 60.0, "vpd": 1.24,
+                "ports": [_port(1, "Heater", 0, False)],
+            }
+            for i in range(12)
+        ]
+    )
+    result = build_activity_report(readings, days=1)
+    assert len(result) == 1
+    assert result[0].uptime_pct == 50.0
+    assert result[0].data_quality is None
+
+
+def test_build_activity_report_rule_c_not_flagged_speed_mix() -> None:
+    """Rule C must not fire when running speeds are mixed (includes values != 1)."""
+    # Port alternates between speed=1 and speed=3 — not a constant-1 toggle phantom
+    readings = [
+        {
+            "timestamp": _ts(i),
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [_port(1, "Fan", 1 if i % 2 == 0 else 3, True)],
+        }
+        for i in range(24)
+    ]
+    result = build_activity_report(readings, days=1)
+    assert len(result) == 1
+    assert result[0].data_quality is None
+
+
+@pytest.mark.parametrize(
+    "speeds,transitions_expected,uptime_100,expected_dq",
+    [
+        # Toggle always-on (all speed=1, 0 transitions, 100% uptime) → flagged
+        ([1] * 24, 0, True, "api_constant_speed"),
+        # Fan always full speed (speed=5, 0 transitions, 100% uptime) → not flagged
+        ([5] * 24, 0, True, None),
+        # Mixed speed (some 1, some 3, 0 transitions, 100% uptime) → not flagged
+        ([1, 3] * 12, 0, True, None),
+    ],
+)
+def test_build_activity_report_rule_c_parametrized(
+    speeds: list[int],
+    transitions_expected: int,
+    uptime_100: bool,
+    expected_dq: "str | None",
+) -> None:
+    """Parametrized Rule C boundary tests."""
+    readings = [
+        {
+            "timestamp": _ts(i % 24, day=25 + i // 24),
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [_port(1, "Device", s, s > 0)],
+        }
+        for i, s in enumerate(speeds)
+    ]
+    result = build_activity_report(readings, days=1)
+    assert len(result) == 1
+    assert result[0].data_quality == expected_dq
+    if uptime_100:
+        assert result[0].uptime_pct == 100.0
+
+
+def test_build_activity_report_rule_c_does_not_affect_rule_a() -> None:
+    """Rule C and Rule A are independent: a ghost port (Rule A) with speed=1 is still excluded."""
+    # Port 1: ghost (Rule A: 0 transitions, 100% uptime, portsLoad=0) — excluded
+    # Port 2: toggle device (Rule C: 0 transitions, 100% uptime, speed=1) — kept with flag
+    readings = [
+        {
+            "timestamp": _ts(h),
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [
+                _port(1, "Port 1", 1, True),  # ghost port (auto-named, Rule A target)
+                _port(2, "Heater", 1, True),   # toggle device with custom name (Rule C only)
+            ],
+        }
+        for h in range(24)
+    ]
+    result = build_activity_report(readings, days=1, port_loads={1: 0, 2: 5})
+    # Port 1 excluded by Rule A (portsLoad=0); Port 2 kept with Rule C flag (portsLoad=5)
+    assert len(result) == 1
+    assert result[0].port == 2
+    assert result[0].data_quality == "api_constant_speed"
+
+
+def test_build_activity_report_reliable_ports_have_no_data_quality() -> None:
+    """Reliable ports (normal fan cycling) always have data_quality=None."""
+    states = [True, False, True, False, True]
+    readings = [
+        {
+            "timestamp": _ts(i),
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [_port(1, "Fan", 5 if on else 0, on)],
+        }
+        for i, on in enumerate(states)
+    ]
+    result = build_activity_report(readings, days=1)
+    assert len(result) == 1
+    assert result[0].data_quality is None

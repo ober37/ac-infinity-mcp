@@ -52,6 +52,8 @@ class ActivityReport:
     avg_speed_when_running: float
     uptime_pct: float
     peak_hour_utc: int | None = None
+    data_quality: str | None = None  # "api_constant_speed" when history cannot distinguish
+    # configured speed from actual runtime (toggle devices: heaters, lights, humidifiers)
 
 
 def _range_score(value: float, low: float, high: float) -> float:
@@ -286,6 +288,19 @@ def build_activity_report(
                 hour_counts[h] = hour_counts.get(h, 0) + 1
         peak_hour_utc = max(hour_counts, key=hour_counts.get) if hour_counts else None  # type: ignore[arg-type]
 
+        # Rule C: detect toggle devices that always emit 0xF (speed=1) in history records.
+        # The AC Infinity history API cannot distinguish "configured ON speed" from "currently
+        # running" for toggle devices (heaters, lights, humidifiers). When ALL of:
+        #   - transitions == 0 (no on↔off changes observed)
+        #   - uptime_pct == 100.0 (never seen as off)
+        #   - every running-speed record == 1 (the decoded value for 0xF toggle-on nibble)
+        # ...the port is almost certainly a toggle device with fabricated constant-high history.
+        # The port is kept in results (not filtered) but flagged so human_summary can add a caveat.
+        all_running_are_one = bool(running_speeds) and all(s == 1 for s in running_speeds)
+        data_quality: str | None = None
+        if pd["transitions"] == 0 and uptime_pct == 100.0 and all_running_are_one:
+            data_quality = "api_constant_speed"
+
         reports.append(
             ActivityReport(
                 port=port_num,
@@ -296,6 +311,7 @@ def build_activity_report(
                 avg_speed_when_running=avg_speed,
                 uptime_pct=uptime_pct,
                 peak_hour_utc=peak_hour_utc,
+                data_quality=data_quality,
             )
         )
 
