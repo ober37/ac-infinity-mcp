@@ -1074,6 +1074,9 @@ async def _build_advance_conflict_response(
             {"name": a["name"], "automation_id": a["automation_id"]}
             for a in automations if a.get("enabled") or a.get("run_state")
         ]
+    except ACInfinityAuthError:
+        # Auth errors must propagate — never degrade to the conflict fallback.
+        raise
     except Exception as exc:
         logger.warning(
             "Could not fetch automations for conflict response (device=%s): %s",
@@ -1112,7 +1115,7 @@ async def _build_advance_conflict_response(
                 f"Call break_out_of_automation(device_id='{device_id}', port={port},"
                 " dry_run=True) to preview."
             ),
-            "available": governing.get("enabled", False),
+            "available": governing.get("enabled", False) or governing.get("run_state", False),
         }
         opt2: dict = {
             "description": (

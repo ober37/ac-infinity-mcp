@@ -5413,3 +5413,46 @@ async def test_create_advance_automation_live_automation_id_note_present(mock_cl
     assert "name" in data["automation_id_note"]
 
 
+# ============ Issue #83 — auth error propagation in _build_advance_conflict_response ============
+
+
+async def test_conflict_response_auth_error_in_secondary_lookup_propagates(mock_client):
+    """ACInfinityAuthError from get_advance_automations must propagate, not be swallowed.
+
+    The bare ``except Exception`` previously caught AuthError and degraded to the
+    conflict fallback.  After the fix, ``except ACInfinityAuthError: raise`` precedes
+    it, so the auth error escapes ``_build_advance_conflict_response`` and is NOT
+    converted to a ``"conflict"`` response.
+    """
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
+    mock_client.get_advance_automations.side_effect = ACInfinityAuthError("Token expired")
+    with pytest.raises(ACInfinityAuthError):
+        with patch("ac_infinity_mcp.server.aci_client", mock_client):
+            await set_port_speed("C58ZA", 1, 5)
+
+
+# ============ Issue #84 — opt1 available flag uses enabled OR run_state ============
+
+
+async def test_conflict_response_opt1_available_when_run_state_only(mock_client):
+    """options.1_break_out.available is True when run_state=True even if enabled=False.
+
+    This covers the case where the API's isOn flag is stale (0) but the automation
+    is actually executing (runState=1).  The fix ORs run_state into the availability
+    check so the break-out option is presented rather than hidden.
+    """
+    # Build a fixture where isOn=0 but runState=1.
+    running_but_disabled = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST)
+    for entry in running_but_disabled:
+        entry["isOn"] = 0   # enabled=False after _group_automations
+        entry["runState"] = 1  # run_state=True after _group_automations
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
+    mock_client.get_advance_automations.return_value = running_but_disabled
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_speed("C58ZA", 1, 5)
+    data = json.loads(result)
+    assert data["conflict"] == "ADVANCE_AUTOMATION"
+    assert "1_break_out" in data["options"]
+    assert data["options"]["1_break_out"]["available"] is True
+
+
