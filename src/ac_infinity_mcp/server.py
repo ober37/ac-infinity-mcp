@@ -1204,8 +1204,10 @@ async def _build_advance_conflict_response(
 ) -> str:
     """Build a structured ADVANCE_AUTOMATION conflict response for write tools.
 
-    Three paths depending on the secondary automation lookup result:
+    Four paths depending on the secondary automation lookup result:
 
+    - **Auth-error path** (secondary lookup raises ``ACInfinityAuthError``): returns
+      auth error JSON immediately; credential expiry must be resolved before conflict UX.
     - **Normal path** (governing automation found and enabled): option key
       ``"1_break_out"`` pointing to ``break_out_of_automation``; option key
       ``"2_disable_automation"`` pointing to ``disable_advance_automation``.

@@ -4370,6 +4370,7 @@ async def test_build_advance_conflict_response_auth_error(mock_client):
     assert data.get("error") == (
         "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD"
     )
+    assert data.get("detail") == "see server logs"
     assert "conflict" not in data
     assert "options" not in data
 
