@@ -206,6 +206,9 @@ tempCodeRunnerFile.py
 # Claude Code settings (per-user; never published)
 .claude/settings*.json
 .claude/projects/
+.claude/worktrees/
+.claude/scheduled_tasks.lock
+.claude/memory/
 
 # Local MCP server config (contains credentials)
 .mcp.json
