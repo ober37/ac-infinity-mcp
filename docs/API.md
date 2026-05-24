@@ -970,31 +970,54 @@ The Advance Automation API returns an `onTimeSwitch` field per group entry. It m
 (switch "off") means the time-window restriction is in effect (scheduled). See
 `_group_automations()` — `on_time_switch` key.
 
-### Quirk 22 — Ghost port filtering in `get_port_activity_report`
+### Quirk 22 — Ghost port filtering and toggle-device data quality in `get_port_activity_report`
 
 The history API returns data for all ports on a controller, including ports with no device
-attached. These phantom ports produce misleading activity data. Three filter rules are applied
-by `build_activity_report` to suppress them:
+attached. These phantom ports produce misleading activity data. Four filter/caveat rules are
+applied by `build_activity_report`:
 
-- **Rule A** (unchanged): A port is excluded when ALL of: `transitions == 0`, `uptime_pct == 100.0`,
+**Ghost-port exclusion rules (port removed from response):**
+
+- **Rule A**: A port is excluded when ALL of: `transitions == 0`, `uptime_pct == 100.0`,
   `port_loads` is provided (not `None`), and `portsLoad == 0`. Requires the supplementary
   `get_devices` call to succeed; if it fails, Rule A is disabled and the port is kept.
 - **Rule B** (enhanced, fixes #89): A port is excluded when its name matches `^Port \d+$` AND either
   (a) its average on-time is < 1 h/day, OR (b) `portsLoad == 0` when port_loads data is available.
   The portsLoad guard prevents Rule B from missing phantom mirror ports at short windows (e.g.
   days=1) where phantom activity exceeds the 1 h/day threshold.
-- **Rule C** (new, fixes #88): A named port (not matching `^Port \d+$`) is excluded when
+- **Rule C** (fixes #88): A named port (not matching `^Port \d+$`) is excluded when
   `port_loads` is provided AND `portsLoad == 0` AND average on-time is < 1 h/day. Catches
   physically-disconnected named devices that produce sporadic phantom transitions.
 
-When `port_loads` is `None` (supplementary call failed), Rules A, B (portsLoad guard), and C are
-all disabled — the report still returns but without ghost filtering.
+Rule A and Rule D (below) both exempt toggle hardware (loadType 4 or 128) — toggle devices are
+never filtered regardless of uptime or portsLoad, because they appear as always-on in history.
+A toggle device excluded by Rule A would silently vanish from the report even though it is
+physically connected.
 
-Known limitation: a named device averaging < 1 h/day that draws zero current at query time will be
-filtered by Rule C. Example: a misting pump running 20 min/day queried while off. Growers with
-low-duty named devices that disappear from the report should verify with `get_port_status`. The
-exclusion message "no load or activity detected at time of report" is accurate — it reflects the
-zero-current-draw state at query time, not a permanent device state.
+**Data-quality caveat rule (port kept, flagged):**
+
+- **Rule D** (fixes #85): A named port is kept in the response but flagged with
+  `data_quality = "api_constant_speed"` when ALL of: `transitions == 0`, `uptime_pct == 100.0`,
+  `avg_speed_when_running == 1.0`, AND the port's `loadType` is 4 or 128 (toggle hardware —
+  heaters, lights, humidifiers). The AC Infinity history API records toggle devices as always-on
+  at speed 1 regardless of actual runtime; `on_hours` and `uptime_pct` for these ports are
+  fabricated and must not be presented as real runtime data. The `human_summary` includes a
+  plain-English caveat for each flagged port. The `port_load_types` parameter (from
+  `deviceInfo.ports[].loadType`) flows from `get_port_activity_report` through
+  `build_activity_report` to enable this detection. When `port_load_types` is absent, Rule D
+  is disabled and the port is reported without a caveat.
+
+**When supplementary call fails:**
+
+When `port_loads` is `None` (supplementary `get_devices` call failed), Rules A, B (portsLoad
+guard), C, and the Rule D toggle-exemption in Rule A are all disabled — the report still returns
+but without ghost filtering.
+
+**Known limitation (Rule C):** A named device averaging < 1 h/day that draws zero current at
+query time will be filtered. Example: a misting pump running 20 min/day queried while off.
+Growers with low-duty named devices that disappear from the report should verify with
+`get_port_status`. The exclusion message "no load or activity detected at time of report" is
+accurate — it reflects the zero-current-draw state at query time, not a permanent device state.
 
 The response includes `ports_excluded_count` (integer count of filtered ports) and
 `human_summary` (plain-English summary for growers). When `ports_excluded_count > 0`, the
@@ -1370,22 +1393,35 @@ and the report is still returned.
       "transitions": 4,
       "avg_speed_when_running": 5.2,
       "uptime_pct": 52.1,
-      "peak_hour_local": 9
+      "peak_hour_local": 9,
+      "data_quality": null
+    },
+    {
+      "port": 2,
+      "name": "Humidifier",
+      "on_hours": 168.0,
+      "off_hours": 0.0,
+      "transitions": 0,
+      "avg_speed_when_running": 1.0,
+      "uptime_pct": 100.0,
+      "peak_hour_local": null,
+      "data_quality": "api_constant_speed"
     }
   ],
   "ports_excluded_count": 2,
-  "human_summary": "Analyzed 7 days of activity across 1 active ports. Inline Fan (Port 1) ran 52.1% uptime (12.5h total). 2 ports excluded (no device activity detected)."
+  "human_summary": "Analyzed 7 days of activity across 1 reliable port and 1 port with a data caveat. Inline Fan (Port 1) ran 52.1% uptime (12.5h total). Humidifier (Port 2): the AC Infinity history API cannot distinguish configured speed from actual runtime for toggle hardware — on_hours and uptime are not reliable for this port. 2 ports excluded (no device activity detected)."
 }
 ```
 
 **Field notes:**
-- `on_hours` / `off_hours` — cumulative total hours over the full `days` window (not hours per day); total is `days * 24` when full data is available. Present to growers as total elapsed hours, e.g. "ran 36.0 hours over the past 3 days (50%)."
+- `on_hours` / `off_hours` — cumulative total hours over the full `days` window (not hours per day); total is `days * 24` when full data is available. Present to growers as total elapsed hours, e.g. "ran 36.0 hours over the past 3 days (50%)." **Do not quote `on_hours` or `uptime_pct` for ports where `data_quality` is `"api_constant_speed"`.**
 - `transitions` — number of on↔off state changes in the period
 - `avg_speed_when_running` — average `onSpead` value (1–10) across on-readings with non-zero speed
 - `uptime_pct` — `on_hours / (on_hours + off_hours) * 100`, rounded to 1 decimal
 - `peak_hour_local` — local hour (0–23, in device timezone from `zoneId`) with the most on-readings; `null` when port never ran (always_off case). Falls back to UTC hour when `zoneId` is absent (Quirk 23). Describe to growers as 'most active around {peak_hour_local}:00 local time'.
+- `data_quality` — `null` for ports with reliable history. `"api_constant_speed"` for toggle hardware (heaters, lights, humidifiers — loadType 4 or 128) where the AC Infinity history API conflates the device's configured speed with its actual runtime state. The history API records these devices as always-on at speed 1, regardless of whether they were actually running. For these ports, `on_hours` and `uptime_pct` are fabricated and MUST NOT be presented to the grower as actual runtime data. Relay the `human_summary` caveat text for the port verbatim instead. `port_load_types` (from `deviceInfo.ports[].loadType`) flows through `build_activity_report` to enable this detection. See Quirk 22.
 - `ports_excluded_count` — number of ports removed by the ghost-port filter (see Quirk 22). Do not repeat this count in prose when presenting `human_summary` to a grower.
-- `human_summary` — plain-English activity summary; includes an exclusion note when `ports_excluded_count > 0`. When `ports` is empty, contains a full explanation for the grower.
+- `human_summary` — plain-English activity summary; includes an exclusion note when `ports_excluded_count > 0` and a data-quality caveat for any toggle-hardware ports. When `ports` is empty, contains a full explanation for the grower. Relay the caveat text for `data_quality = "api_constant_speed"` ports verbatim — do not estimate runtime from `on_hours`.
 
 ---
 
