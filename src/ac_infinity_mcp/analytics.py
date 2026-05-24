@@ -11,6 +11,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+# h/day: zero-load ports below this are treated as ghost candidates
+_GHOST_LOAD_ZERO_THRESHOLD: float = 1.0
+
 STAGE_TARGETS: dict[str, dict[str, tuple[float, float]]] = {
     "clones":       {"temp_c": (22.0, 26.0), "humidity": (70.0, 80.0), "vpd": (0.8, 1.2)},
     "seedling":     {"temp_c": (22.0, 26.0), "humidity": (65.0, 75.0), "vpd": (0.8, 1.2)},
@@ -301,7 +304,7 @@ def build_activity_report(
 
     filtered: list[ActivityReport] = []
     for rep in reports:
-        # Rule A: constant-100%-uptime ghost port with no current draw
+        # Rule A: constant-100%-uptime ghost port with no current draw (unchanged)
         if (
             rep.transitions == 0
             and rep.uptime_pct == 100.0
@@ -309,8 +312,18 @@ def build_activity_report(
             and port_loads.get(rep.port, 0) == 0
         ):
             continue
-        # Rule B: auto-named port with < 1 hour/day average activity
-        if re.match(r"^Port \d+$", str(rep.name)) and (rep.on_hours / days) < 1.0:
+        # Rule B (enhanced): auto-named port — low avg runtime OR zero load when data available
+        if re.match(r"^Port \d+$", str(rep.name)):
+            if (rep.on_hours / days) < _GHOST_LOAD_ZERO_THRESHOLD:
+                continue
+            if port_loads is not None and port_loads.get(rep.port, 0) == 0:
+                continue
+        # Rule C (new): named port with zero current draw and sub-threshold cumulative runtime
+        if (
+            port_loads is not None
+            and port_loads.get(rep.port, 0) == 0
+            and (rep.on_hours / days) < _GHOST_LOAD_ZERO_THRESHOLD
+        ):
             continue
         filtered.append(rep)
     return filtered

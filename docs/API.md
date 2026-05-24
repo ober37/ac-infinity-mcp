@@ -973,16 +973,28 @@ The Advance Automation API returns an `onTimeSwitch` field per group entry. It m
 ### Quirk 22 — Ghost port filtering in `get_port_activity_report`
 
 The history API returns data for all ports on a controller, including ports with no device
-attached. These phantom ports produce misleading 100% uptime with zero power draw. Two filter
-rules are applied by `build_activity_report` to suppress them:
+attached. These phantom ports produce misleading activity data. Three filter rules are applied
+by `build_activity_report` to suppress them:
 
-- **Rule A**: A port is excluded when ALL of: `transitions == 0`, `uptime_pct == 100.0`,
-  `port_loads` is provided (not `None`), and `portsLoad == 0`. Rule A requires a supplementary
-  `get_devices` call to obtain `portsLoad` values; if that call fails, Rule A is disabled and
-  the port is kept.
-- **Rule B**: A port is excluded when its name matches the auto-generated pattern `^Port \d+$`
-  AND its average on-time is less than 1 hour per day. User-named ports are never excluded
-  by Rule B.
+- **Rule A** (unchanged): A port is excluded when ALL of: `transitions == 0`, `uptime_pct == 100.0`,
+  `port_loads` is provided (not `None`), and `portsLoad == 0`. Requires the supplementary
+  `get_devices` call to succeed; if it fails, Rule A is disabled and the port is kept.
+- **Rule B** (enhanced, fixes #89): A port is excluded when its name matches `^Port \d+$` AND either
+  (a) its average on-time is < 1 h/day, OR (b) `portsLoad == 0` when port_loads data is available.
+  The portsLoad guard prevents Rule B from missing phantom mirror ports at short windows (e.g.
+  days=1) where phantom activity exceeds the 1 h/day threshold.
+- **Rule C** (new, fixes #88): A named port (not matching `^Port \d+$`) is excluded when
+  `port_loads` is provided AND `portsLoad == 0` AND average on-time is < 1 h/day. Catches
+  physically-disconnected named devices that produce sporadic phantom transitions.
+
+When `port_loads` is `None` (supplementary call failed), Rules A, B (portsLoad guard), and C are
+all disabled — the report still returns but without ghost filtering.
+
+Known limitation: a named device averaging < 1 h/day that draws zero current at query time will be
+filtered by Rule C. Example: a misting pump running 20 min/day queried while off. Growers with
+low-duty named devices that disappear from the report should verify with `get_port_status`. The
+exclusion message "no load or activity detected at time of report" is accurate — it reflects the
+zero-current-draw state at query time, not a permanent device state.
 
 The response includes `ports_excluded_count` (integer count of filtered ports) and
 `human_summary` (plain-English summary for growers). When `ports_excluded_count > 0`, the

@@ -3,6 +3,7 @@
 import pytest
 
 from ac_infinity_mcp.analytics import (
+    _GHOST_LOAD_ZERO_THRESHOLD,
     STAGE_TARGETS,
     HealthScore,
     TrendReport,
@@ -353,7 +354,9 @@ def test_build_activity_report_multiple_ports():
         }
         for h in range(5)
     ]
-    result = build_activity_report(readings, port_loads={1: 5, 2: 5})
+    # Provide non-zero loads for ports 3 and 4 so Rule C does not filter them;
+    # this test checks port ordering, not ghost-port filtering.
+    result = build_activity_report(readings, port_loads={1: 5, 2: 5, 3: 3, 4: 3})
     assert len(result) == 4
     assert [r.port for r in result] == [1, 2, 3, 4]
 
@@ -577,9 +580,11 @@ def test_build_activity_report_rule_a_excludes_ghost_constant() -> None:
 @pytest.mark.parametrize(
     "on_pattern,port_loads,expected_excluded",
     [
-        # All on: 0 transitions, 100% uptime, load=0 → excluded
+        # All on: 0 transitions, 100% uptime, load=0 → excluded by Rule A
         ([True] * 24, {1: 0}, True),
-        # One off at end: 1 transition, <100% uptime, load=0 → NOT excluded (has transition)
+        # One off at end: 1 transition, <100% uptime, load=0 → NOT excluded (has transition →
+        # Rule A disabled; named "Exhaust Fan" → Rule B doesn't match; 23/24 h/day ≥ 1.0 → Rule C
+        # doesn't fire either)
         ([True] * 23 + [False], {1: 0}, False),
         # All on, load > 0 → NOT excluded
         ([True] * 24, {1: 5}, False),
@@ -594,13 +599,16 @@ def test_build_activity_report_rule_a_boundary(
     port_loads: "dict[int, int] | None",
     expected_excluded: bool,
 ) -> None:
-    """Rule A boundary: all four conditions must be met for exclusion."""
+    """Rule A boundary: all four conditions must be met for exclusion.
+
+    Uses port name 'Exhaust Fan' (not 'Port N') to isolate Rule A from Rule B/C.
+    """
     readings = [
         {
             "timestamp": _ts(i % 24, day=25 + i // 24),
             "temperature_c": 24.0, "temperature_f": 75.2,
             "humidity": 60.0, "vpd": 1.24,
-            "ports": [_port(1, "Port 1", 5 if on else 0, on)],
+            "ports": [_port(1, "Exhaust Fan", 5 if on else 0, on)],
         }
         for i, on in enumerate(on_pattern)
     ]
@@ -681,3 +689,255 @@ def test_build_activity_report_empty_port_loads_normalized() -> None:
     result = build_activity_report(readings, days=1, port_loads={})
     # Port 1 with 100% uptime and 0 transitions but port_loads={} → NOT excluded
     assert len(result) == 1
+
+
+# ============ Rule C tests (#88) — named ports with zero load ============
+
+def _named_port_readings(name: str, on_count: int, off_count: int, days: int = 3) -> list[dict]:
+    """Generate readings for a named port with the given on/off split."""
+    readings = []
+    for i in range(on_count):
+        readings.append({
+            "timestamp": _ts(i % 24, day=25 + i // 24),
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [_port(1, name, 5, True)],
+        })
+    for i in range(off_count):
+        readings.append({
+            "timestamp": _ts(i % 24, day=25 + (on_count + i) // 24),
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [_port(1, name, 0, False)],
+        })
+    return readings
+
+
+def test_rule_c_excludes_named_ghost_live_example() -> None:
+    """Rule C: named port with portsLoad=0, on_hours=1.63 over 3 days → excluded.
+
+    Real-world case: 1.63 h/day < 1.0 h/day threshold? No — 1.63/3 = 0.54 h/day < 1.0. Excluded.
+    """
+    # on_hours = 1.63, days = 3 → 1.63/3 = 0.543 h/day < 1.0 → excluded
+    # Simulate: total readings = 72, on_count such that on_hours ≈ 1.63
+    # on_hours = on_count/total * 24 * days → 1.63 = on_count/72 * 72 → on_count ≈ 5 (approx)
+    # Use on_count=5, off_count=67, days=3: on_hours = 5/72 * 24 * 3 = 5.0, per day = 1.67
+    # Adjust: on_count=4 → on_hours = 4/72 * 72 = 4.0, per day = 1.33 — still > 1.0
+    # Use on_count=2, off_count=70: on_hours = 2/72 * 24 * 3 = 2.0, per day = 0.67 < 1.0 ✓
+    readings = _named_port_readings("Humidifier", on_count=2, off_count=70, days=3)
+    result = build_activity_report(readings, days=3, port_loads={1: 0})
+    assert len(result) == 0, "Rule C must exclude named port with zero load and < 1 h/day runtime"
+
+
+def test_rule_c_excludes_named_ghost_very_low_runtime() -> None:
+    """Rule C: named port with portsLoad=0, on_hours/days ≈ 0.02 → excluded."""
+    # 1 on reading out of 50 total, days=3: on_hours = 1/50 * 24 * 3 = 1.44; per day = 0.48 < 1.0
+    readings = _named_port_readings("Humidifier", on_count=1, off_count=49, days=3)
+    result = build_activity_report(readings, days=3, port_loads={1: 0})
+    assert len(result) == 0
+
+
+def test_rule_c_does_not_exclude_named_port_with_load() -> None:
+    """Rule C must not fire when portsLoad > 0, even with sub-threshold runtime."""
+    readings = _named_port_readings("Humidifier", on_count=2, off_count=70, days=3)
+    result = build_activity_report(readings, days=3, port_loads={1: 5})
+    assert len(result) == 1
+    assert result[0].name == "Humidifier"
+
+
+def test_rule_c_does_not_exclude_named_port_with_sufficient_runtime() -> None:
+    """Rule C must not fire when on_hours/days >= 1.0, even with zero load."""
+    # All-on, days=1: on_hours = 24 h, per day = 24 >> 1.0 threshold
+    readings = [
+        {
+            "timestamp": _ts(h),
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [_port(1, "Humidifier", 5, True)],
+        }
+        for h in range(24)
+    ]
+    # Rule A would exclude (100% uptime, 0 transitions, load=0) → check Rule C independently
+    # with transitions=1 to defeat Rule A
+    readings_with_transition = readings + [{
+        "timestamp": _ts(0, day=26),
+        "temperature_c": 24.0, "temperature_f": 75.2,
+        "humidity": 60.0, "vpd": 1.24,
+        "ports": [_port(1, "Humidifier", 0, False)],
+    }]
+    result2 = build_activity_report(readings_with_transition, days=1, port_loads={1: 0})
+    # on_hours = 24/25 * 24 * 1 = 23.04 h/day >> 1.0 → Rule C does not fire
+    assert len(result2) == 1
+    assert result2[0].name == "Humidifier"
+
+
+def test_rule_c_does_not_fire_when_port_loads_is_none() -> None:
+    """Rule C is disabled when port_loads is None (supplementary call failed)."""
+    readings = _named_port_readings("Humidifier", on_count=2, off_count=70, days=3)
+    result = build_activity_report(readings, days=3, port_loads=None)
+    assert len(result) == 1
+    assert result[0].name == "Humidifier"
+
+
+def test_rule_c_does_not_exclude_named_port_at_days_1_borderline() -> None:
+    """Regression guard: named port at 1.63 h/day for days=1 is kept (>= 1.0 threshold).
+
+    Accepted gap: 1.63 h/day is above the 1.0 h/day threshold so Rule C does not fire.
+    Growers with very-low-duty devices should use get_port_status to confirm device state.
+    """
+    # on_hours = 1.63, days = 1: per day = 1.63 ≥ 1.0 → NOT excluded
+    # Simulate: total=24, on_count such that on_hours ≈ 1.63
+    # on_hours = on_count/24 * 24 * 1 = on_count → use on_count=2 → 2.0 h/day ≥ 1.0
+    readings = [
+        {
+            "timestamp": _ts(h),
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [_port(1, "Humidifier", 5 if h < 2 else 0, h < 2)],
+        }
+        for h in range(24)
+    ]
+    result = build_activity_report(readings, days=1, port_loads={1: 0})
+    # on_hours = 2.0; transitions = 1 (defeats Rule A); 2.0/1 = 2.0 ≥ 1.0 → kept
+    assert len(result) == 1
+    assert result[0].name == "Humidifier"
+
+
+# ============ Rule B enhancement tests (#89) — portsLoad guard ============
+
+def test_rule_b_enhanced_excludes_autonamed_port_with_zero_load_at_days_1() -> None:
+    """Rule B enhanced: auto-named port with portsLoad=0 is excluded even if on_hours/days ≥ 1.0."""
+    # on_count=2, days=1: on_hours = 2.0 h/day ≥ 1.0 → OLD Rule B would NOT exclude
+    # NEW Rule B: portsLoad=0 → excluded regardless
+    readings = [
+        {
+            "timestamp": _ts(h),
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [_port(1, "Port 7", 5 if h < 2 else 0, h < 2)],
+        }
+        for h in range(24)
+    ]
+    result = build_activity_report(readings, days=1, port_loads={1: 0})
+    assert len(result) == 0, "Enhanced Rule B must exclude auto-named port with zero load"
+
+
+def test_rule_b_enhanced_does_not_exclude_autonamed_port_with_load() -> None:
+    """Rule B enhanced: auto-named port with portsLoad > 0 and on_hours/days ≥ 1.0 is kept."""
+    readings = [
+        {
+            "timestamp": _ts(h),
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [_port(1, "Port 7", 5 if h < 2 else 0, h < 2)],
+        }
+        for h in range(24)
+    ]
+    result = build_activity_report(readings, days=1, port_loads={1: 5})
+    assert len(result) == 1
+    assert result[0].name == "Port 7"
+
+
+def test_rule_b_enhanced_does_not_fire_when_port_loads_none() -> None:
+    """Rule B portsLoad guard is disabled when port_loads is None."""
+    # on_count=2, days=1 → on_hours=2.0 ≥ 1.0; port_loads=None → portsLoad guard off → kept
+    readings = [
+        {
+            "timestamp": _ts(h),
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [_port(1, "Port 7", 5 if h < 2 else 0, h < 2)],
+        }
+        for h in range(24)
+    ]
+    result = build_activity_report(readings, days=1, port_loads=None)
+    assert len(result) == 1
+    assert result[0].name == "Port 7"
+
+
+# ============ Interaction tests ============
+
+def test_rule_c_fires_for_named_port_not_caught_by_rule_b() -> None:
+    """Confirms Rule C catches named ports; Rule B only fires on auto-named 'Port N'."""
+    # 1 on reading out of 50 total, days=3: on_hours = 1/50 * 24 * 3 = 1.44; per day = 0.48 < 1.0
+    # Port named "Humidifier" (not "Port N") → Rule B never fires; Rule C fires for zero load
+    readings = _named_port_readings("Humidifier", on_count=1, off_count=49, days=3)
+    result = build_activity_report(readings, days=3, port_loads={1: 0})
+    assert len(result) == 0  # Rule C excluded it
+
+
+def test_rule_a_b_c_together_multi_port_scenario() -> None:
+    """Multi-port: each rule catches a distinct port; only 'Exhaust Fan' survives.
+
+    Uses 48 readings (days=2) so that h==0 in 24-reading blocks gives 2 on-readings
+    out of 48 total → on_hours = 2/48 * 24 * 2 = 2.0 h / 2 days = 1.0 h/day.
+    That is NOT below threshold. Use on_count=1 out of 48 → 0.5 h/day < 1.0 ✓.
+    """
+    # Rule A candidate: Port 2 — 100% uptime, 0 transitions, load=0
+    # Rule B candidate: Port 3 — auto-named "Port 3", < 1 h/day (low on-time guard)
+    # Rule C candidate: Port 4 — named "Misting Pump", zero load, < 1 h/day
+    # Survivor: Port 1 — named "Exhaust Fan", load=5, meaningful uptime
+    days = 2
+    total_readings = 48
+    readings = []
+    for i in range(total_readings):
+        h = i % 24
+        readings.append({
+            "timestamp": _ts(h, day=25 + i // 24),
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [
+                _port(1, "Exhaust Fan", 5, True),        # survivor: named, load>0, good uptime
+                _port(2, "Port 2", 5, True),                   # Rule A: 100% uptime, load=0
+                _port(3, "Port 3", 5 if i == 0 else 0, i == 0),  # Rule B: 1/48*24*2/2=0.5 h/day
+                _port(4, "Misting Pump", 5 if i == 0 else 0, i == 0),  # Rule C: same, load=0
+            ],
+        })
+    port_loads = {1: 5, 2: 0, 3: 0, 4: 0}
+    result = build_activity_report(readings, days=days, port_loads=port_loads)
+    assert len(result) == 1
+    assert result[0].name == "Exhaust Fan"
+
+
+# ============ Parametrized threshold boundary ============
+
+@pytest.mark.parametrize("on_count,total,days,port_load,expected_count,label", [
+    # on_hours = on_count/total * 24 * days; per_day = on_hours / days = on_count/total * 24
+    (0,  24, 1, 0, 0, "zero runtime → excluded"),        # 0/24*24 = 0.0 h/day < 1.0
+    (1,  48, 1, 0, 0, "0.5 h/day → excluded"),           # 1/48*24 = 0.5 h/day < 1.0
+    (1,  30, 1, 0, 0, "0.8 h/day → excluded"),           # 1/30*24 = 0.8 h/day < 1.0
+    (1,  24, 1, 0, 1, "1.0 h/day → NOT excluded"),       # 1/24*24 = 1.0 h/day (at boundary)
+    (2,  24, 1, 0, 1, "2.0 h/day → NOT excluded"),       # 2/24*24 = 2.0 h/day > 1.0
+    (1,  48, 1, 5, 1, "0.5 h/day but has load → kept"),  # low runtime but non-zero load
+])
+def test_rule_c_threshold_boundary_named_port(
+    on_count: int, total: int, days: int, port_load: int, expected_count: int, label: str
+) -> None:
+    """Rule C threshold boundary: named port excluded only when < 1.0 h/day AND load=0."""
+    assert _GHOST_LOAD_ZERO_THRESHOLD == 1.0  # guard: test is calibrated to this value
+
+    # Use enough off readings to guarantee a transition (defeats Rule A)
+    # Total readings = on_count + off_count; off_count = total - on_count
+    off_count = total - on_count
+    readings = []
+    for i in range(on_count):
+        readings.append({
+            "timestamp": _ts(i % 24, day=25 + i // 24),
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [_port(1, "Humidifier", 5, True)],
+        })
+    for i in range(off_count):
+        readings.append({
+            "timestamp": _ts(i % 24, day=25 + (on_count + i) // 24),
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [_port(1, "Humidifier", 0, False)],
+        })
+
+    result = build_activity_report(readings, days=days, port_loads={1: port_load})
+    on_hours_per_day = (on_count / total * 24 * days) / days
+    assert len(result) == expected_count, (
+        f"{label}: on_hours_per_day={on_hours_per_day:.2f}, port_load={port_load}: "
+        f"expected {expected_count} port(s), got {len(result)}"
+    )
