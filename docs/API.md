@@ -1267,7 +1267,8 @@ Check whether current VPD is within the target range for a named grow stage.
 
 ### `get_environment_health(device_id, stage="veg")`
 
-Calculate a composite health score (0–100, A–F grade) across temp, humidity, and VPD.
+Calculate a composite health score (0–100, A–F grade) across temp, humidity, and VPD,
+including the actual sensor readings that produced the score.
 
 **Parameters:**
 | Parameter | Type | Description |
@@ -1282,17 +1283,26 @@ Calculate a composite health score (0–100, A–F grade) across temp, humidity,
   "stage": "veg",
   "score": 82,
   "grade": "B",
-  "recommendation": "VPD slightly high — increase humidity or lower temperature.",
+  "top_recommendation": "VPD slightly high — increase humidity or lower temperature.",
   "vpd_score": 70,
   "temp_score": 100,
-  "humidity_score": 85
+  "humidity_score": 85,
+  "temperature_c": 24.7,
+  "temperature_f": 76.5,
+  "humidity_pct": 65.0,
+  "vpd_kpa": 1.24,
+  "human_summary": "Temperature 76.5°F (24.7°C), humidity 65%, VPD 1.24 kPa. Overall health: B (82.0/100)."
 }
 ```
 
 **Field notes:**
 - Composite score weights: VPD 40%, temperature 30%, humidity 30%
 - Grade bands: A=90–100, B=80–89, C=70–79, D=60–69, F=0–59
-- `recommendation` — top actionable suggestion based on the lowest sub-score
+- `top_recommendation` — top actionable suggestion based on the lowest sub-score
+- `temperature_c` / `temperature_f` — current sensor reading in Celsius and Fahrenheit
+- `humidity_pct` — current relative humidity percentage
+- `vpd_kpa` — current vapour-pressure deficit in kPa
+- `human_summary` — one-line natural language summary of readings and overall grade
 
 ---
 
