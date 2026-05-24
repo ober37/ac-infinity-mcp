@@ -34,6 +34,10 @@ class HealthScore:
     temp_score: float
     humidity_score: float
     top_recommendation: str
+    temperature_c: float = 0.0
+    temperature_f: float = 0.0
+    humidity_pct: float = 0.0
+    vpd_kpa: float = 0.0
 
 
 @dataclass
@@ -133,6 +137,10 @@ def calculate_health_score(reading: dict[str, Any], stage: str) -> HealthScore:
         temp_score=temp_score,
         humidity_score=humidity_score,
         top_recommendation=top_recommendation,
+        temperature_c=temp_c,
+        temperature_f=float(reading.get("temperature_f", 0)),
+        humidity_pct=humidity,
+        vpd_kpa=vpd,
     )
 
 

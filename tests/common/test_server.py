@@ -971,6 +971,17 @@ async def test_get_environment_health_happy_path(mock_client):
     assert "top_recommendation" in data
     assert data["device_id"] == "C58ZA"
     assert data["stage"] == "veg"
+    assert data["temperature_c"] == pytest.approx(23.5)
+    assert data["temperature_f"] == pytest.approx(74.3)
+    assert data["humidity_pct"] == pytest.approx(60.0)
+    assert data["vpd_kpa"] == pytest.approx(1.24)
+    assert "human_summary" in data
+    assert "74.3°F" in data["human_summary"]
+    assert "23.5°C" in data["human_summary"]
+    assert "60%" in data["human_summary"]
+    assert "1.24 kPa" in data["human_summary"]
+    assert "temperature" not in data or "temperature_c" in data  # old ambiguous field removed
+    assert "unit" not in data
 
 
 async def test_get_environment_health_bad_stage(mock_client):
@@ -4372,6 +4383,52 @@ async def test_conflict_response_option_1_is_break_out(mock_client):
     assert data["options"]["1_break_out"]["tool"] == "break_out_of_automation"
     assert data["options"]["1_break_out"]["available"] is True
     assert "suggested_reply" in data
+
+
+@pytest.mark.parametrize(
+    "is_on,run_state_val",
+    [
+        (1, 1),  # enabled=True, run_state=True → available True (normal case)
+        (0, 1),  # enabled=False, run_state=True → available True (Issue #84 bug case)
+        (1, 0),  # enabled=True, run_state=False → available True
+    ],
+)
+@pytest.mark.asyncio
+async def test_conflict_response_option_1_available_includes_run_state(
+    mock_client, is_on, run_state_val
+):
+    """opt1.available is True whenever governing automation has enabled OR run_state.
+
+    Issue #84: The selection logic uses ``enabled or run_state`` to find the governing
+    automation, but the original code set ``available`` using only ``enabled``.  A
+    mid-toggle transient state (isOn=0, runState=1) would therefore select a governing
+    automation but then mark opt1 as unavailable — preventing break_out_of_automation
+    from being offered even though it would work.
+
+    Note: the all-disabled boundary guard
+    (test_conflict_response_all_automations_disabled_uses_all_disabled_path) still relies
+    on both isOn=0 and runState=0 — that test must continue to pass unchanged.
+    """
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
+    automations = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST)
+    # Mutate the first entry (Moderate Airflow group lead) to the desired state.
+    automations[0]["isOn"] = is_on
+    automations[0]["runState"] = run_state_val
+    # Ensure the second entry for the same automation group also reflects the state so
+    # _group_automations picks up the right enabled/run_state from entries[0].
+    automations[1]["isOn"] = is_on
+    automations[1]["runState"] = run_state_val
+    mock_client.get_advance_automations.return_value = automations
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_speed("C58ZA", port=1, speed=3, dry_run=False)
+    data = json.loads(result)
+    assert data.get("conflict") == "ADVANCE_AUTOMATION"
+    assert "1_break_out" in data["options"], (
+        f"Expected 1_break_out in options for isOn={is_on}, runState={run_state_val}"
+    )
+    assert data["options"]["1_break_out"]["available"] is True, (
+        f"opt1.available should be True for isOn={is_on}, runState={run_state_val}"
+    )
 
 
 async def test_conflict_response_active_automations_is_list_of_objects(mock_client):

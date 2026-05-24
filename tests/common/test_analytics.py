@@ -933,3 +933,23 @@ def test_rule_c_threshold_boundary_named_port(
         f"{label}: on_hours_per_day={on_hours_per_day:.2f}, speed={speed}, port_load={port_load}: "
         f"expected {expected_count} port(s), got {len(result)}"
     )
+
+
+# ============ calculate_health_score — actual reading fields (#56) ============
+
+
+def test_calculate_health_score_exposes_actual_readings():
+    reading = _reading(temp_c=22.0, humidity=55.0, vpd=1.1)
+    result = calculate_health_score(reading, "veg")
+    assert result.temperature_c == pytest.approx(22.0)
+    assert result.temperature_f == pytest.approx(reading["temperature_f"])
+    assert result.humidity_pct == pytest.approx(55.0)
+    assert result.vpd_kpa == pytest.approx(1.1)
+
+
+def test_calculate_health_score_missing_keys_default_to_zero():
+    result = calculate_health_score({}, "veg")
+    assert result.temperature_c == 0.0
+    assert result.temperature_f == 0.0
+    assert result.humidity_pct == 0.0
+    assert result.vpd_kpa == 0.0

@@ -744,7 +744,8 @@ async def get_environment_health(device_id: str, stage: str = "veg") -> str:
 
     Returns:
         JSON with score (0–100), grade (A–F), per-metric sub-scores,
-        and a top actionable recommendation.
+        top_recommendation, actual sensor readings (temperature_c, temperature_f,
+        humidity_pct, vpd_kpa), and a human_summary one-liner.
     """
     try:
         if stage not in STAGE_TARGETS:
@@ -756,16 +757,17 @@ async def get_environment_health(device_id: str, stage: str = "veg") -> str:
         if not device:
             return json.dumps({"error": f"Device {device_id} not found"})
 
-        parsed = _client().parse_device_data(device)  # has temperature_c — analytics safe
-        temp_unit_raw = parsed.get("temp_unit_raw")
-        unit = _effective_unit(temp_unit_raw)
+        parsed = _client().parse_device_data(device)
 
-        health = calculate_health_score(parsed, stage)  # reads temperature_c — unchanged
+        health = calculate_health_score(parsed, stage)
         result = dataclasses.asdict(health)
         result["device_id"] = device_id
         result["stage"] = stage
-        result["temperature"] = _to_preferred_temp(parsed.get("temperature_c", 0.0), unit)
-        result["unit"] = _unit_label(unit)
+        result["human_summary"] = (
+            f"Temperature {health.temperature_f:.1f}°F ({health.temperature_c:.1f}°C), "
+            f"humidity {health.humidity_pct:.0f}%, VPD {health.vpd_kpa:.2f} kPa. "
+            f"Overall health: {health.grade} ({health.score}/100)."
+        )
         return json.dumps(result, indent=2)
 
     except ACInfinityAuthError as e:
@@ -1268,7 +1270,7 @@ async def _build_advance_conflict_response(
                 f"Call break_out_of_automation(device_id='{device_id}', port={port},"
                 " dry_run=True) to preview."
             ),
-            "available": governing.get("enabled", False),
+            "available": governing.get("enabled", False) or governing.get("run_state", False),
         }
         opt2: dict = {
             "description": (
