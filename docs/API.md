@@ -1895,7 +1895,7 @@ lookup finds:
   - Normal path: `"1_break_out"` (tool: `break_out_of_automation`), `"2_disable_automation"` (tool: `disable_advance_automation`)
   - All-disabled path: `"1_re_disable_to_clear"` (tool: `disable_advance_automation`), `"2_disable_automation"` (available: false)
   - Degraded path: `"1_find_and_disable"` (tool: `list_advance_automations`), `"2_disable_automation"` (available: false)
-- `options.1_break_out.available` — set to `governing.get("enabled", False)`; will be `false` if the automation is enabled but not in a runnable state
+- `options.1_break_out.available` — set to `governing.get("enabled", False) or governing.get("run_state", False)`; `true` when the automation is enabled OR actively running (handles mid-toggle transient state where `isOn=0` but `runState=1`)
 - The `isOpenAutomation` guard condition is documented in Quirk 19
 
 ---
