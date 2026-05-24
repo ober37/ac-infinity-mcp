@@ -1426,6 +1426,91 @@ async def test_get_port_activity_report_get_devices_api_error_degrades_gracefull
     assert "human_summary" in data
 
 
+# ---- Issue #85: Rule C — toggle device data_quality flag in server response ----
+
+async def test_get_port_activity_report_rule_c_toggle_device_flagged_in_response(mock_client):
+    """Rule C: toggle device (speed=1, 0 transitions, 100% uptime) gets data_quality flag."""
+    # Speed=1 simulates 0xF decoded nibble for heater/light/humidifier
+    readings = _make_port_readings_named(24, speed=1, on=True, name="Heater", port=2)
+    hist_payload = json.dumps({
+        "device_id": "C58ZA",
+        "readings": readings,
+        "statistics": {},
+    })
+    mock_client.get_devices.return_value = [{
+        "devCode": "C58ZA",
+        "deviceInfo": {
+            "ports": [{"port": 2, "portsLoad": 5}],  # load>0: Rule A does not fire
+        },
+    }]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        with patch("ac_infinity_mcp.server.get_historical_readings",
+                   return_value=hist_payload):
+            result = await get_port_activity_report("C58ZA", 1)
+    data = json.loads(result)
+    assert "error" not in data
+    # Port is kept in results (not filtered)
+    assert len(data["ports"]) == 1
+    port = data["ports"][0]
+    assert port["data_quality"] == "api_constant_speed"
+    # human_summary must contain the caveat, not a false uptime claim
+    assert "constant-speed history" in data["human_summary"]
+    assert "AC Infinity app does not record" in data["human_summary"]
+    # ports_excluded_count unchanged (Rule C does not filter)
+    assert data["ports_excluded_count"] == 0
+
+
+async def test_get_port_activity_report_rule_c_caveat_not_in_port_lines(mock_client):
+    """Caveat ports are excluded from the normal port_lines summary line."""
+    # Fan port (speed=5) + Heater port (speed=1, Rule C)
+    from datetime import datetime, timedelta
+    base = datetime(2024, 4, 18, 0, 0, 0)
+    readings = [
+        {
+            "timestamp": (base + timedelta(hours=i)).isoformat() + "Z",
+            "temperature_c": 24.0,
+            "humidity": 55.0,
+            "vpd": 1.4,
+            "ports": [
+                {"port": 1, "name": "Inline Fan", "speed": 5, "on": True},
+                {"port": 2, "name": "Heater", "speed": 1, "on": True},
+            ],
+        }
+        for i in range(24)
+    ]
+    hist_payload = json.dumps({
+        "device_id": "C58ZA",
+        "readings": readings,
+        "statistics": {},
+    })
+    mock_client.get_devices.return_value = [{
+        "devCode": "C58ZA",
+        "deviceInfo": {
+            "ports": [
+                {"port": 1, "portsLoad": 5},
+                {"port": 2, "portsLoad": 5},
+            ],
+        },
+    }]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        with patch("ac_infinity_mcp.server.get_historical_readings",
+                   return_value=hist_payload):
+            result = await get_port_activity_report("C58ZA", 1)
+    data = json.loads(result)
+    assert len(data["ports"]) == 2
+    # Fan port has no data_quality flag
+    fan = next(p for p in data["ports"] if p["name"] == "Inline Fan")
+    assert fan["data_quality"] is None
+    # Heater port has Rule C flag
+    heater = next(p for p in data["ports"] if p["name"] == "Heater")
+    assert heater["data_quality"] == "api_constant_speed"
+    # human_summary includes the fan uptime claim
+    assert "Inline Fan" in data["human_summary"]
+    assert "100.0% uptime" in data["human_summary"]
+    # human_summary includes the heater caveat
+    assert "Heater (Port 2) shows constant-speed history" in data["human_summary"]
+
+
 # ============ set_port_speed ============
 
 MOCK_SET_PORT_MODE_DRY = {
