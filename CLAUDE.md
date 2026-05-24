@@ -263,10 +263,15 @@ Run each command and confirm the expected output before checking the box:
         appear; do not blanket-ignore.
 
 **Gate 5 — Manual Smoke Test Proposal + Execution**
+- **Restart Claude Desktop before executing.** The MCP server process caches imported modules
+  at startup. If commits were made to the worktree since the last Claude Desktop launch, the
+  server is running stale code — new fields and behavior will be absent from live responses.
+  A restart takes ~5 seconds; skipping it can produce an entire session of phantom failures.
 - Write smoke test plan for the PR scope
 - Present plan to user for confirmation before executing
 - Execute (live API or mock verification)
-- Report pass/fail per test case explicitly
+- Report pass/fail per test case explicitly as user-query + agent-says pairs
+- On any failure: file a new GitHub issue immediately; do not ask to merge until user resolves
 
 **Failure at any gate → fix → restart from Gate 1.**
 
