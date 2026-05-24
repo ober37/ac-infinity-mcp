@@ -336,7 +336,7 @@ def test_build_activity_report_peak_hour_utc():
             "ports": [_port(1, "Fan", 5, True)],
         })
     result = build_activity_report(readings, port_loads={1: 5})
-    assert result[0].peak_hour_utc == 14
+    assert result[0].peak_hour_utc == "2024-04-25T14:00:00"
 
 
 def test_build_activity_report_multiple_ports():
@@ -511,7 +511,7 @@ def test_build_activity_report_peak_hour_detected_correctly():
         })
     result = build_activity_report(readings, days=1)
     assert len(result) == 1
-    assert result[0].peak_hour_utc == 14
+    assert result[0].peak_hour_utc == "2024-04-25T14:00:00"
 
 
 def test_build_activity_report_peak_hour_none_when_never_ran():

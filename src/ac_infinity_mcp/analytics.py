@@ -61,7 +61,7 @@ class ActivityReport:
     transitions: int
     avg_speed_when_running: float
     uptime_pct: float
-    peak_hour_utc: int | None = None
+    peak_hour_utc: str | None = None
     data_quality: str | None = None  # "api_constant_speed" when toggle-device history is unreliable
 
 
@@ -247,9 +247,12 @@ def build_activity_report(
     for r in readings:
         ts_str = r.get("timestamp", "")
         try:
-            ts_hour = datetime.fromisoformat(ts_str.rstrip("Z")).hour
+            ts_dt = datetime.fromisoformat(ts_str.rstrip("Z"))
+            ts_hour = ts_dt.hour
+            ts_date_str = ts_dt.strftime("%Y-%m-%d")
         except (ValueError, AttributeError, TypeError):
             ts_hour = None
+            ts_date_str = None
 
         for port in r.get("ports", []):
             port_num = port.get("port")
@@ -271,8 +274,8 @@ def build_activity_report(
             pd = port_data[port_num]
             pd["speeds"].append(speed)
             pd["on_flags"].append(on)
-            if ts_hour is not None:
-                pd["hours"].append(ts_hour if on else None)
+            if ts_hour is not None and ts_date_str is not None:
+                pd["hours"].append((ts_date_str, ts_hour) if on else None)
 
             if pd["prev_on"] is not None and on != pd["prev_on"]:
                 pd["transitions"] += 1
@@ -296,11 +299,12 @@ def build_activity_report(
 
         uptime_pct = round(on_count / total * 100, 1)
 
-        hour_counts: dict[int, int] = {}
+        hour_counts: dict[tuple[str, int], int] = {}
         for h in pd["hours"]:
             if h is not None:
                 hour_counts[h] = hour_counts.get(h, 0) + 1
-        peak_hour_utc = max(hour_counts, key=hour_counts.get) if hour_counts else None  # type: ignore[arg-type]
+        peak_dt_hour = max(hour_counts, key=hour_counts.get) if hour_counts else None  # type: ignore[arg-type]
+        peak_hour_utc = f"{peak_dt_hour[0]}T{peak_dt_hour[1]:02d}:00:00" if peak_dt_hour else None
 
         # Detect toggle-device history artifact: AC Infinity always emits nibble 0xF
         # (decoded speed=1) for heaters/lights/humidifiers, even when physically off.

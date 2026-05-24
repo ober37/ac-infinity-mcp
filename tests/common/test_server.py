@@ -3,7 +3,9 @@
 import asyncio
 import copy
 import json
+from datetime import UTC, datetime
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -18,11 +20,14 @@ from ac_infinity_mcp.server import (
     _check_advance_mode,
     _decode_mode,
     _filter_readings_by_time,
+    _format_peak_local,
     _format_schedule_time,
+    _format_window_dt,
     _group_automations,
     _parse_duration_seconds,
     _parse_schedule_time,
     _sanitize_api_string,
+    _short_date,
     _validate_automation_id,
     apply_grow_stage_template,
     apply_sampling,
@@ -1247,7 +1252,7 @@ def _make_port_readings_named(n: int, speed: int, on: bool, name: str, port: int
 
 
 async def test_get_port_activity_report_has_new_fields(mock_client):
-    """Response includes ports_excluded_count and human_summary fields."""
+    """Response includes ports_excluded_count, human_summary, and window fields."""
     readings = _make_port_readings(24, speed=5, on=True)
     mock_client.get_historical_data.return_value = [{}] * 24
     mock_client.parse_history_record.side_effect = (
@@ -1258,8 +1263,12 @@ async def test_get_port_activity_report_has_new_fields(mock_client):
     data = json.loads(result)
     assert "ports_excluded_count" in data
     assert "human_summary" in data
+    assert "window_start_local" in data
+    assert "window_end_local" in data
     assert isinstance(data["ports_excluded_count"], int)
     assert isinstance(data["human_summary"], str)
+    assert isinstance(data["window_start_local"], str)
+    assert isinstance(data["window_end_local"], str)
 
 
 async def test_get_port_activity_report_rule_a_ghost_excluded(mock_client):
@@ -1346,8 +1355,9 @@ async def test_get_port_activity_report_all_ports_excluded(mock_client):
     data = json.loads(result)
     assert data["ports"] == []
     assert data["ports_excluded_count"] == 2
-    # human_summary should describe 0 active ports
     assert "No active port activity" in data["human_summary"]
+    assert "window_start_local" in data
+    assert "window_end_local" in data
 
 
 async def test_get_port_activity_report_partial_exclusion(mock_client):
@@ -1674,6 +1684,142 @@ async def test_get_port_activity_report_get_devices_api_error_degrades_gracefull
     # ACInfinityAPIError is caught → structured error response
     assert data["error"] == "AC Infinity API error"
     assert "detail" in data
+
+
+# ============ get_port_activity_report — window disclosure (#112) ============
+
+_UTC = UTC
+_CDT = ZoneInfo("America/Chicago")
+# Frozen at 2025-05-24 15:35 UTC = 10:35 AM CDT; rolling 24h window starts at May 23 10:35 AM CDT
+_FROZEN_MAY24 = datetime(2025, 5, 24, 15, 35, 0, tzinfo=_UTC)
+
+
+@pytest.mark.parametrize("include_date,expected", [
+    (True, "May 23, 11:00 AM CDT"),
+    (False, "11:00 AM CDT"),
+])
+def test_format_peak_local(include_date, expected):
+    """_format_peak_local: with and without date prefix based on window span."""
+    assert _format_peak_local("2025-05-23T16:00:00", _CDT, include_date) == expected
+
+
+def test_format_window_dt_midnight():
+    """_format_window_dt: hour=0 formats as '12:xx AM'."""
+    dt = datetime(2025, 5, 24, 0, 0, 0, tzinfo=_UTC)
+    assert _format_window_dt(dt) == "May 24, 12:00 AM UTC"
+
+
+def test_format_window_dt_noon():
+    """_format_window_dt: hour=12 formats as '12:xx PM'."""
+    dt = datetime(2025, 5, 24, 12, 0, 0, tzinfo=_UTC)
+    assert _format_window_dt(dt) == "May 24, 12:00 PM UTC"
+
+
+def test_short_date_single_digit_day():
+    """_short_date: single-digit day has no leading zero."""
+    dt = datetime(2025, 5, 3, 12, 0, 0, tzinfo=_UTC)
+    assert _short_date(dt) == "May 3"
+
+
+async def test_get_port_activity_report_window_fields_multi_day(mock_client):
+    """window_start_local/window_end_local reflect the rolling 24h window in CDT."""
+    readings = _make_port_readings(5, speed=5, on=True)
+    mock_client.get_historical_data.return_value = [{}] * 5
+    mock_client.parse_history_record.side_effect = lambda r, port_names=None: readings[0]
+    with patch("ac_infinity_mcp.server._utcnow", return_value=_FROZEN_MAY24):
+        with patch("ac_infinity_mcp.server.aci_client", mock_client):
+            result = await get_port_activity_report("C58ZA", 1)
+    data = json.loads(result)
+    assert data["window_start_local"] == "May 23, 10:35 AM CDT"
+    assert data["window_end_local"] == "May 24, 10:35 AM CDT"
+
+
+async def test_get_port_activity_report_window_fields_utc_fallback(mock_client):
+    """When zoneId is absent, window fields use UTC abbreviation."""
+    mock_client.get_devices.return_value = [{
+        "devCode": "C58ZA",
+        "devId": "1424979258063367506",
+        "deviceInfo": {"ports": []},
+    }]
+    readings = _make_port_readings(5, speed=5, on=True)
+    mock_client.get_historical_data.return_value = [{}] * 5
+    mock_client.parse_history_record.side_effect = lambda r, port_names=None: readings[0]
+    with patch("ac_infinity_mcp.server._utcnow", return_value=_FROZEN_MAY24):
+        with patch("ac_infinity_mcp.server.aci_client", mock_client):
+            result = await get_port_activity_report("C58ZA", 1)
+    data = json.loads(result)
+    assert "UTC" in data["window_start_local"]
+    assert "UTC" in data["window_end_local"]
+
+
+async def test_get_port_activity_report_human_summary_includes_date_range(mock_client):
+    """human_summary preamble includes the rolling-window date range."""
+    readings = _make_port_readings(5, speed=5, on=True)
+    mock_client.get_historical_data.return_value = [{}] * 5
+    mock_client.parse_history_record.side_effect = lambda r, port_names=None: readings[0]
+    with patch("ac_infinity_mcp.server._utcnow", return_value=_FROZEN_MAY24):
+        with patch("ac_infinity_mcp.server.aci_client", mock_client):
+            result = await get_port_activity_report("C58ZA", 1)
+    data = json.loads(result)
+    assert "May 23 – May 24" in data["human_summary"]
+
+
+async def test_get_port_activity_report_peak_hour_local_includes_date_when_multi_day(mock_client):
+    """peak_hour_local includes date prefix when window spans multiple calendar days."""
+    # 3 on-readings at UTC 16:xx on May 23, 1 at 10:xx, 1 at 08:xx on May 24.
+    # Peak bucket: ("2025-05-23", 16) → May 23, 11:00 AM CDT (UTC-5 in May)
+    peak_readings = [
+        {
+            "timestamp": f"2025-05-23T16:0{i}:00Z",
+            "temperature_c": 24.0, "humidity": 55.0, "vpd": 1.4,
+            "ports": [{"port": 1, "name": "Inline Fan", "speed": 5, "on": True}],
+        }
+        for i in range(3)
+    ] + [
+        {
+            "timestamp": "2025-05-23T10:00:00Z",
+            "temperature_c": 24.0, "humidity": 55.0, "vpd": 1.4,
+            "ports": [{"port": 1, "name": "Inline Fan", "speed": 5, "on": True}],
+        },
+        {
+            "timestamp": "2025-05-24T08:00:00Z",
+            "temperature_c": 24.0, "humidity": 55.0, "vpd": 1.4,
+            "ports": [{"port": 1, "name": "Inline Fan", "speed": 5, "on": True}],
+        },
+    ]
+    mock_client.get_historical_data.return_value = [{}] * len(peak_readings)
+    idx = 0
+
+    def _side(r, port_names=None):
+        nonlocal idx
+        v = peak_readings[idx]
+        idx += 1
+        return v
+
+    mock_client.parse_history_record.side_effect = _side
+    with patch("ac_infinity_mcp.server._utcnow", return_value=_FROZEN_MAY24):
+        with patch("ac_infinity_mcp.server.aci_client", mock_client):
+            result = await get_port_activity_report("C58ZA", 1)
+    data = json.loads(result)
+    assert data["ports"][0]["peak_hour_local"] == "May 23, 11:00 AM CDT"
+
+
+async def test_get_port_activity_report_dst_boundary(mock_client):
+    """Window straddling DST spring-forward shows CST for start and CDT for end."""
+    # March 9 2025: 2:00 AM CST springs forward to 3:00 AM CDT = 8:00 AM UTC.
+    # window_start = March 8, 2:00 AM CST; window_end = March 9, 3:00 AM CDT.
+    frozen_dst = datetime(2025, 3, 9, 8, 0, 0, tzinfo=_UTC)
+    readings = _make_port_readings(5, speed=5, on=True)
+    mock_client.get_historical_data.return_value = [{}] * 5
+    mock_client.parse_history_record.side_effect = lambda r, port_names=None: readings[0]
+    with patch("ac_infinity_mcp.server._utcnow", return_value=frozen_dst):
+        with patch("ac_infinity_mcp.server.aci_client", mock_client):
+            result = await get_port_activity_report("C58ZA", 1)
+    data = json.loads(result)
+    assert "CST" in data["window_start_local"]
+    assert "CDT" in data["window_end_local"]
+    assert "March 8" in data["window_start_local"]
+    assert "March 9" in data["window_end_local"]
 
 
 # ============ set_port_speed ============

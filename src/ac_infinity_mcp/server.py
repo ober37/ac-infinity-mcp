@@ -887,9 +887,12 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         days: Number of days to analyze. Default: 7. Must be 1–30.
 
     Returns:
-        JSON with per-port on_hours (total hours ON over the full period), off_hours,
-        transitions, avg_speed_when_running, uptime_pct, and peak_hour_local
-        (device-local time string, e.g. '5:00 PM CDT', or null if the port never ran).
+        JSON with window_start_local and window_end_local (the exact local time range
+        analyzed, e.g. 'May 23, 10:35 AM CDT' to 'May 24, 10:35 AM CDT'), per-port
+        on_hours (total hours ON over the full period), off_hours, transitions,
+        avg_speed_when_running, uptime_pct, and peak_hour_local (device-local time
+        string, e.g. 'May 23, 4:00 PM CDT' when window spans multiple calendar days,
+        or '4:00 PM CDT' for a single-day window; null if the port never ran).
         ports_excluded_count is the number of ports removed by the ghost-port filter.
         Five rules apply: Rule A (constant 100%% uptime + zero load), Rule B
         (auto-named Port N with low average runtime or zero load), Rule C (named
@@ -914,7 +917,12 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         - When presenting on_hours to a grower, translate it from raw hours to natural
           language, e.g.: "The fan ran for 36.0 hours over the past 3 days (about 50%
           of the time)." Do NOT describe on_hours as hours per day.
-        - peak_hour_local is already in device-local time (e.g. '5:00 PM CDT').
+        - window_start_local and window_end_local show the exact analysis window in the
+          device's local timezone. Use these when explaining why a device shows activity
+          from multiple calendar days (the window is a rolling 24h/N-day span, not a
+          calendar-day boundary).
+        - peak_hour_local is already in device-local time with a date prefix when the
+          window spans multiple calendar days, e.g. 'May 23, 4:00 PM CDT'.
         - When data_quality is "api_constant_speed", relay the human_summary caveat
           text for that port verbatim. Do not estimate or infer runtime from on_hours.
     """
@@ -942,9 +950,15 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
                 port_load_types[pn] = p.get("loadType") or 0
                 port_names[pn] = p.get("portName", f"Port {pn}")
 
-        today = datetime.now(UTC).replace(tzinfo=None)
+        now_utc = _utcnow()
+        today = now_utc.replace(tzinfo=None)
         start_ts = int(calendar.timegm((today - timedelta(days=days)).timetuple()))
         end_ts = int(calendar.timegm(today.replace(hour=23, minute=59, second=59).timetuple()))
+
+        window_start_dt = datetime.fromtimestamp(start_ts, tz=UTC).astimezone(tz)
+        window_end_dt = now_utc.astimezone(tz)
+        window_start_local = _format_window_dt(window_start_dt)
+        window_end_local = _format_window_dt(window_end_dt)
 
         raw_records = await asyncio.to_thread(
             _client().get_historical_data, dev_id, start_ts, end_ts
@@ -970,6 +984,9 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         )
         ports_excluded_count = max(0, unique_port_count - len(result))
 
+        multi_day_window = window_start_dt.date() != window_end_dt.date()
+        date_range = f"{_short_date(window_start_dt)} – {_short_date(window_end_dt)}"
+
         # Build output with peak_hour_local instead of peak_hour_utc
         port_dicts = [
             {
@@ -981,7 +998,7 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
                 "avg_speed_when_running": p.avg_speed_when_running,
                 "uptime_pct": p.uptime_pct,
                 "peak_hour_local": (
-                    _utc_hour_to_local(p.peak_hour_utc, tz)
+                    _format_peak_local(p.peak_hour_utc, tz, multi_day_window)
                     if p.peak_hour_utc is not None else None
                 ),
                 "data_quality": p.data_quality,
@@ -1016,7 +1033,7 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
             )
             active_port_word = "port" if len(result) == 1 else "ports"
             preamble = (
-                f"Analyzed {days} {day_word} of activity across"
+                f"Analyzed {days} {day_word} ({date_range}) of activity across"
                 f" {len(result)} active {active_port_word}."
             )
             summary_parts = [preamble]
@@ -1038,6 +1055,8 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         return json.dumps({
             "device_id": device_id,
             "days_analyzed": days,
+            "window_start_local": window_start_local,
+            "window_end_local": window_end_local,
             "readings_used": len(readings),
             "ports": port_dicts,
             "ports_excluded_count": ports_excluded_count,
@@ -1191,18 +1210,42 @@ def _utc_iso_to_local(utc_iso: str | None, tz: ZoneInfo) -> str | None:
     return dt.astimezone(tz).strftime("%Y-%m-%dT%H:%M:%S %Z")
 
 
-def _utc_hour_to_local(utc_hour: int, tz: ZoneInfo) -> str:
-    """Convert a UTC integer hour (0–23) to a local time string like '5:00 PM CDT'.
+def _utcnow() -> datetime:
+    """Returns current UTC time as a tz-aware datetime. Wrappable for testing."""
+    return datetime.now(UTC)
 
-    Uses floor-of-whole-hours UTC offset. Sub-hour offsets (UTC+5:30, UTC-3:30)
-    display the floor-whole-hours equivalent — accepted per Quirk 23.
+
+def _format_window_dt(dt: datetime) -> str:
+    """Format a tz-aware datetime to a human-readable local string, e.g. 'May 23, 10:35 AM CDT'.
+
+    Caller must always pass a tz-aware datetime — asserted at entry.
+    Uses literal 'AM'/'PM' strings to avoid strftime('%p') locale variation.
     """
-    offset_hours = int(datetime.now(tz).utcoffset().total_seconds() // 3600)  # type: ignore[union-attr]
-    local_hour = (utc_hour + offset_hours) % 24
-    period = "AM" if local_hour < 12 else "PM"
-    display_hour = local_hour % 12 or 12
-    tz_name = datetime.now(tz).strftime("%Z")
-    return f"{display_hour}:00 {period} {tz_name}"
+    assert dt.tzinfo is not None, "_format_window_dt requires a tz-aware datetime"
+    period = "AM" if dt.hour < 12 else "PM"
+    display_hour = dt.hour % 12 or 12
+    tz_name = dt.strftime("%Z")
+    return f"{dt.strftime('%B')} {dt.day}, {display_hour}:{dt.strftime('%M')} {period} {tz_name}"
+
+
+def _short_date(dt: datetime) -> str:
+    """Return a short local date string like 'May 23'. Cross-platform (no %-d)."""
+    return f"{dt.strftime('%B')} {dt.day}"
+
+
+def _format_peak_local(peak_utc_iso: str, tz: ZoneInfo, include_date: bool) -> str:
+    """Convert a tz-naive UTC ISO datetime string to a local time string.
+
+    When include_date=True returns 'May 23, 4:00 PM CDT'; else '4:00 PM CDT'.
+    Uses literal 'AM'/'PM' strings to avoid strftime('%p') locale variation.
+    """
+    dt = datetime.fromisoformat(peak_utc_iso).replace(tzinfo=UTC).astimezone(tz)
+    period = "AM" if dt.hour < 12 else "PM"
+    display_hour = dt.hour % 12 or 12
+    time_str = f"{display_hour}:{dt.strftime('%M')} {period} {dt.strftime('%Z')}"
+    if include_date:
+        return f"{_short_date(dt)}, {time_str}"
+    return time_str
 
 
 async def _check_advance_mode(dev_id: str | None, port: int, fallback: str) -> str:
