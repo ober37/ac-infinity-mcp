@@ -1399,6 +1399,219 @@ async def test_get_port_activity_report_partial_exclusion(mock_client):
     assert "1 port excluded" in data["human_summary"]
 
 
+# ============ get_port_activity_report — data_quality (#85) ============
+
+def _make_toggle_port_readings(n: int, port_num: int = 2, name: str = "Heater") -> list[dict]:
+    """All readings have speed=1/on=True (the 0xF toggle-nibble artifact)."""
+    from datetime import datetime, timedelta
+    base = datetime(2024, 4, 18, 0, 0, 0)
+    return [
+        {
+            "timestamp": (base + timedelta(hours=i)).isoformat() + "Z",
+            "temperature_c": 22.0,
+            "humidity": 55.0,
+            "vpd": 1.2,
+            "ports": [{"port": port_num, "name": name, "speed": 1, "on": True}],
+        }
+        for i in range(n)
+    ]
+
+
+def _make_toggle_device(port_num: int = 2, load_type: int = 4, ports_load: int = 5) -> dict:
+    """Device fixture with a toggle-hardware port (loadType 4 or 128)."""
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device["deviceInfo"]["ports"] = [
+        {"port": 1, "portName": "Exhaust Fan", "portsLoad": 5, "loadType": 0},
+        {"port": port_num, "portName": "Heater", "portsLoad": ports_load, "loadType": load_type},
+    ]
+    return device
+
+
+async def test_get_port_activity_report_data_quality_in_output(mock_client):
+    """Port dict includes data_quality key for all ports."""
+    readings = _make_port_readings(24, speed=5, on=True)
+    mock_client.get_historical_data.return_value = [{}] * 24
+    mock_client.parse_history_record.side_effect = lambda r, port_names=None: readings[0]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 1)
+    data = json.loads(result)
+    assert len(data["ports"]) == 1
+    assert "data_quality" in data["ports"][0]
+    assert data["ports"][0]["data_quality"] is None  # speed=5, not toggle artifact
+
+
+async def test_get_port_activity_report_data_quality_caveat_human_summary(mock_client):
+    """Toggle-hardware port (loadType=4, portsLoad>0) → caveat appears in human_summary."""
+    mock_client.get_devices.return_value = [_make_toggle_device()]
+    readings = _make_toggle_port_readings(72)
+    mock_client.get_historical_data.return_value = [{}] * 72
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        val = readings[idx % len(readings)]
+        idx += 1
+        return val
+
+    mock_client.parse_history_record.side_effect = _side_effect
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 3)
+    data = json.loads(result)
+
+    # The Heater should be present with data_quality set
+    heater_ports = [p for p in data["ports"] if p["name"] == "Heater"]
+    assert len(heater_ports) == 1, "Heater (portsLoad>0) must not be filtered"
+    assert heater_ports[0]["data_quality"] == "api_constant_speed"
+
+    # human_summary must mention the caveat, not quote uptime
+    summary = data["human_summary"]
+    assert "activity data not supported" in summary
+    assert "Heater (Port 2)" in summary
+    assert "currently ON" in summary  # portsLoad=5 → ON
+
+
+async def test_get_port_activity_report_reliable_ports_shown_normally(mock_client):
+    """Reliable ports still appear with uptime in human_summary alongside caveat port."""
+    mock_client.get_devices.return_value = [_make_toggle_device()]
+
+    # Build combined readings with both ports in each record
+    from datetime import datetime, timedelta
+    base = datetime(2024, 4, 18, 0, 0, 0)
+    combined = [
+        {
+            "timestamp": (base + timedelta(hours=i)).isoformat() + "Z",
+            "temperature_c": 22.0,
+            "humidity": 55.0,
+            "vpd": 1.2,
+            "ports": [
+                {"port": 1, "name": "Exhaust Fan", "speed": 5, "on": True},
+                {"port": 2, "name": "Heater", "speed": 1, "on": True},
+            ],
+        }
+        for i in range(72)
+    ]
+    mock_client.get_historical_data.return_value = [{}] * 72
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        val = combined[idx % len(combined)]
+        idx += 1
+        return val
+
+    mock_client.parse_history_record.side_effect = _side_effect
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 3)
+    data = json.loads(result)
+
+    summary = data["human_summary"]
+    # Reliable fan should appear with uptime
+    assert "Exhaust Fan (Port 1)" in summary
+    assert "uptime" in summary
+    # Caveat heater should appear with caveat text, not uptime
+    assert "activity data not supported" in summary
+
+
+async def test_get_port_activity_report_data_quality_currently_off(mock_client):
+    """Toggle port with portsLoad=0 is filtered by Rule D (not kept as caveat)."""
+    mock_client.get_devices.return_value = [_make_toggle_device(ports_load=0)]
+    readings = _make_toggle_port_readings(72)
+    mock_client.get_historical_data.return_value = [{}] * 72
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        val = readings[idx % len(readings)]
+        idx += 1
+        return val
+
+    mock_client.parse_history_record.side_effect = _side_effect
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 3)
+    data = json.loads(result)
+    # Rule D filters ports with portsLoad=0 and avg_speed<=1 — no caveat port survives
+    heater_ports = [p for p in data["ports"] if p["name"] == "Heater"]
+    assert len(heater_ports) == 0, "Rule D must filter zero-load toggle port"
+
+
+async def test_get_port_activity_report_all_caveat_human_summary(mock_client):
+    """When every port has data_quality='api_constant_speed', summary omits the uptime line."""
+    # Only a heater port — the exhaust fan port is removed from this device fixture
+    device = _make_toggle_device()
+    device["deviceInfo"]["ports"] = [
+        {"port": 2, "portName": "Heater", "portsLoad": 5, "loadType": 4},
+    ]
+    mock_client.get_devices.return_value = [device]
+    readings = _make_toggle_port_readings(72)
+    mock_client.get_historical_data.return_value = [{}] * 72
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        val = readings[idx % len(readings)]
+        idx += 1
+        return val
+
+    mock_client.parse_history_record.side_effect = _side_effect
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 3)
+    data = json.loads(result)
+    summary = data["human_summary"]
+    # Summary should not have orphaned "." from empty port_lines
+    assert " ." not in summary
+    assert "activity data not supported" in summary
+
+
+async def test_get_port_activity_report_ports_excluded_count_unchanged_with_caveat(mock_client):
+    """ports_excluded_count reflects filtered ports only, not caveat ports."""
+    # Device: port 1 (fan, reliable), port 2 (heater, toggle/caveat), port 3 (auto-named, filtered)
+    device = _make_toggle_device()
+    device["deviceInfo"]["ports"] = [
+        {"port": 1, "portName": "Exhaust Fan", "portsLoad": 5, "loadType": 0},
+        {"port": 2, "portName": "Heater", "portsLoad": 5, "loadType": 4},
+        {"port": 3, "portName": "Port 3", "portsLoad": 0, "loadType": 0},
+    ]
+    mock_client.get_devices.return_value = [device]
+    from datetime import datetime, timedelta
+    base = datetime(2024, 4, 18, 0, 0, 0)
+    combined = [
+        {
+            "timestamp": (base + timedelta(hours=i)).isoformat() + "Z",
+            "temperature_c": 22.0,
+            "humidity": 55.0,
+            "vpd": 1.2,
+            "ports": [
+                {"port": 1, "name": "Exhaust Fan", "speed": 5, "on": True},
+                {"port": 2, "name": "Heater", "speed": 1, "on": True},
+                {"port": 3, "name": "Port 3", "speed": 1, "on": True},
+            ],
+        }
+        for i in range(72)
+    ]
+    mock_client.get_historical_data.return_value = [{}] * 72
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        val = combined[idx % len(combined)]
+        idx += 1
+        return val
+
+    mock_client.parse_history_record.side_effect = _side_effect
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 3)
+    data = json.loads(result)
+    # Port 3 (Port N, avg speed=1<=1, portsLoad=0) → Rule D filters it → excluded_count=1
+    # Port 2 (Heater, toggle, portsLoad=5) → caveat → in ports with data_quality set
+    # Port 1 (Exhaust Fan, speed=5, portsLoad=5) → reliable → in ports
+    assert data["ports_excluded_count"] == 1
+    port_names = [p["name"] for p in data["ports"]]
+    assert "Exhaust Fan" in port_names
+    assert "Heater" in port_names
+    heater = next(p for p in data["ports"] if p["name"] == "Heater")
+    assert heater["data_quality"] == "api_constant_speed"
+
+
 async def test_get_port_activity_report_get_devices_api_error_degrades_gracefully(mock_client):
     """get_devices failure → ACInfinityAPIError is caught by the error handler."""
     # In the new implementation, get_devices failure propagates as an API error.

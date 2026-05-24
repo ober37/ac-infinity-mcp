@@ -49,6 +49,9 @@ class TrendReport:
     alert: bool
 
 
+_TOGGLE_LOAD_TYPES: frozenset[int] = frozenset({4, 128})
+
+
 @dataclass
 class ActivityReport:
     port: int
@@ -59,6 +62,7 @@ class ActivityReport:
     avg_speed_when_running: float
     uptime_pct: float
     peak_hour_utc: int | None = None
+    data_quality: str | None = None  # "api_constant_speed" when toggle-device history is unreliable
 
 
 def _range_score(value: float, low: float, high: float) -> float:
@@ -224,6 +228,7 @@ def build_activity_report(
     readings: list[dict[str, Any]],
     days: int = 1,
     port_loads: dict[int, int] | None = None,
+    port_load_types: dict[int, int] | None = None,
 ) -> list[ActivityReport]:
     """Build per-port runtime activity report from parsed history readings.
 
@@ -297,6 +302,24 @@ def build_activity_report(
                 hour_counts[h] = hour_counts.get(h, 0) + 1
         peak_hour_utc = max(hour_counts, key=hour_counts.get) if hour_counts else None  # type: ignore[arg-type]
 
+        # Detect toggle-device history artifact: AC Infinity always emits nibble 0xF
+        # (decoded speed=1) for heaters/lights/humidifiers, even when physically off.
+        # All three conditions must hold AND the port must be confirmed toggle hardware
+        # (loadType 4 or 128) to avoid flagging a variable-speed device stuck at speed 1.
+        all_running_are_one = bool(running_speeds) and all(s == 1 for s in running_speeds)
+        is_toggle_hardware = (
+            port_load_types is not None
+            and port_load_types.get(port_num) in _TOGGLE_LOAD_TYPES
+        )
+        data_quality: str | None = None
+        if (
+            pd["transitions"] == 0
+            and uptime_pct == 100.0
+            and all_running_are_one
+            and is_toggle_hardware
+        ):
+            data_quality = "api_constant_speed"
+
         reports.append(
             ActivityReport(
                 port=port_num,
@@ -307,6 +330,7 @@ def build_activity_report(
                 avg_speed_when_running=avg_speed,
                 uptime_pct=uptime_pct,
                 peak_hour_utc=peak_hour_utc,
+                data_quality=data_quality,
             )
         )
 

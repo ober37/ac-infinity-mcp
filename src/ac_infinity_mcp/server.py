@@ -899,12 +899,22 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         excluded ports when ports_excluded_count > 0. Do not repeat the exclusion count
         in prose response.
 
+        data_quality is null for ports with reliable history. When data_quality is
+        "api_constant_speed", the AC Infinity API cannot distinguish the device's
+        configured speed from its actual runtime state (affects heaters, lights,
+        humidifiers — toggle hardware, loadType 4 or 128). For these ports, on_hours
+        and uptime_pct are fabricated and MUST NOT be presented to the grower as actual
+        runtime data. The human_summary caveat text for these ports should be relayed
+        verbatim — do not quote on_hours or uptime_pct even "with caveats."
+
     Presentation guidance:
         - Always refer to ports as 'Name (Port N)', e.g., 'Exhaust Fan (Port 3)'.
         - When presenting on_hours to a grower, translate it from raw hours to natural
           language, e.g.: "The fan ran for 36.0 hours over the past 3 days (about 50%
           of the time)." Do NOT describe on_hours as hours per day.
         - peak_hour_local is already in device-local time (e.g. '5:00 PM CDT').
+        - When data_quality is "api_constant_speed", relay the human_summary caveat
+          text for that port verbatim. Do not estimate or infer runtime from on_hours.
     """
     try:
         if not 1 <= days <= 30:
@@ -919,13 +929,15 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         zone_id = device.get("zoneId")
         tz = _effective_tz(zone_id)
 
-        # port_loads for ghost-port Rule A filter
+        # port_loads for ghost-port Rule A filter; port_load_types for data_quality detection
         port_loads: dict[int, int] = {}
+        port_load_types: dict[int, int] = {}
         port_names: dict[int, str] = {}
         for p in device.get("deviceInfo", {}).get("ports", []):
             pn = p.get("port")
             if pn is not None:
                 port_loads[pn] = p.get("portsLoad") or 0
+                port_load_types[pn] = p.get("loadType") or 0
                 port_names[pn] = p.get("portName", f"Port {pn}")
 
         today = datetime.now(UTC).replace(tzinfo=None)
@@ -949,7 +961,10 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         })
 
         result = build_activity_report(
-            readings, days=days, port_loads=port_loads if port_loads else None
+            readings,
+            days=days,
+            port_loads=port_loads if port_loads else None,
+            port_load_types=port_load_types if port_load_types else None,
         )
         ports_excluded_count = max(0, unique_port_count - len(result))
 
@@ -967,9 +982,13 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
                     _utc_hour_to_local(p.peak_hour_utc, tz)
                     if p.peak_hour_utc is not None else None
                 ),
+                "data_quality": p.data_quality,
             }
             for p in result
         ]
+
+        reliable_dicts = [d for d in port_dicts if d.get("data_quality") is None]
+        caveat_results = [r for r in result if r.data_quality == "api_constant_speed"]
 
         day_word = "day" if days == 1 else "days"
         if result:
@@ -980,7 +999,12 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
                     f", most active around {p['peak_hour_local']}"
                     if p["peak_hour_local"] else ""
                 )
-                for p in port_dicts
+                for p in reliable_dicts
+            )
+            caveat_lines = " ".join(
+                f"{r.name} (Port {r.port}): activity data not supported"
+                f" (currently {'ON' if port_loads.get(r.port, 0) > 0 else 'OFF'})."
+                for r in caveat_results
             )
             port_word = "port" if ports_excluded_count == 1 else "ports"
             excl = (
@@ -988,10 +1012,15 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
                 if ports_excluded_count > 0
                 else ""
             )
-            human_summary = (
-                f"Analyzed {days} {day_word} of activity across {len(result)} active ports. "
-                f"{port_lines}.{excl}"
-            )
+            preamble = f"Analyzed {days} {day_word} of activity across {len(result)} active ports."
+            summary_parts = [preamble]
+            if port_lines:
+                summary_parts.append(f"{port_lines}.")
+            if caveat_lines:
+                summary_parts.append(caveat_lines)
+            if excl:
+                summary_parts.append(excl.strip())
+            human_summary = " ".join(summary_parts)
         else:
             human_summary = (
                 f"No active port activity was detected over the past {days} {day_word}. "
