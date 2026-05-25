@@ -828,7 +828,7 @@ async def detect_environment_trends(device_id: str, days: int = 7) -> str:
         for p in device.get("deviceInfo", {}).get("ports", []):
             pn = p.get("port")
             if pn is not None:
-                port_names[pn] = p.get("portName", f"Port {pn}")
+                port_names[pn] = _sanitize_api_string(p.get("portName"), 64) or f"Port {pn}"
 
         raw_records = await asyncio.to_thread(
             _client().get_historical_data, dev_id, start_ts, end_ts
@@ -972,7 +972,7 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
                 port_loads[pn] = p.get("portsLoad") or 0
                 port_load_types[pn] = p.get("loadType") or 0
                 port_speaks[pn] = (p.get("speak") or 0) > 0
-                port_names[pn] = p.get("portName", f"Port {pn}")
+                port_names[pn] = _sanitize_api_string(p.get("portName"), 64) or f"Port {pn}"
 
         now_utc = _utcnow()
         today = now_utc.replace(tzinfo=None)
@@ -1075,10 +1075,15 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
                             pname = port_names.get(pn, f"Port {pn}")
                             excl_name_parts.append(f"{pname} (Port {pn})")
                     excluded_port_names = ", ".join(excl_name_parts)
-                    excl = (
-                        f" {ports_excluded_count} {port_word} excluded"
-                        f" (no activity detected): {excluded_port_names}."
-                    )
+                    if excluded_port_names:
+                        excl = (
+                            f" {ports_excluded_count} {port_word} excluded"
+                            f" (no activity detected): {excluded_port_names}."
+                        )
+                    else:
+                        excl = (
+                            f" {ports_excluded_count} {port_word} excluded (no activity detected)."
+                        )
                 else:
                     excl = f" {ports_excluded_count} {port_word} excluded (no power detected)."
             else:
@@ -1124,10 +1129,11 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
                             pname = port_names.get(pn, f"Port {pn}")
                             excl_empty_parts.append(f"{pname} (Port {pn})")
                     excl_empty_names = ", ".join(excl_empty_parts)
+                    excl_detail = f": {excl_empty_names}" if excl_empty_names else ""
                     human_summary = (
                         f"No active port activity was detected over the past {days} {day_word}."
                         f" {ports_excluded_count} {port_word} excluded"
-                        f" (no activity detected): {excl_empty_names}."
+                        f" (no activity detected){excl_detail}."
                     )
                 else:
                     human_summary = (
