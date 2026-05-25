@@ -1804,7 +1804,8 @@ async def test_get_port_activity_report_devtype18_toggle_still_api_constant_spee
     assert "data_quality" not in heater
     assert "▎" in data["human_summary"]
     assert "Activity data not supported" in data["human_summary"]
-    assert "does not report power draw" not in data["human_summary"]
+    # Note appears for all devType=18/22 devices when result is non-empty (#136)
+    assert "does not report power draw" in data["human_summary"]
 
 
 async def test_get_port_activity_report_devtype11_rule_e_still_filters(mock_client):
@@ -6637,5 +6638,206 @@ async def test_create_advance_automation_live_automation_id_note_present(mock_cl
     assert data["sent"] is True
     assert "automation_id_note" in data
     assert "name" in data["automation_id_note"]
+
+
+# ============ get_port_activity_report — #112 #136 #139 fixes ============
+
+async def test_activity_report_devtype22_note_emitted_when_all_api_constant_speed(mock_client):
+    """#136: Note appears for devType=22 even when all ports have api_constant_speed.
+
+    Old code: no_load_signal_ports=[] when all ports are toggle → Note suppressed (bug).
+    New code: dev_type in _ZERO_LOAD_DEV_TYPES and result → Note always emitted.
+    """
+    device = _make_devtype22_device([
+        {"port": 2, "portName": "Heater", "portsLoad": None, "loadType": 4, "speak": 1},
+        {"port": 3, "portName": "Humidifer", "portsLoad": None, "loadType": 4, "speak": 0},
+    ])
+    mock_client.get_devices.return_value = [device]
+    # Toggle readings: 100% uptime, speed=1 throughout — triggers api_constant_speed on both ports.
+    readings = _make_toggle_port_readings(24, port_num=2, name="Heater")
+    mock_client.get_historical_data.return_value = [{}] * 24
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        # Alternate between port 2 and port 3 readings to give both identical constant-speed data
+        port = 2 if idx % 2 == 0 else 3
+        name = "Heater" if port == 2 else "Humidifer"
+        ts_base = readings[idx // 2 % len(readings)]["timestamp"]
+        idx += 1
+        return {
+            "timestamp": ts_base,
+            "temperature_c": 22.0, "humidity": 55.0, "vpd": 1.2,
+            "ports": [{"port": port, "name": name, "speed": 1, "on": True}],
+        }
+
+    mock_client.parse_history_record.side_effect = _side_effect
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 1)
+    data = json.loads(result)
+
+    assert "does not report power draw" in data["human_summary"], (
+        "#136: Note must appear for devType=22 even when all ports are api_constant_speed"
+    )
+
+
+async def test_activity_report_zero_load_note_suppressed_when_no_result(mock_client):
+    """#136: Note is NOT emitted for devType=22 when result is empty (all ports filtered)."""
+    # devType=22, auto-named port always off → Rule B filters it → result=[]
+    device = _make_devtype22_device([
+        {"port": 1, "portName": "Port 1", "portsLoad": None, "loadType": 0, "speak": 0},
+    ])
+    mock_client.get_devices.return_value = [device]
+    from datetime import datetime, timedelta
+    base = datetime(2024, 4, 18, 0, 0, 0)
+    # Auto-named port "Port 1", always off — Rule B filters via low-activity check
+    readings_off = [
+        {
+            "timestamp": (base + timedelta(hours=i)).isoformat() + "Z",
+            "temperature_c": 22.0, "humidity": 55.0, "vpd": 1.2,
+            "ports": [{"port": 1, "name": "Port 1", "speed": 0, "on": False}],
+        }
+        for i in range(24)
+    ]
+    mock_client.get_historical_data.return_value = [{}] * 24
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        val = readings_off[idx % len(readings_off)]
+        idx += 1
+        return val
+
+    mock_client.parse_history_record.side_effect = _side_effect
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 1)
+    data = json.loads(result)
+
+    assert len(data["ports"]) == 0
+    assert "does not report power draw" not in data["human_summary"], (
+        "Note must not appear when result is empty (no active ports)"
+    )
+
+
+def _make_multi_port_readings(port_configs: list[dict], total: int) -> list[dict]:
+    """Build multi-port readings. port_configs: [{port, name, on_hours, speed}].
+
+    Each port is on only during its first `on_hours` readings (single-block), all same timestamp.
+    """
+    from datetime import datetime, timedelta
+    base = datetime(2024, 4, 18, 0, 0, 0)
+    result = []
+    for i in range(total):
+        ports = []
+        for cfg in port_configs:
+            on = i < cfg.get("on_readings", 0)
+            ports.append({
+                "port": cfg["port"],
+                "name": cfg["name"],
+                "speed": cfg.get("speed", 5) if on else 0,
+                "on": on,
+            })
+        result.append({
+            "timestamp": (base + timedelta(hours=i)).isoformat() + "Z",
+            "temperature_c": 22.0, "humidity": 55.0, "vpd": 1.2,
+            "ports": ports,
+        })
+    return result
+
+
+async def test_activity_report_rule_f_excludes_phantom_clones_end_to_end(mock_client):
+    """#139: Rule F excludes phantom-clone custom-named ports on devType=11 (C58ZA scenario).
+
+    4-port fixture:
+      Port 1 'Port 1' (auto-named, always off) → Rule B
+      Port 2 'Heater' (low activity, same signature as Port 3) → Rule F
+      Port 3 'Humidifer' (low activity, same signature as Port 2) → Rule F
+      Port 4 'Filter' (real activity) → kept
+    Expected: 1 active port, ports_excluded_count=3.
+    """
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)  # devType=11
+    device["devPortCount"] = 4
+    device["deviceInfo"]["ports"] = [
+        {"port": 1, "portName": "Port 1", "portsLoad": 0, "loadType": 0, "speak": 0},
+        {"port": 2, "portName": "Heater", "portsLoad": 1, "loadType": 4, "speak": 1},
+        {"port": 3, "portName": "Humidifer", "portsLoad": 1, "loadType": 4, "speak": 0},
+        {"port": 4, "portName": "Filter", "portsLoad": 5, "loadType": 0, "speak": 5},
+    ]
+    mock_client.get_devices.return_value = [device]
+    # 50 readings: Heater/Humidifer on only for reading 0 (< 1h/day sub-threshold)
+    # Filter on for all 50 readings (real activity).
+    port_configs = [
+        {"port": 1, "name": "Port 1", "speed": 0, "on_readings": 0},
+        {"port": 2, "name": "Heater", "speed": 1, "on_readings": 1},
+        {"port": 3, "name": "Humidifer", "speed": 1, "on_readings": 1},
+        {"port": 4, "name": "Filter", "speed": 5, "on_readings": 50},
+    ]
+    readings = _make_multi_port_readings(port_configs, total=50)
+    mock_client.get_historical_data.return_value = [{}] * 50
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        val = readings[idx % len(readings)]
+        idx += 1
+        return val
+
+    mock_client.parse_history_record.side_effect = _side_effect
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 1)
+    data = json.loads(result)
+
+    port_names = [p["name"] for p in data["ports"]]
+    assert "Filter" in port_names, "#139: Filter (real activity) must appear"
+    assert "Heater" not in port_names, "#139: Heater (phantom clone) must be excluded"
+    assert "Humidifer" not in port_names, "#139: Humidifer (phantom clone) must be excluded"
+    assert data["ports_excluded_count"] == 3, (
+        "#139: 3 ports excluded (Port 1 by Rule B, Heater/Humidifer by Rule F)"
+    )
+
+
+async def test_activity_report_transitions_debounced_end_to_end(mock_client):
+    """#112: Boundary nibble (single-reading blip) is not counted as a transition.
+
+    Sequence with a 1-reading ON nibble between sustained OFF runs: raw count=4, debounced=2.
+    """
+    from datetime import datetime, timedelta
+    base = datetime(2024, 4, 18, 0, 0, 0)
+    # ON nibble at index 3 (1 reading), then sustained ON at indices 5-7 (3 readings),
+    # then OFF at indices 8-9 (2 readings). All other readings are OFF.
+    # Debounced: 2 transitions (OFF→ON sustained, ON→OFF sustained); nibble not counted.
+    on_sequence = [False, False, False, True, False, True, True, True, False, False]
+    readings = [
+        {
+            "timestamp": (base + timedelta(hours=i)).isoformat() + "Z",
+            "temperature_c": 22.0, "humidity": 55.0, "vpd": 1.2,
+            "ports": [{"port": 1, "name": "Fan", "speed": 5 if on else 0, "on": on}],
+        }
+        for i, on in enumerate(on_sequence)
+    ]
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)  # devType=11
+    device["deviceInfo"]["ports"] = [
+        {"port": 1, "portName": "Fan", "portsLoad": 5, "loadType": 0, "speak": 5},
+    ]
+    mock_client.get_devices.return_value = [device]
+    mock_client.get_historical_data.return_value = [{}] * 10
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        val = readings[idx % len(readings)]
+        idx += 1
+        return val
+
+    mock_client.parse_history_record.side_effect = _side_effect
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 1)
+    data = json.loads(result)
+
+    assert len(data["ports"]) == 1
+    assert data["ports"][0]["transitions"] == 2, (
+        "#112: Boundary nibble (1-reading blip) must not count as a transition; "
+        f"expected 2, got {data['ports'][0]['transitions']}"
+    )
 
 

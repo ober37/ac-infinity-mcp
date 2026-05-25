@@ -32,6 +32,10 @@ _DEFAULT_STAGE = "veg"
 # These devices always emit speed=1 in the history API even when physically OFF.
 _TOGGLE_LOAD_TYPES: frozenset[int] = frozenset({4, 128})
 
+# Minimum number of consecutive readings a state must persist to count as a real transition.
+# Single-reading blips at automation window boundaries are API artifacts (Quirk 22).
+_MIN_DWELL_READINGS: int = 2
+
 
 @dataclass
 class HealthScore:
@@ -228,6 +232,31 @@ def detect_trends(readings: list[dict[str, Any]], days: int) -> list[TrendReport
     return reports
 
 
+def _count_debounced_transitions(on_flags: list[bool]) -> int:
+    """Count state transitions that persist for at least _MIN_DWELL_READINGS consecutive readings.
+
+    Single-reading state changes (API boundary nibbles at automation window edges) are
+    not counted — only sustained transitions (new state held for ≥ 2 readings) are recorded.
+    """
+    if not on_flags:
+        return 0
+    count = 0
+    prev_state = on_flags[0]
+    i = 1
+    while i < len(on_flags):
+        if on_flags[i] != prev_state:
+            j = i + 1
+            while j < len(on_flags) and on_flags[j] == on_flags[i]:
+                j += 1
+            if (j - i) >= _MIN_DWELL_READINGS:
+                count += 1
+                prev_state = on_flags[i]
+            i = j
+        else:
+            i += 1
+    return count
+
+
 def build_activity_report(
     readings: list[dict[str, Any]],
     days: int = 1,
@@ -269,8 +298,6 @@ def build_activity_report(
                     "speeds": [],
                     "on_flags": [],
                     "hours": [],
-                    "prev_on": None,
-                    "transitions": 0,
                 }
 
             on = port.get("on", False) or (port.get("speed", 0) or 0) > 0
@@ -280,10 +307,6 @@ def build_activity_report(
             pd["speeds"].append(speed)
             pd["on_flags"].append(on)
             pd["hours"].append(ts_dt if on else None)
-
-            if pd["prev_on"] is not None and on != pd["prev_on"]:
-                pd["transitions"] += 1
-            pd["prev_on"] = on
 
     reports: list[ActivityReport] = []
     for port_num in sorted(port_data.keys()):
@@ -308,9 +331,15 @@ def build_activity_report(
             if h_dt is not None:
                 slot = h_dt.replace(minute=0, second=0, microsecond=0)
                 slot_counts[slot] = slot_counts.get(slot, 0) + 1
-        peak_hour_utc: datetime | None = (
-            max(slot_counts, key=lambda k: slot_counts[k]) if slot_counts else None
-        )
+        if slot_counts:
+            weighted: list[datetime] = []
+            for slot in sorted(slot_counts.keys()):
+                weighted.extend([slot] * slot_counts[slot])
+            peak_hour_utc: datetime | None = weighted[len(weighted) // 2]
+        else:
+            peak_hour_utc = None
+
+        transitions = _count_debounced_transitions(pd["on_flags"])
 
         # Detect toggle-device history artifact: AC Infinity always emits nibble 0xF
         # (decoded speed=1) for heaters/lights/humidifiers, even when physically off.
@@ -324,7 +353,7 @@ def build_activity_report(
             and port_load_types.get(port_num) in _TOGGLE_LOAD_TYPES
         )
         is_toggle_pattern = (
-            pd["transitions"] == 0 and uptime_pct == 100.0 and all_running_are_one
+            transitions == 0 and uptime_pct == 100.0 and all_running_are_one
         )
         data_quality: str | None = None
         if is_toggle_pattern and (is_toggle_hardware or dev_type in _ZERO_LOAD_DEV_TYPES):
@@ -338,13 +367,39 @@ def build_activity_report(
                 name=pd["name"],
                 on_hours=on_hours,
                 off_hours=off_hours,
-                transitions=pd["transitions"],
+                transitions=transitions,
                 avg_speed_when_running=avg_speed,
                 uptime_pct=uptime_pct,
                 peak_hour_utc=peak_hour_utc,
                 data_quality=data_quality,
             )
         )
+
+    # Rule F: phantom clone detection — custom-named ports that share identical activity
+    # signatures AND have low activity are phantom artifacts of legacy controllers (devType=11)
+    # reporting disconnected port history. Only fires when the matching group is a proper
+    # subset of all ports (at least one real port remains after exclusion).
+    phantom_ports: set[int] = set()
+    if port_loads is not None:
+        sig_groups: dict[tuple[float, int, datetime | None], list[int]] = {}
+        for rep in reports:
+            if re.match(r"^Port \d+$", str(rep.name)):
+                continue
+            sig: tuple[float, int, datetime | None] = (
+                rep.uptime_pct, rep.transitions, rep.peak_hour_utc
+            )
+            sig_groups.setdefault(sig, []).append(rep.port)
+        port_map = {r.port: r for r in reports}
+        for port_nums in sig_groups.values():
+            if len(port_nums) < 2:
+                continue
+            if not all(
+                (port_map[p].on_hours / days) < _GHOST_LOAD_ZERO_THRESHOLD for p in port_nums
+            ):
+                continue
+            if all(r.port in set(port_nums) for r in reports):
+                continue  # proper-subset guard: don't exclude every port
+            phantom_ports.update(port_nums)
 
     filtered: list[ActivityReport] = []
     for rep in reports:
@@ -353,6 +408,9 @@ def build_activity_report(
         # because both rules would otherwise filter the same toggle-hardware pattern.
         if rep.data_quality == "api_constant_speed":
             filtered.append(rep)
+            continue
+        # Rule F: phantom clone — identical low-activity signature across custom-named ports.
+        if rep.port in phantom_ports:
             continue
         # Rule A: constant-100%-uptime ghost port with no current draw.
         if (

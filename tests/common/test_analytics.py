@@ -8,6 +8,7 @@ from ac_infinity_mcp.analytics import (
     STAGE_TARGETS,
     HealthScore,
     TrendReport,
+    _count_debounced_transitions,
     _grade,
     build_activity_report,
     calculate_health_score,
@@ -297,7 +298,8 @@ def test_build_activity_report_always_off():
 
 
 def test_build_activity_report_transitions():
-    states = [True, True, False, False, True, True, False, True]
+    # All 4 transitions are sustained (each state held ≥ 2 readings) — no debounce drop.
+    states = [False, False, True, True, False, False, True, True, False, False]
     readings = [
         {
             "timestamp": _ts(i),
@@ -308,7 +310,6 @@ def test_build_activity_report_transitions():
         for i, on in enumerate(states)
     ]
     result = build_activity_report(readings)
-    # Transitions: T→T, T→F (+1), F→F, F→T (+1), T→T, T→F (+1), F→T (+1) = 4
     assert result[0].transitions == 4
 
 
@@ -343,6 +344,8 @@ def test_build_activity_report_peak_hour_utc():
 
 
 def test_build_activity_report_multiple_ports():
+    # All 4 ports have non-zero activity above the ghost threshold so they
+    # remain in the result regardless of ghost-port rules (incl. Rule F).
     readings = [
         {
             "timestamp": _ts(h),
@@ -351,15 +354,13 @@ def test_build_activity_report_multiple_ports():
             "ports": [
                 _port(1, "Fan 1", 5, True),
                 _port(2, "Fan 2", 7, True),
-                _port(3, "Light", 0, False),
-                _port(4, "Heater", 0, False),
+                _port(3, "Light", 3, True),
+                _port(4, "Heater", 1, True),
             ],
         }
         for h in range(5)
     ]
-    # Provide non-zero loads for ports 3 and 4 so Rule C does not filter them;
-    # this test checks port ordering, not ghost-port filtering.
-    result = build_activity_report(readings, port_loads={1: 5, 2: 5, 3: 3, 4: 3})
+    result = build_activity_report(readings, port_loads={1: 5, 2: 5, 3: 3, 4: 1})
     assert len(result) == 4
     assert [r.port for r in result] == [1, 2, 3, 4]
 
@@ -1439,10 +1440,11 @@ def test_dev_type_22_bypasses_rules_vs_non_22(dev_type: int | None, expected_kep
 
 
 def test_dev_type_22_no_load_signal_on_cycling_ports() -> None:
-    """devType=22: port with genuine transitions gets no_load_signal caveat."""
+    """devType=22: port with genuine (sustained) transitions gets no_load_signal caveat."""
     readings = []
     for i in range(24):
-        on = i % 2 == 0  # alternating ON/OFF → transitions > 0
+        # Sustained pairs: on for 2 readings, off for 2 readings — no single-reading nibbles.
+        on = (i // 2) % 2 == 0
         readings.append({
             "timestamp": _ts(i, day=25),
             "temperature_c": 22.0, "temperature_f": 71.6,
@@ -1549,3 +1551,190 @@ def test_dev_type_22_rule_b_load_guard_disabled_sufficient_runtime() -> None:
 
     result_11 = build_activity_report(readings, days=1, port_loads={3: 0}, dev_type=11)
     assert len(result_11) == 0, "devType=11: Rule B load guard fires; port with load=0 filtered"
+
+
+# ============ _count_debounced_transitions ============
+
+def test_count_debounced_transitions_empty():
+    assert _count_debounced_transitions([]) == 0
+
+
+def test_count_debounced_transitions_no_change():
+    assert _count_debounced_transitions([True, True, True]) == 0
+
+
+def test_count_debounced_transitions_single_blip_not_counted():
+    # F, T (1 reading), F — the T is a single-reading blip; should not count.
+    assert _count_debounced_transitions([False, True, False, False]) == 0
+
+
+def test_count_debounced_transitions_sustained_changes():
+    # F,F → T,T → F,F → T,T → F,F: 4 transitions all sustained.
+    flags = [False, False, True, True, False, False, True, True, False, False]
+    assert _count_debounced_transitions(flags) == 4
+
+
+def test_count_debounced_transitions_boundary_nibble():
+    # F,T (single),F,T,T,T,F,F — first T is a nibble (1 reading), second T run is sustained.
+    # Transitions accepted: F→T (3-reading run), T→F (2-reading run) = 2.
+    flags = [False, True, False, True, True, True, False, False]
+    assert _count_debounced_transitions(flags) == 2
+
+
+# ============ weighted-median peak_hour_utc ============
+
+def test_build_activity_report_peak_hour_weighted_median_skewed():
+    """Weighted median differs from max() when a minority slot has more readings.
+
+    max() would pick hour 6 (3 readings); weighted median picks hour 14 (central mass).
+    """
+    readings = []
+    # hour 14 appears 6 times, hour 6 appears 3 times → max() picks 6, median picks 14
+    for h in [6, 6, 6, 14, 14, 14, 14, 14, 14]:
+        readings.append({
+            "timestamp": _ts(h),
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [_port(1, "Fan", 5, True)],
+        })
+    result = build_activity_report(readings, port_loads={1: 5})
+    assert result[0].peak_hour_utc is not None
+    assert result[0].peak_hour_utc.hour == 14
+
+
+def test_build_activity_report_peak_hour_uniform():
+    """Uniform schedule: every hour appears once → median returns the middle slot."""
+    readings = [
+        {
+            "timestamp": _ts(h),
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [_port(1, "Fan", 5, True)],
+        }
+        for h in range(9, 18)  # hours 9–17 inclusive, 9 slots
+    ]
+    result = build_activity_report(readings, port_loads={1: 5})
+    assert result[0].peak_hour_utc is not None
+    assert result[0].peak_hour_utc.hour == 13  # middle of 9 slots = index 4 → hour 13
+
+
+# ============ Rule F — phantom clone detection ============
+
+def _rule_f_reading(hour: int, ports: list[dict]) -> dict:
+    return {
+        "timestamp": _ts(hour),
+        "temperature_c": 24.0, "temperature_f": 75.2,
+        "humidity": 60.0, "vpd": 1.24,
+        "ports": ports,
+    }
+
+
+def test_rule_f_excludes_identical_low_activity_custom_ports():
+    """Ports with identical uptime/transitions/peak and low activity are phantom clones."""
+    # 50 readings so on_hours = 1/50*24 = 0.48 h < 1.0 threshold.
+    # Port 2 'Heater' and Port 3 'Humidifer' identical: speed=1 on at reading 10, otherwise off.
+    # Port 4 'Filter' has different profile (higher activity) → stays.
+    from datetime import datetime as _dt, timedelta as _td
+    base = _dt(2024, 4, 25, 0, 0, 0)
+    readings = [
+        {
+            "timestamp": (base + _td(hours=i)).isoformat() + "Z",
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [
+                _port(2, "Heater", 1 if i == 10 else 0, i == 10),
+                _port(3, "Humidifer", 1 if i == 10 else 0, i == 10),
+                _port(4, "Filter", 5, True),
+            ],
+        }
+        for i in range(50)
+    ]
+    result = build_activity_report(
+        readings, days=1,
+        port_loads={2: 1, 3: 1, 4: 5},
+        port_load_types={2: 4, 3: 4, 4: 1},
+    )
+    port_names = [r.name for r in result]
+    assert "Filter" in port_names
+    assert "Heater" not in port_names
+    assert "Humidifer" not in port_names
+
+
+def test_rule_f_does_not_exclude_high_activity_custom_ports():
+    """Even if two ports share the same pattern, high activity (≥ threshold) prevents exclusion."""
+    # Both ports run 12h/day — well above the 1h/day ghost threshold.
+    readings = [
+        _rule_f_reading(h, [
+            _port(2, "Heater", 5, h < 12),
+            _port(3, "Humidifer", 5, h < 12),
+        ])
+        for h in range(24)
+    ]
+    result = build_activity_report(
+        readings, days=1,
+        port_loads={2: 5, 3: 5},
+        port_load_types={2: 4, 3: 4},
+    )
+    assert len(result) == 2
+
+
+def test_rule_f_proper_subset_guard_prevents_all_exclusion():
+    """Rule F must not fire when the matching group is ALL ports — would leave empty result."""
+    # 50 readings so on_hours < threshold, AND these are the only two custom-named ports.
+    from datetime import datetime as _dt, timedelta as _td
+    base = _dt(2024, 4, 25, 0, 0, 0)
+    readings = [
+        {
+            "timestamp": (base + _td(hours=i)).isoformat() + "Z",
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [
+                _port(2, "Heater", 1 if i == 10 else 0, i == 10),
+                _port(3, "Humidifer", 1 if i == 10 else 0, i == 10),
+            ],
+        }
+        for i in range(50)
+    ]
+    result = build_activity_report(
+        readings, days=1,
+        port_loads={2: 1, 3: 1},
+        port_load_types={2: 4, 3: 4},
+    )
+    # Proper-subset guard fires: {2,3} == all ports → Rule F does not exclude them.
+    assert len(result) == 2
+
+
+def test_rule_f_disabled_when_port_loads_none():
+    """Rule F requires port_loads to be populated; if None, phantom detection is skipped."""
+    readings = [
+        _rule_f_reading(h, [
+            _port(2, "Heater", 1 if h == 10 else 0, h == 10),
+            _port(3, "Humidifer", 1 if h == 10 else 0, h == 10),
+            _port(4, "Filter", 5, True),
+        ])
+        for h in range(24)
+    ]
+    result = build_activity_report(readings, days=1, port_loads=None)
+    port_names = [r.name for r in result]
+    assert "Heater" in port_names
+    assert "Humidifer" in port_names
+
+
+def test_rule_f_does_not_affect_auto_named_ports():
+    """Auto-named 'Port N' ports are excluded from Rule F signature matching."""
+    readings = [
+        _rule_f_reading(h, [
+            _port(2, "Port 2", 1 if h == 10 else 0, h == 10),
+            _port(3, "Port 3", 1 if h == 10 else 0, h == 10),
+            _port(4, "Filter", 5, True),
+        ])
+        for h in range(24)
+    ]
+    result = build_activity_report(
+        readings, days=1,
+        port_loads={2: 1, 3: 1, 4: 5},
+    )
+    # Port 2 and 3 might be filtered by Rule B (auto-named + low activity),
+    # but NOT by Rule F — Rule F skips 'Port N' names.
+    port_names = [r.name for r in result]
+    assert "Filter" in port_names

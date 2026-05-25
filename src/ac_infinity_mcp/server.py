@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from mcp.server.fastmcp import FastMCP
 
 from ac_infinity_mcp.analytics import (
+    _ZERO_LOAD_DEV_TYPES,
     STAGE_TARGETS,
     build_activity_report,
     calculate_health_score,
@@ -994,12 +995,13 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         physical_port_count = device.get("devPortCount") or unique_port_count
         unique_port_count = min(unique_port_count, physical_port_count)
 
+        dev_type = device.get("devType")
         result = build_activity_report(
             readings,
             days=days,
             port_loads=port_loads if port_loads else None,
             port_load_types=port_load_types if port_load_types else None,
-            dev_type=device.get("devType"),
+            dev_type=dev_type,
         )
         ports_excluded_count = max(0, unique_port_count - len(result))
 
@@ -1028,7 +1030,6 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
             d for d in port_dicts if d.get("data_quality") in (None, "no_load_signal")
         ]
         caveat_results = [r for r in result if r.data_quality == "api_constant_speed"]
-        no_load_signal_ports = [r for r in result if r.data_quality == "no_load_signal"]
 
         day_word = "day" if days == 1 else "days"
         if result:
@@ -1036,7 +1037,7 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
                 f"{p['name']} (Port {p['port']}) ran {p['uptime_pct']}% uptime "
                 f"({p['on_hours']}h total)"
                 + (
-                    f", most active around {p['peak_hour_local']}"
+                    f", typically active around {p['peak_hour_local']}"
                     if p["peak_hour_local"] else ""
                 )
                 for p in reliable_dicts
@@ -1058,17 +1059,17 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
                 f" {len(result)} active {active_port_word}."
             )
             summary_parts = [preamble]
+            if dev_type in _ZERO_LOAD_DEV_TYPES:
+                summary_parts.append(
+                    "Note: This controller does not report power draw for individual"
+                    " ports — activity results are based on recorded run times only."
+                )
             if port_lines:
                 summary_parts.append(f"{port_lines}.")
             if caveat_lines:
                 summary_parts.append(caveat_lines)
             if excl:
                 summary_parts.append(excl.strip())
-            if no_load_signal_ports:
-                summary_parts.append(
-                    "Note: This controller does not report power draw for individual"
-                    " ports — activity results are based on recorded run times only."
-                )
             human_summary = " ".join(summary_parts)
         else:
             port_word = "port" if ports_excluded_count == 1 else "ports"
