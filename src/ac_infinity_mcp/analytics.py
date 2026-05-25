@@ -413,6 +413,15 @@ def build_activity_report(
         # Rule F: phantom clone — identical low-activity signature across custom-named ports.
         if rep.port in phantom_ports:
             continue
+        # Rule G: custom-named port on _ZERO_LOAD_DEV_TYPES with toggle-hardware speed and low
+        # activity. api_constant_speed ports exit before this point and are kept with caveat.
+        if (
+            dev_type in _ZERO_LOAD_DEV_TYPES
+            and not re.match(r"^Port \d+$", str(rep.name))
+            and rep.avg_speed_when_running == 1.0
+            and (rep.on_hours / days) < _GHOST_LOAD_ZERO_THRESHOLD
+        ):
+            continue
         # Rule A: constant-100%-uptime ghost port with no current draw.
         if (
             rep.transitions == 0

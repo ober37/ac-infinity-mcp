@@ -15,10 +15,11 @@ from mcp.server.fastmcp import FastMCP
 from ac_infinity_mcp.analytics import (
     _ZERO_LOAD_DEV_TYPES,
     STAGE_TARGETS,
+    ActivityReport,
     build_activity_report,
     calculate_health_score,
     detect_trends,
-)
+)  # noqa: E402 (ruff isort: _ZERO_LOAD_DEV_TYPES sorted before ActivityReport below)
 from ac_infinity_mcp.client import ACInfinityClient
 from ac_infinity_mcp.schema import (
     _ADVANCE_MODE_TYPE,
@@ -921,10 +922,12 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         state changes at automation window edges are not counted — only transitions
         where the new state persists for ≥ 2 consecutive readings are recorded.
 
-        Ports whose timing data is unreliable appear only as a ▎-prefixed caveat
-        line in human_summary (e.g. "▎ Heater (Port 2): Activity data not supported
-        (currently OFF)."). Do NOT quote on_hours or uptime_pct for these ports —
-        relay the caveat line verbatim instead.
+        Ports whose timing data is unreliable appear only as ▎-prefixed caveat
+        lines in human_summary grouped by current state, e.g.
+        "▎ Currently ON: Heater (Port 2)." or
+        "▎ Currently OFF: Humidifier (Port 3)."
+        Do NOT quote on_hours or uptime_pct for these ports —
+        relay the caveat lines verbatim instead.
 
         All ports listed under the main runtime sentences have reliable timing data
         and should be presented normally. When a device-level Note about missing load
@@ -1049,27 +1052,59 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
                 )
                 for p in reliable_dicts
             )
-            caveat_lines = " ".join(
-                f"▎ {r.name} (Port {r.port}): Activity data not supported"
-                f" (currently {'ON' if port_speaks.get(r.port, False) else 'OFF'})."
-                for r in caveat_results
-            )
+            caveat_on = [r for r in caveat_results if port_speaks.get(r.port, False)]
+            caveat_off = [r for r in caveat_results if not port_speaks.get(r.port, False)]
+
+            def _fmt_port_list(reps: list[ActivityReport]) -> str:
+                return ", ".join(f"{r.name} (Port {r.port})" for r in reps)
+
+            caveat_parts: list[str] = []
+            if caveat_on:
+                caveat_parts.append(f"▎ Currently ON: {_fmt_port_list(caveat_on)}.")
+            if caveat_off:
+                caveat_parts.append(f"▎ Currently OFF: {_fmt_port_list(caveat_off)}.")
+            caveat_lines = " ".join(caveat_parts)
             port_word = "port" if ports_excluded_count == 1 else "ports"
-            excl = (
-                f" {ports_excluded_count} {port_word} excluded (no power detected)."
-                if ports_excluded_count > 0
-                else ""
-            )
+            if ports_excluded_count > 0:
+                if dev_type in _ZERO_LOAD_DEV_TYPES:
+                    result_port_nums = {r.port for r in result}
+                    excl_name_parts: list[str] = []
+                    for p in device.get("deviceInfo", {}).get("ports", []):
+                        pn = p.get("port")
+                        if pn is not None and pn not in result_port_nums:
+                            pname = port_names.get(pn, f"Port {pn}")
+                            excl_name_parts.append(f"{pname} (Port {pn})")
+                    excluded_port_names = ", ".join(excl_name_parts)
+                    excl = (
+                        f" {ports_excluded_count} {port_word} excluded"
+                        f" (no activity detected): {excluded_port_names}."
+                    )
+                else:
+                    excl = f" {ports_excluded_count} {port_word} excluded (no power detected)."
+            else:
+                excl = ""
             active_port_word = "port" if len(result) == 1 else "ports"
-            preamble = (
-                f"Analyzed {days} {day_word} ({date_range}) of activity across"
-                f" {len(result)} active {active_port_word}."
-            )
+            if dev_type in _ZERO_LOAD_DEV_TYPES:
+                preamble = (
+                    f"Analyzed {days} {day_word} ({date_range})"
+                    f" across {len(result)} {active_port_word}."
+                )
+            elif not reliable_dicts and caveat_results:
+                preamble = (
+                    f"Analyzed {days} {day_word} ({date_range})"
+                    f" across {len(result)} {active_port_word}."
+                )
+            else:
+                preamble = (
+                    f"Analyzed {days} {day_word} ({date_range}) of activity across"
+                    f" {len(result)} active {active_port_word}."
+                )
             summary_parts = [preamble]
             if dev_type in _ZERO_LOAD_DEV_TYPES:
                 summary_parts.append(
                     "Note: This controller does not report power draw for individual"
-                    " ports — activity results are based on recorded run times only."
+                    " ports. ON/OFF state is the only reliable activity indicator —"
+                    " history-based runtime data is not available for this controller type."
                 )
             if port_lines:
                 summary_parts.append(f"{port_lines}.")
@@ -1081,10 +1116,24 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         else:
             port_word = "port" if ports_excluded_count == 1 else "ports"
             if ports_excluded_count > 0:
-                human_summary = (
-                    f"No active port activity was detected over the past {days} {day_word}."
-                    f" {ports_excluded_count} {port_word} excluded (no power detected)."
-                )
+                if dev_type in _ZERO_LOAD_DEV_TYPES:
+                    excl_empty_parts: list[str] = []
+                    for p in device.get("deviceInfo", {}).get("ports", []):
+                        pn = p.get("port")
+                        if pn is not None:
+                            pname = port_names.get(pn, f"Port {pn}")
+                            excl_empty_parts.append(f"{pname} (Port {pn})")
+                    excl_empty_names = ", ".join(excl_empty_parts)
+                    human_summary = (
+                        f"No active port activity was detected over the past {days} {day_word}."
+                        f" {ports_excluded_count} {port_word} excluded"
+                        f" (no activity detected): {excl_empty_names}."
+                    )
+                else:
+                    human_summary = (
+                        f"No active port activity was detected over the past {days} {day_word}."
+                        f" {ports_excluded_count} {port_word} excluded (no power detected)."
+                    )
             else:
                 human_summary = (
                     f"No active port activity was detected over the past {days} {day_word}. "

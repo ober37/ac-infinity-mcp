@@ -1742,3 +1742,141 @@ def test_rule_f_does_not_affect_auto_named_ports():
     # but NOT by Rule F — Rule F skips 'Port N' names.
     port_names = [r.name for r in result]
     assert "Filter" in port_names
+
+
+# ============ Rule G — zero-load devType custom port with toggle-speed and low activity ===========
+
+
+def _rule_g_readings(
+    port_num: int,
+    name: str,
+    speed: int,
+    on_count: int,
+    total: int,
+    days: int = 1,
+) -> list[dict]:
+    """Build readings for a named port: on_count on-readings (speed) then off."""
+    readings = []
+    for i in range(on_count):
+        readings.append({
+            "timestamp": _ts(i % 24, day=25 + i // 24),
+            "temperature_c": 22.0, "temperature_f": 71.6,
+            "humidity": 55.0, "vpd": 1.2,
+            "ports": [_port(port_num, name, speed, True)],
+        })
+    for i in range(total - on_count):
+        readings.append({
+            "timestamp": _ts((on_count + i) % 24, day=25 + (on_count + i) // 24),
+            "temperature_c": 22.0, "temperature_f": 71.6,
+            "humidity": 55.0, "vpd": 1.2,
+            "ports": [_port(port_num, name, 0, False)],
+        })
+    return readings
+
+
+@pytest.mark.parametrize("on_count,total,days,expected_excluded", [
+    # Case 1: on_hours = 1/48 * 24 * 1 = 0.5 < 1.0 → excluded
+    (1, 48, 1, True),
+    # Case 2: on_hours = 1/24 * 24 * 1 = 1.0 — exactly at threshold → NOT excluded
+    (1, 24, 1, False),
+    # Case 3: on_hours = 1/12 * 24 * 1 = 2.0 > 1.0 → NOT excluded
+    (1, 12, 1, False),
+    # Case 4: on_hours = 5/168 * 24 * 7 = 5.0; 5.0/7 = 0.714 < 1.0 → excluded
+    (5, 168, 7, True),
+    # Case 5: on_hours = 7/168 * 24 * 7 = 7.0; 7.0/7 = 1.0 exactly at threshold → NOT excluded
+    (7, 168, 7, False),
+])
+def test_rule_g_threshold_parametrized(
+    on_count: int, total: int, days: int, expected_excluded: bool
+) -> None:
+    """Rule G: devType=18, custom name 'Humidifier', avg_speed=1.0 — threshold boundary tests."""
+    readings = _rule_g_readings(1, "Humidifier", speed=1, on_count=on_count, total=total)
+    result = build_activity_report(readings, days=days, port_loads={1: 0}, dev_type=18)
+    if expected_excluded:
+        assert len(result) == 0, (
+            f"Rule G: on_count={on_count}/{total} over {days}d should be excluded"
+        )
+    else:
+        assert len(result) == 1, (
+            f"Rule G: on_count={on_count}/{total} over {days}d should be kept"
+        )
+
+
+def test_rule_g_variable_speed_not_excluded() -> None:
+    """Rule G does not fire when avg_speed_when_running != 1.0 (non-toggle device)."""
+    # avg_speed=5.0 → condition avg_speed_when_running == 1.0 is False → Rule G skips
+    readings = _rule_g_readings(1, "Humidifier", speed=5, on_count=1, total=48, days=1)
+    result = build_activity_report(readings, days=1, port_loads={1: 0}, dev_type=18)
+    assert len(result) == 1, "Rule G must not fire for avg_speed != 1.0"
+    assert result[0].name == "Humidifier"
+
+
+def test_rule_g_all_off_zero_speed_not_excluded() -> None:
+    """Rule G does not fire when avg_speed_when_running == 0.0 (all readings off).
+
+    All-off port: running_speeds=[] → avg_speed=0.0 ≠ 1.0 → Rule G condition is False.
+    Rule B does not apply (custom name). Port_loads=None (devType=18). Port survives.
+    """
+    readings = _rule_g_readings(1, "Humidifier", speed=0, on_count=0, total=24, days=1)
+    result = build_activity_report(readings, days=1, port_loads={1: 0}, dev_type=18)
+    # Port is all-off but custom-named on devType=18 — no rule fires, it is kept
+    assert len(result) == 1, "Rule G must not fire for avg_speed=0.0 (all-off port)"
+    assert result[0].name == "Humidifier"
+
+
+def test_rule_g_devtype11_not_affected() -> None:
+    """Rule G condition checks dev_type in _ZERO_LOAD_DEV_TYPES; devType=11 is not affected."""
+    readings = _rule_g_readings(1, "Humidifier", speed=1, on_count=1, total=48, days=1)
+    result = build_activity_report(readings, days=1, port_loads={1: 0}, dev_type=11)
+    # On devType=11: Rule D fires (avg_speed=1.0, port_loads={1:0}, not toggle) → excluded
+    assert len(result) == 0, "devType=11 with avg_speed=1.0 and zero load is filtered by Rule D"
+
+
+def test_rule_g_devtype22_custom_speed1_low_excluded() -> None:
+    """Rule G: devType=22 also triggers — custom-named port, avg_speed=1.0, low activity."""
+    readings = _rule_g_readings(1, "Humidifier", speed=1, on_count=1, total=48, days=1)
+    result = build_activity_report(readings, days=1, port_loads={1: 0}, dev_type=22)
+    assert len(result) == 0, "Rule G must fire on devType=22 (also in _ZERO_LOAD_DEV_TYPES)"
+
+
+def test_rule_g_devtype22_above_threshold_not_excluded() -> None:
+    """Regression guard: devType=22 custom port with sufficient activity is kept.
+
+    on_hours = 12/24 * 24 * 1 = 12.0; 12.0/1 = 12.0 >> 1.0 → Rule G does not fire.
+    """
+    readings = _rule_g_readings(3, "R1 Clone Lights", speed=1, on_count=12, total=24, days=1)
+    result = build_activity_report(readings, days=1, port_loads={3: 0}, dev_type=22)
+    assert len(result) == 1, "Rule G must not fire for above-threshold activity on devType=22"
+    assert result[0].name == "R1 Clone Lights"
+
+
+def test_rule_g_auto_named_port_not_excluded() -> None:
+    """Rule G does not fire for auto-named 'Port N' ports (name matches ^Port \\d+$).
+
+    Rule B handles auto-named ports independently; Rule G targets custom names only.
+    """
+    readings = _rule_g_readings(2, "Port 2", speed=1, on_count=1, total=96, days=1)
+    result = build_activity_report(readings, days=1, port_loads={2: 0}, dev_type=18)
+    # Rule B runtime arm: on_hours = 1/96 * 24 = 0.25 < 1.0 → excluded by Rule B, not Rule G
+    assert len(result) == 0, "Auto-named 'Port N' is filtered by Rule B, not Rule G"
+
+
+def test_rule_g_api_constant_speed_port_in_output() -> None:
+    """api_constant_speed ports exit before Rule G and appear in output with caveat.
+
+    devType=22, 100% uptime speed=1 pattern → data_quality=api_constant_speed → early exit.
+    Rule G is never evaluated for these ports.
+    """
+    # 24 readings, all on at speed=1 → transitions=0, uptime=100%, all_running_are_one
+    # → api_constant_speed
+    readings = _toggle_readings(name="R1 Clone Lights", port_num=1, speed=1, on=True, count=24)
+    result = build_activity_report(
+        readings, days=1,
+        port_loads={1: 0},
+        port_load_types={1: 129},  # non-standard loadType → is_toggle_hardware=False
+        dev_type=22,
+    )
+    assert len(result) == 1, "api_constant_speed port must survive (not excluded by Rule G)"
+    assert result[0].data_quality == "api_constant_speed", (
+        "Port must exit via api_constant_speed early-exit, bypassing Rule G"
+    )

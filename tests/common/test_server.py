@@ -1534,9 +1534,8 @@ async def test_get_port_activity_report_data_quality_caveat_human_summary(mock_c
     # human_summary must mention the ▎ caveat, not quote uptime
     summary = data["human_summary"]
     assert "▎" in summary
-    assert "Activity data not supported" in summary
+    assert "Currently ON: Heater (Port 2)" in summary  # portsLoad=5 → speak=5 → ON
     assert "Heater (Port 2)" in summary
-    assert "currently ON" in summary  # portsLoad=5 → ON
 
 
 async def test_get_port_activity_report_reliable_ports_shown_normally(mock_client):
@@ -1577,8 +1576,8 @@ async def test_get_port_activity_report_reliable_ports_shown_normally(mock_clien
     # Reliable fan should appear with uptime
     assert "Exhaust Fan (Port 1)" in summary
     assert "uptime" in summary
-    # Caveat heater should appear with caveat text, not uptime
-    assert "Activity data not supported" in summary
+    # Caveat heater should appear with new grouped format
+    assert "Currently ON: Heater (Port 2)" in summary
 
 
 async def test_get_port_activity_report_data_quality_currently_off(mock_client):
@@ -1598,12 +1597,12 @@ async def test_get_port_activity_report_data_quality_currently_off(mock_client):
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_port_activity_report("C58ZA", 3)
     data = json.loads(result)
-    # Toggle hardware survives Rule D exemption — appears with ▎ caveat showing "currently OFF"
+    # Toggle hardware survives Rule D exemption — appears with ▎ caveat showing "Currently OFF"
     heater_ports = [p for p in data["ports"] if p["name"] == "Heater"]
     assert len(heater_ports) == 1, "Toggle hardware must NOT be filtered even when portsLoad=0"
     assert "data_quality" not in heater_ports[0]
     assert "▎" in data["human_summary"]
-    assert "currently OFF" in data["human_summary"]
+    assert "Currently OFF:" in data["human_summary"]
 
 
 async def test_get_port_activity_report_all_caveat_human_summary(mock_client):
@@ -1631,7 +1630,8 @@ async def test_get_port_activity_report_all_caveat_human_summary(mock_client):
     summary = data["human_summary"]
     # Summary should not have orphaned "." from empty port_lines
     assert " ." not in summary
-    assert "Activity data not supported" in summary
+    # Heater has portsLoad=5 but speak field is absent (defaults to 0 → OFF)
+    assert "Currently OFF: Heater (Port 2)" in summary
 
 
 async def test_get_port_activity_report_ports_excluded_count_unchanged_with_caveat(mock_client):
@@ -1803,7 +1803,7 @@ async def test_get_port_activity_report_devtype18_toggle_still_api_constant_spee
     assert heater is not None
     assert "data_quality" not in heater
     assert "▎" in data["human_summary"]
-    assert "Activity data not supported" in data["human_summary"]
+    assert "Currently OFF: Heater (Port 2)" in data["human_summary"]
     # Note appears for all devType=18/22 devices when result is non-empty (#136)
     assert "does not report power draw" in data["human_summary"]
 
@@ -1857,9 +1857,11 @@ async def test_get_port_activity_report_caveat_line_speak_based_on_off(mock_clie
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_port_activity_report("C58ZA", 1)
     data = json.loads(result)
-    assert "currently ON" in data["human_summary"], "speak=1 must yield 'currently ON' caveat"
+    assert "Currently ON: Heater (Port 2)" in data["human_summary"], (
+        "speak=1 must yield 'Currently ON' grouped caveat"
+    )
 
-    # speak=0 → currently OFF (portsLoad still 0; speak is the authoritative signal)
+    # speak=0 → Currently OFF (portsLoad still 0; speak is the authoritative signal)
     device_off = _make_devtype18_device([
         {"port": 2, "portName": "Heater", "portsLoad": 0, "loadType": 4, "speak": 0},
     ])
@@ -1868,7 +1870,9 @@ async def test_get_port_activity_report_caveat_line_speak_based_on_off(mock_clie
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result_off = await get_port_activity_report("C58ZA", 1)
     data_off = json.loads(result_off)
-    assert "currently OFF" in data_off["human_summary"], "speak=0 must yield 'currently OFF' caveat"
+    assert "Currently OFF: Heater (Port 2)" in data_off["human_summary"], (
+        "speak=0 must yield 'Currently OFF' grouped caveat"
+    )
 
 
 async def test_get_port_activity_report_devtype22_ports_not_excluded(mock_client):
@@ -1899,6 +1903,307 @@ async def test_get_port_activity_report_devtype22_ports_not_excluded(mock_client
     assert "does not report power draw" in data["human_summary"], (
         "Device-level no_load_signal note must appear for devType=22"
     )
+
+
+# ============ get_port_activity_report — #142 grouped caveat, #143 Rule G ============
+
+
+def _make_two_port_toggle_readings(
+    port2_name: str = "Heater",
+    port3_name: str = "Humidifier",
+    total: int = 24,
+) -> list[dict]:
+    """Build readings for two toggle ports: 100% uptime, speed=1 — triggers api_constant_speed."""
+    from datetime import datetime, timedelta
+    base = datetime(2024, 4, 18, 0, 0, 0)
+    return [
+        {
+            "timestamp": (base + timedelta(hours=i)).isoformat() + "Z",
+            "temperature_c": 22.0, "humidity": 55.0, "vpd": 1.2,
+            "ports": [
+                {"port": 2, "name": port2_name, "speed": 1, "on": True},
+                {"port": 3, "name": port3_name, "speed": 1, "on": True},
+            ],
+        }
+        for i in range(total)
+    ]
+
+
+async def test_get_port_activity_report_caveat_on_off_grouped_devtype22(mock_client):
+    """#142: Two caveat ports — one ON, one OFF — produce grouped ▎ lines."""
+    device = _make_devtype22_device([
+        {"port": 2, "portName": "Heater", "portsLoad": None, "loadType": 4, "speak": 1},
+        {"port": 3, "portName": "Humidifier", "portsLoad": None, "loadType": 4, "speak": 0},
+    ])
+    mock_client.get_devices.return_value = [device]
+    readings = _make_two_port_toggle_readings("Heater", "Humidifier")
+    mock_client.get_historical_data.return_value = [{}] * 24
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        val = readings[idx % len(readings)]
+        idx += 1
+        return val
+
+    mock_client.parse_history_record.side_effect = _side_effect
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 1)
+    data = json.loads(result)
+    summary = data["human_summary"]
+
+    assert "Currently ON: Heater (Port 2)" in summary, (
+        "#142: speak=1 port must appear in ON group"
+    )
+    assert "Currently OFF: Humidifier (Port 3)" in summary, (
+        "#142: speak=0 port must appear in OFF group"
+    )
+    assert "Activity data not supported" not in summary, (
+        "#142: old per-port format must be gone"
+    )
+
+
+async def test_caveat_all_on_format(mock_client):
+    """#142: All caveat ports ON → 'Currently ON:' present, 'Currently OFF:' absent."""
+    device = _make_devtype22_device([
+        {"port": 2, "portName": "Heater", "portsLoad": None, "loadType": 4, "speak": 1},
+        {"port": 3, "portName": "Humidifier", "portsLoad": None, "loadType": 4, "speak": 1},
+    ])
+    mock_client.get_devices.return_value = [device]
+    readings = _make_two_port_toggle_readings("Heater", "Humidifier")
+    mock_client.get_historical_data.return_value = [{}] * 24
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        val = readings[idx % len(readings)]
+        idx += 1
+        return val
+
+    mock_client.parse_history_record.side_effect = _side_effect
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 1)
+    data = json.loads(result)
+    summary = data["human_summary"]
+
+    assert "Currently ON:" in summary, "#142: all-ON caveat must show 'Currently ON:'"
+    assert "Currently OFF:" not in summary, "#142: no OFF group when all ports are ON"
+
+
+async def test_caveat_all_off_format(mock_client):
+    """#142: All caveat ports OFF → 'Currently OFF:' present, 'Currently ON:' absent."""
+    device = _make_devtype22_device([
+        {"port": 2, "portName": "Heater", "portsLoad": None, "loadType": 4, "speak": 0},
+        {"port": 3, "portName": "Humidifier", "portsLoad": None, "loadType": 4, "speak": 0},
+    ])
+    mock_client.get_devices.return_value = [device]
+    readings = _make_two_port_toggle_readings("Heater", "Humidifier")
+    mock_client.get_historical_data.return_value = [{}] * 24
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        val = readings[idx % len(readings)]
+        idx += 1
+        return val
+
+    mock_client.parse_history_record.side_effect = _side_effect
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 1)
+    data = json.loads(result)
+    summary = data["human_summary"]
+
+    assert "Currently OFF:" in summary, "#142: all-OFF caveat must show 'Currently OFF:'"
+    assert "Currently ON:" not in summary, "#142: no ON group when all ports are OFF"
+
+
+async def test_note_mentions_on_off_reliable_devtype22(mock_client):
+    """#142/#143: devType=22 Note mentions ON/OFF state as the only reliable indicator."""
+    device = _make_devtype22_device([
+        {"port": 2, "portName": "R1 Clone Lights", "portsLoad": None, "loadType": 129, "speak": 1},
+    ])
+    mock_client.get_devices.return_value = [device]
+    readings = _make_devtype18_port_readings(2, "R1 Clone Lights", speed=1, on_count=12, total=24)
+    mock_client.get_historical_data.return_value = [{}] * 24
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        val = readings[idx % len(readings)]
+        idx += 1
+        return val
+
+    mock_client.parse_history_record.side_effect = _side_effect
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 1)
+    data = json.loads(result)
+    assert "ON/OFF state is the only reliable activity indicator" in data["human_summary"], (
+        "#142: devType=22 Note must mention ON/OFF reliability"
+    )
+
+
+async def test_note_mentions_on_off_reliable_devtype18(mock_client):
+    """#142/#143: devType=18 Note mentions ON/OFF state as the only reliable indicator."""
+    device = _make_devtype18_device([
+        {"port": 3, "portName": "Left Fan", "portsLoad": 0, "loadType": 0},
+    ])
+    mock_client.get_devices.return_value = [device]
+    readings = _make_devtype18_port_readings(3, "Left Fan", speed=5, on_count=4, total=288)
+    mock_client.get_historical_data.return_value = [{}] * 288
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        val = readings[idx % len(readings)]
+        idx += 1
+        return val
+
+    mock_client.parse_history_record.side_effect = _side_effect
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 3)
+    data = json.loads(result)
+    assert "ON/OFF state is the only reliable activity indicator" in data["human_summary"], (
+        "#143: devType=18 Note must mention ON/OFF reliability"
+    )
+
+
+async def test_preamble_no_active_when_zero_load_devtype(mock_client):
+    """#142/#143: devType=22 preamble says 'N ports' not 'N active ports'."""
+    device = _make_devtype22_device([
+        {"port": 2, "portName": "R1 Clone Lights", "portsLoad": None, "loadType": 129, "speak": 1},
+    ])
+    mock_client.get_devices.return_value = [device]
+    readings = _make_devtype18_port_readings(2, "R1 Clone Lights", speed=1, on_count=12, total=24)
+    mock_client.get_historical_data.return_value = [{}] * 24
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        val = readings[idx % len(readings)]
+        idx += 1
+        return val
+
+    mock_client.parse_history_record.side_effect = _side_effect
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 1)
+    data = json.loads(result)
+    assert "active ports" not in data["human_summary"], (
+        "#142: devType=22 preamble must not say 'active ports'"
+    )
+
+
+async def test_exclusion_reason_no_activity_detected(mock_client):
+    """#143: devType=18 excluded ports show 'no activity detected' with port name."""
+    # Humidifier on devType=18: speed=1, 1/48 on-readings → on_hours=0.5/day → Rule G excludes
+    device = _make_devtype18_device([
+        {"port": 1, "portName": "Humidifier", "portsLoad": 0, "loadType": 0},
+        {"port": 2, "portName": "Exhaust Fan", "portsLoad": 0, "loadType": 0},
+    ])
+    mock_client.get_devices.return_value = [device]
+    from datetime import datetime, timedelta
+    base = datetime(2024, 4, 18, 0, 0, 0)
+    # Port 1 (Humidifier): 1 on-reading at speed=1, then 47 off → on_hours = 1/48*24 = 0.5 < 1.0
+    # Port 2 (Exhaust Fan): speed=5, 12 on + 12 off → on_hours=12.0 ≥ 1.0 → kept
+    all_readings = []
+    for i in range(48):
+        ports = [
+            {"port": 1, "name": "Humidifier", "speed": 1 if i == 0 else 0, "on": i == 0},
+            {"port": 2, "name": "Exhaust Fan", "speed": 5 if i < 12 else 0, "on": i < 12},
+        ]
+        all_readings.append({
+            "timestamp": (base + timedelta(hours=i)).isoformat() + "Z",
+            "temperature_c": 22.0, "humidity": 55.0, "vpd": 1.2,
+            "ports": ports,
+        })
+    mock_client.get_historical_data.return_value = [{}] * 48
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        val = all_readings[idx % len(all_readings)]
+        idx += 1
+        return val
+
+    mock_client.parse_history_record.side_effect = _side_effect
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 1)
+    data = json.loads(result)
+    summary = data["human_summary"]
+
+    assert "no activity detected" in summary, (
+        "#143: exclusion reason must say 'no activity detected'"
+    )
+    assert "Humidifier (Port 1)" in summary, (
+        "#143: excluded port name must appear in exclusion text"
+    )
+    assert data["ports_excluded_count"] == 1, "#143: Humidifier must be excluded by Rule G"
+
+
+async def test_get_port_activity_report_devtype18_custom_toggle_ghost_excluded(mock_client):
+    """#143: devType=18 custom Humidifier, avg_speed=1.0, low activity → excluded by Rule G.
+
+    on_count=1 / total=96 over 3 days: on_hours = 1/96 * 24 * 3 = 0.75; 0.75/3 = 0.25 < 1.0.
+    avg_speed_when_running = 1.0 (single on-reading at speed=1).
+    Rule G fires → ports_excluded_count == 1, 'no activity detected' in summary.
+    """
+    device = _make_devtype18_device([
+        {"port": 1, "portName": "Humidifier", "portsLoad": 0, "loadType": 0},
+    ])
+    mock_client.get_devices.return_value = [device]
+    readings = _make_devtype18_port_readings(1, "Humidifier", speed=1, on_count=1, total=96)
+    mock_client.get_historical_data.return_value = [{}] * 96
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        val = readings[idx % len(readings)]
+        idx += 1
+        return val
+
+    mock_client.parse_history_record.side_effect = _side_effect
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 3)
+    data = json.loads(result)
+
+    assert data["ports_excluded_count"] == 1, "#143: Humidifier must be excluded by Rule G"
+    assert "no activity detected" in data["human_summary"], (
+        "#143: exclusion text must say 'no activity detected' for devType=18"
+    )
+    assert "Humidifier (Port 1)" in data["human_summary"], (
+        "#143: excluded port name must appear in exclusion sentence"
+    )
+
+
+async def test_get_port_activity_report_devtype18_custom_variable_speed_kept(mock_client):
+    """#143: devType=18 custom-named port with avg_speed=5.0 (non-toggle) is kept by Rule G.
+
+    Same low-activity setup but speed=5.0 → avg_speed_when_running != 1.0 → Rule G does not fire.
+    Port appears in port_lines, ports_excluded_count == 0.
+    """
+    device = _make_devtype18_device([
+        {"port": 1, "portName": "Humidifier", "portsLoad": 0, "loadType": 0},
+    ])
+    mock_client.get_devices.return_value = [device]
+    readings = _make_devtype18_port_readings(1, "Humidifier", speed=5, on_count=1, total=96)
+    mock_client.get_historical_data.return_value = [{}] * 96
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        val = readings[idx % len(readings)]
+        idx += 1
+        return val
+
+    mock_client.parse_history_record.side_effect = _side_effect
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 3)
+    data = json.loads(result)
+
+    assert data["ports_excluded_count"] == 0, (
+        "#143: variable-speed port must not be excluded by Rule G"
+    )
+    port_names_in_output = [p["name"] for p in data["ports"]]
+    assert "Humidifier" in port_names_in_output, "#143: Humidifier must appear in port output"
 
 
 async def test_get_port_activity_report_get_devices_api_error_degrades_gracefully(mock_client):
