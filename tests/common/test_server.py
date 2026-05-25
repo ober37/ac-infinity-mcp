@@ -1976,7 +1976,7 @@ async def test_get_port_activity_report_dst_boundary(mock_client):
 
 async def test_get_port_activity_report_excluded_count_capped_at_devportcount(mock_client):
     """devPortCount=2 caps excluded count when history has 3 unique ports."""
-    # 3 unique auto-named ports (all Rule B filtered: low runtime, no load)
+    # 3 unique auto-named ports (all Rule B filtered: low runtime, auto-named pattern)
     # Without cap: excluded = max(0, 3 - 0) = 3
     # With cap:    excluded = max(0, min(3, 2) - 0) = 2
     from datetime import datetime, timedelta
