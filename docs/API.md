@@ -1058,7 +1058,7 @@ device record:
 | `temperature_c` | `temperature` | Value in preferred unit; `unit` field added |
 | `temperature_c` statistics key | `temperature` | In `get_historical_readings` statistics |
 | `temp_range_c` | `temp_range` | `{"min": N, "max": N, "unit": "°C"/"°F"}` |
-| `peak_hour_utc` | `peak_hour_local` | Local hour in device timezone |
+| `peak_hour_utc` | `peak_hour_local` | Local time with peak date, e.g. "4:00 PM CDT (peak on May 20)"; uses `astimezone()` for DST-aware conversion including sub-hour offsets (UTC+5:30) |
 | `min_c` / `max_c` parameters | `min_temp` / `max_temp` | `set_temperature_automation` |
 | `schedule_window` | `schedule_window` | Added `"timezone"` key |
 
@@ -1407,7 +1407,7 @@ and the report is still returned.
       "transitions": 14,
       "avg_speed_when_running": 5.2,
       "uptime_pct": 52.1,
-      "peak_hour_local": "May 20, 4:00 PM CDT",
+      "peak_hour_local": "4:00 PM CDT (peak on May 20)",
       "data_quality": null
     },
     {
@@ -1423,7 +1423,7 @@ and the report is still returned.
     }
   ],
   "ports_excluded_count": 2,
-  "human_summary": "Analyzed 7 days (May 17 – May 24) of activity across 1 active port. Inline Fan (Port 1) ran 52.1% uptime (87.5h total), most active around May 20, 4:00 PM CDT. Heater (Port 2): activity data not supported (currently OFF). 2 ports excluded (no power detected)."
+  "human_summary": "Analyzed 7 days (May 17 – May 24) of activity across 1 active port. Inline Fan (Port 1) ran 52.1% uptime (87.5h total), most active around 4:00 PM CDT (peak on May 20). Heater (Port 2): activity data not supported (currently OFF). 2 ports excluded (no power detected)."
 }
 ```
 
@@ -1433,7 +1433,7 @@ and the report is still returned.
 - `transitions` — number of on↔off state changes in the period
 - `avg_speed_when_running` — average `onSpead` value (1–10) across on-readings with non-zero speed
 - `uptime_pct` — `on_hours / (on_hours + off_hours) * 100`, rounded to 1 decimal
-- `peak_hour_local` — device-local time string with the most on-readings; includes a date prefix when the window spans multiple calendar days (e.g. "May 20, 4:00 PM CDT"), or just the time for a single-day window (e.g. "4:00 PM CDT"); `null` when port never ran (always_off case). Falls back to UTC when `zoneId` is absent (Quirk 23).
+- `peak_hour_local` — device-local time string with peak date, always including the calendar date for disambiguation across multi-day windows (e.g. "4:00 PM CDT (peak on May 20)"); `null` when port never ran (always_off case). Uses `astimezone()` for full DST-aware conversion; sub-hour UTC offsets (UTC+5:30) are handled correctly. Falls back to UTC when `zoneId` is absent (Quirk 23).
 - `data_quality` — `null` for ports with reliable history; `"api_constant_speed"` for toggle hardware (heaters, lights, humidifiers — loadType 4 or 128) where the AC Infinity API cannot distinguish configured speed from actual runtime state. When `data_quality` is `"api_constant_speed"`, `on_hours` and `uptime_pct` are fabricated and **must not** be quoted to growers as runtime data. Relay the `human_summary` caveat text for these ports verbatim.
 - `ports_excluded_count` — number of ports removed by the ghost-port filter (see Quirk 22). Do not repeat this count in prose when presenting `human_summary` to a grower.
 - `human_summary` — plain-English activity summary; preamble includes the date range (e.g. "Analyzed 7 days (May 17 – May 24)"); includes an exclusion note when `ports_excluded_count > 0` and a data-quality caveat for any toggle-hardware ports. When `ports` is empty and `ports_excluded_count > 0`, summarizes the no-activity result with the exclusion count (e.g., "No active port activity was detected over the past 7 day(s). 2 ports excluded (no power detected)."). When `ports` is empty and `ports_excluded_count == 0`, includes a troubleshooting explanation (devices off, unplugged, or no scheduled activity). Relay the caveat text for `data_quality = "api_constant_speed"` ports verbatim — do not estimate runtime from `on_hours`.

@@ -20,7 +20,6 @@ from ac_infinity_mcp.server import (
     _check_advance_mode,
     _decode_mode,
     _filter_readings_by_time,
-    _format_peak_local,
     _format_schedule_time,
     _format_window_dt,
     _group_automations,
@@ -28,6 +27,7 @@ from ac_infinity_mcp.server import (
     _parse_schedule_time,
     _sanitize_api_string,
     _short_date,
+    _utc_hour_to_local,
     _validate_automation_id,
     apply_grow_stage_template,
     apply_sampling,
@@ -1846,13 +1846,13 @@ _CDT = ZoneInfo("America/Chicago")
 _FROZEN_MAY24 = datetime(2025, 5, 24, 15, 35, 0, tzinfo=_UTC)
 
 
-@pytest.mark.parametrize("include_date,expected", [
-    (True, "May 23, 11:00 AM CDT"),
-    (False, "11:00 AM CDT"),
-])
-def test_format_peak_local(include_date, expected):
-    """_format_peak_local: with and without date prefix based on window span."""
-    assert _format_peak_local("2025-05-23T16:00:00", _CDT, include_date) == expected
+def test_utc_hour_to_local_datetime_format():
+    """_utc_hour_to_local produces date-bearing local time string."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    # 2024-05-23 20:00 UTC = 3:00 PM CDT (UTC-5 in summer)
+    result = _utc_hour_to_local(datetime(2024, 5, 23, 20, 0, 0), ZoneInfo("America/Chicago"))
+    assert result == "3:00 PM CDT (peak on May 23)"
 
 
 def test_format_window_dt_midnight():
@@ -1919,7 +1919,7 @@ async def test_get_port_activity_report_human_summary_includes_date_range(mock_c
 async def test_get_port_activity_report_peak_hour_local_includes_date_when_multi_day(mock_client):
     """peak_hour_local includes date prefix when window spans multiple calendar days."""
     # 3 on-readings at UTC 16:xx on May 23, 1 at 10:xx, 1 at 08:xx on May 24.
-    # Peak bucket: ("2025-05-23", 16) → May 23, 11:00 AM CDT (UTC-5 in May)
+    # Peak slot: 2025-05-23T16:00 UTC → 11:00 AM CDT (peak on May 23)
     peak_readings = [
         {
             "timestamp": f"2025-05-23T16:0{i}:00Z",
@@ -1953,7 +1953,7 @@ async def test_get_port_activity_report_peak_hour_local_includes_date_when_multi
         with patch("ac_infinity_mcp.server.aci_client", mock_client):
             result = await get_port_activity_report("C58ZA", 1)
     data = json.loads(result)
-    assert data["ports"][0]["peak_hour_local"] == "May 23, 11:00 AM CDT"
+    assert data["ports"][0]["peak_hour_local"] == "11:00 AM CDT (peak on May 23)"
 
 
 async def test_get_port_activity_report_dst_boundary(mock_client):
@@ -1972,6 +1972,170 @@ async def test_get_port_activity_report_dst_boundary(mock_client):
     assert "CDT" in data["window_end_local"]
     assert "March 8" in data["window_start_local"]
     assert "March 9" in data["window_end_local"]
+
+
+async def test_get_port_activity_report_excluded_count_capped_at_devportcount(mock_client):
+    """devPortCount=2 caps excluded count when history has 3 unique ports."""
+    # 3 unique auto-named ports (all Rule B filtered: low runtime, no load)
+    # Without cap: excluded = max(0, 3 - 0) = 3
+    # With cap:    excluded = max(0, min(3, 2) - 0) = 2
+    from datetime import datetime, timedelta
+    base = datetime(2024, 4, 18, 0, 0, 0)
+    readings = []
+    for i in range(3):
+        on = i == 0  # only 1st reading on → < 1h/day → Rule B filters all
+        readings.append({
+            "timestamp": (base + timedelta(hours=i)).isoformat() + "Z",
+            "temperature_c": 24.0, "humidity": 55.0, "vpd": 1.4,
+            "ports": [
+                {"port": 1, "name": "Port 1", "speed": 5 if on else 0, "on": on},
+                {"port": 2, "name": "Port 2", "speed": 5 if on else 0, "on": on},
+                {"port": 3, "name": "Port 3", "speed": 5 if on else 0, "on": on},
+            ],
+        })
+    mock_client.get_devices.return_value = [{
+        "devCode": "C58ZA",
+        "devId": "9999999999",
+        "devPortCount": 2,
+        "deviceInfo": {"ports": [
+            {"port": 1, "portsLoad": 0},
+            {"port": 2, "portsLoad": 0},
+            {"port": 3, "portsLoad": 0},
+        ]},
+    }]
+    mock_client.get_historical_data.return_value = [{}] * 3
+    idx = 0
+
+    def _side(r, port_names=None):
+        nonlocal idx
+        v = readings[idx]
+        idx += 1
+        return v
+
+    mock_client.parse_history_record.side_effect = _side
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 1)
+    data = json.loads(result)
+    assert data["ports"] == []
+    assert data["ports_excluded_count"] == 2  # capped from 3 to devPortCount=2
+
+
+@pytest.mark.parametrize("dev_port_count", [None, 0])
+async def test_get_port_activity_report_ports_excluded_count_devportcount_fallback(
+    dev_port_count, mock_client
+):
+    """devPortCount absent or zero falls back to unique_port_count — no cap applied."""
+    # 3 unique auto-named ports (all Rule B filtered), devPortCount=None/0 → excluded==3
+    from datetime import datetime, timedelta
+    base = datetime(2024, 4, 18, 0, 0, 0)
+    readings = []
+    for i in range(3):
+        on = i == 0
+        readings.append({
+            "timestamp": (base + timedelta(hours=i)).isoformat() + "Z",
+            "temperature_c": 24.0, "humidity": 55.0, "vpd": 1.4,
+            "ports": [
+                {"port": 1, "name": "Port 1", "speed": 5 if on else 0, "on": on},
+                {"port": 2, "name": "Port 2", "speed": 5 if on else 0, "on": on},
+                {"port": 3, "name": "Port 3", "speed": 5 if on else 0, "on": on},
+            ],
+        })
+    device_dict: dict = {
+        "devCode": "C58ZA",
+        "devId": "9999999999",
+        "deviceInfo": {"ports": [
+            {"port": 1, "portsLoad": 0},
+            {"port": 2, "portsLoad": 0},
+            {"port": 3, "portsLoad": 0},
+        ]},
+    }
+    if dev_port_count is not None:
+        device_dict["devPortCount"] = dev_port_count
+    mock_client.get_devices.return_value = [device_dict]
+    mock_client.get_historical_data.return_value = [{}] * 3
+    idx = 0
+
+    def _side(r, port_names=None):
+        nonlocal idx
+        v = readings[idx]
+        idx += 1
+        return v
+
+    mock_client.parse_history_record.side_effect = _side
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 1)
+    data = json.loads(result)
+    assert data["ports_excluded_count"] == 3  # no cap applied — fallback to unique_port_count
+
+
+async def test_get_port_activity_report_peak_hour_local_includes_date(mock_client):
+    """peak_hour_local includes date context, e.g. '3:00 PM CDT (peak on May 23)'."""
+    import re
+    from datetime import datetime, timedelta
+    # 3 readings at UTC 20:00 on 2024-05-23 → local CDT 15:00 = 3 PM
+    base = datetime(2024, 5, 23, 20, 0, 0)
+    readings = [
+        {
+            "timestamp": (base + timedelta(minutes=i)).isoformat() + "Z",
+            "temperature_c": 24.0, "humidity": 55.0, "vpd": 1.4,
+            "ports": [{"port": 1, "name": "Fan", "speed": 5, "on": True}],
+        }
+        for i in range(3)
+    ]
+    mock_client.get_devices.return_value = [{
+        "devCode": "C58ZA",
+        "devId": "9999999999",
+        "zoneId": "America/Chicago",
+        "devPortCount": 1,
+        "deviceInfo": {"ports": [{"port": 1, "portName": "Fan", "portsLoad": 5, "loadType": 0}]},
+    }]
+    mock_client.get_historical_data.return_value = [{}] * 3
+    idx = 0
+
+    def _side(r, port_names=None):
+        nonlocal idx
+        v = readings[idx]
+        idx += 1
+        return v
+
+    mock_client.parse_history_record.side_effect = _side
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 1)
+    data = json.loads(result)
+    assert len(data["ports"]) == 1
+    phl = data["ports"][0]["peak_hour_local"]
+    assert phl is not None
+    assert re.match(r"\d+:\d{2} (AM|PM) \w+ \(peak on \w+ \d+\)", phl), f"Unexpected format: {phl}"
+    assert "peak_hour_utc" not in data["ports"][0]
+
+
+async def test_get_port_activity_report_peak_hour_utc_not_in_json_output(mock_client):
+    """peak_hour_utc (internal datetime) must not appear in the JSON output."""
+    from datetime import datetime, timedelta
+    base = datetime(2024, 4, 18, 0, 0, 0)
+    readings = [
+        {
+            "timestamp": (base + timedelta(hours=i)).isoformat() + "Z",
+            "temperature_c": 24.0, "humidity": 55.0, "vpd": 1.4,
+            "ports": [{"port": 1, "name": "Fan", "speed": 5, "on": True}],
+        }
+        for i in range(5)
+    ]
+    mock_client.get_historical_data.return_value = [{}] * 5
+    idx = 0
+
+    def _side(r, port_names=None):
+        nonlocal idx
+        v = readings[idx]
+        idx += 1
+        return v
+
+    mock_client.parse_history_record.side_effect = _side
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 1)
+    data = json.loads(result)
+    for port in data["ports"]:
+        assert "peak_hour_utc" not in port
 
 
 # ============ set_port_speed ============

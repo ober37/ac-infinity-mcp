@@ -337,7 +337,9 @@ def test_build_activity_report_peak_hour_utc():
             "ports": [_port(1, "Fan", 5, True)],
         })
     result = build_activity_report(readings, port_loads={1: 5})
-    assert result[0].peak_hour_utc == "2024-04-25T14:00:00"
+    assert result[0].peak_hour_utc is not None
+    assert result[0].peak_hour_utc.hour == 14
+    assert result[0].peak_hour_utc.day == 25
 
 
 def test_build_activity_report_multiple_ports():
@@ -500,7 +502,7 @@ def test_build_activity_report_days_param_scales_on_hours():
 
 
 def test_build_activity_report_peak_hour_detected_correctly():
-    """peak_hour_utc returns the UTC hour with the most ON readings."""
+    """peak_hour_utc returns a naive UTC datetime for the slot with the most ON readings."""
     readings = []
     # Hour 14 has 3 on-readings; hour 10 and 18 each have 1
     for h in [10, 14, 14, 14, 18]:
@@ -512,7 +514,59 @@ def test_build_activity_report_peak_hour_detected_correctly():
         })
     result = build_activity_report(readings, days=1)
     assert len(result) == 1
-    assert result[0].peak_hour_utc == "2024-04-25T14:00:00"
+    assert result[0].peak_hour_utc is not None
+    assert result[0].peak_hour_utc.hour == 14
+    assert result[0].peak_hour_utc.day == 25
+
+
+def test_build_activity_report_peak_hour_multi_day_same_clock_different_days():
+    """Slot with highest count wins even when same clock-hour spans multiple days."""
+    # Apr 25 14:00 ×2, Apr 26 14:00 ×2, Apr 25 16:00 ×3
+    # Old hour-only bucketing: hour 14 = 4 readings (wins incorrectly)
+    # New slot bucketing: (Apr25,14)=2, (Apr26,14)=2, (Apr25,16)=3 → Apr 25 16:00 wins
+    readings = []
+    for _ in range(2):
+        readings.append({
+            "timestamp": _ts(14, day=25),
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [_port(1, "Fan", 5, True)],
+        })
+    for _ in range(2):
+        readings.append({
+            "timestamp": _ts(14, day=26),
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [_port(1, "Fan", 5, True)],
+        })
+    for _ in range(3):
+        readings.append({
+            "timestamp": _ts(16, day=25),
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [_port(1, "Fan", 5, True)],
+        })
+    result = build_activity_report(readings, days=2, port_loads={1: 5})
+    assert len(result) == 1
+    assert result[0].peak_hour_utc is not None
+    assert result[0].peak_hour_utc.hour == 16
+    assert result[0].peak_hour_utc.day == 25
+
+
+def test_build_activity_report_peak_hour_utc_aware_input_stripped():
+    """Timestamps with explicit +00:00 offset are stored as naive datetimes."""
+    readings = [
+        {
+            "timestamp": "2024-04-25T14:00:00+00:00",
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 60.0, "vpd": 1.24,
+            "ports": [_port(1, "Fan", 5, True)],
+        }
+    ]
+    result = build_activity_report(readings, days=1, port_loads={1: 5})
+    assert result[0].peak_hour_utc is not None
+    assert result[0].peak_hour_utc.tzinfo is None
+    assert result[0].peak_hour_utc.hour == 14
 
 
 def test_build_activity_report_peak_hour_none_when_never_ran():
