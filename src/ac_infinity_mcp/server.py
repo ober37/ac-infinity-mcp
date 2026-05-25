@@ -1316,7 +1316,8 @@ def _get_port_name_from_device(device: dict | None, port: int) -> str:
 
 
 async def _build_advance_conflict_response(
-    device_id: str, dev_id: object, port: int, port_name: str
+    device_id: str, dev_id: object, port: int, port_name: str,
+    requested_speed: int | None = None,
 ) -> str:
     """Build a structured ADVANCE_AUTOMATION conflict response for write tools.
 
@@ -1325,15 +1326,26 @@ async def _build_advance_conflict_response(
     - **Auth-error path** (secondary lookup raises ``ACInfinityAuthError``): returns
       auth error JSON immediately; credential expiry must be resolved before conflict UX.
     - **Normal path** (governing automation found and enabled): option key
-      ``"1_break_out"`` pointing to ``break_out_of_automation``; option key
-      ``"2_disable_automation"`` pointing to ``disable_advance_automation``.
-      ``suggested_reply`` discloses that releasing affects ALL ports on the automation.
+      ``"0_update_speed"`` (only when ``requested_speed`` is not None) pointing to
+      update-the-automation in natural language; option key ``"1_break_out"`` pointing
+      to ``break_out_of_automation``; option key ``"2_disable_automation"`` pointing
+      to ``disable_advance_automation``. ``suggested_reply`` discloses that releasing
+      affects ALL ports on the automation.
     - **All-disabled path** (API succeeded, automations non-empty, none active):
       option key ``"1_re_disable_to_clear"`` pointing to ``disable_advance_automation``.
       ``suggested_reply`` explains the port is stuck and offers force-release.
     - **Degraded path** (API call failed or automation list empty):
       option key ``"1_find_and_disable"`` pointing to ``list_advance_automations``.
       ``suggested_reply`` avoids exposing tool names — conversational only.
+
+    Args:
+        device_id: Human-readable device code (e.g. ``"C58ZA"``).
+        dev_id: Numeric device ID for the automation lookup API call.
+        port: 1-based port number.
+        port_name: Human-readable port name (e.g. ``"Filter"``).
+        requested_speed: The speed the caller tried to set (from set_port_speed).
+            When not None, adds a ``"0_update_speed"`` option in the normal path.
+            Pass ``None`` from set_port_on / set_port_off (no speed option applies).
     """
     api_call_failed = False
     automations: list[dict] = []
@@ -1382,18 +1394,33 @@ async def _build_advance_conflict_response(
             f"'{auto_name}' is actively controlling this port at target speed {current_auto_speed}."
             " To make manual adjustments, you need to resolve this automation conflict first."
         )
-        suggested_reply = (
-            f"'{auto_name}' automation is controlling this port right now"
-            f" (target speed: {current_auto_speed}). I can release this port from the automation"
-            f" — but note this will also release all other ports currently on '{auto_name}'."
-            " Alternatively, I could update the automation's speed settings instead."
-            " What would you prefer?"
-        )
+        if requested_speed is not None:
+            suggested_reply = (
+                f"'{auto_name}' automation is controlling this port right now"
+                f" (target speed: {current_auto_speed})."
+                f" The easiest fix is to update the automation to run at speed {requested_speed}"
+                " instead — the automation stays active, just at the new speed."
+                f" Alternatively, I can release {port_name} (Port {port}) from the automation"
+                f" so you can control it manually — but that will also release all other ports"
+                f" currently on '{auto_name}'."
+                " What would you prefer?"
+            )
+        else:
+            suggested_reply = (
+                f"'{auto_name}' automation is controlling this port right now"
+                f" (target speed: {current_auto_speed}). I can release this port from the"
+                f" automation — but note this will also release all other ports currently on"
+                f" '{auto_name}'. Alternatively, I could update the automation's speed settings"
+                " instead. What would you prefer?"
+            )
         opt1: dict = {
-            "description": f"Release this port from '{auto_name}' to regain manual control.",
+            "description": (
+                f"Release {port_name} (Port {port}) from '{auto_name}' to regain manual control."
+            ),
             "tool": "break_out_of_automation",
             "instruction": (
-                "Ask me to preview releasing this port from automation control first."
+                f"Ask me to release {port_name} (Port {port}) from the '{auto_name}'"
+                " automation so you can control it manually."
             ),
             "available": governing.get("enabled", False) or governing.get("run_state", False),
         }
@@ -1403,11 +1430,36 @@ async def _build_advance_conflict_response(
             ),
             "tool": "disable_advance_automation",
             "instruction": (
-                "Ask me to preview disabling the automation entirely — this will release all ports."
+                f"Ask me to disable the '{auto_name}' automation — this will release all ports"
+                " it currently controls."
             ),
             "available": True,
         }
         opt1_key = "1_break_out"
+
+        # Option 0 — only when the caller provided a target speed (set_port_speed path).
+        # set_port_on / set_port_off pass requested_speed=None → no speed option.
+        options_dict: dict = {}
+        if requested_speed is not None:
+            options_dict["0_update_speed"] = {
+                "description": (
+                    f"Change the '{auto_name}' automation's target speed from"
+                    f" {current_auto_speed} to {requested_speed},"
+                    " keeping the automation active."
+                ),
+                "instruction": (
+                    f"Ask me to update the '{auto_name}' automation to run at"
+                    f" speed {requested_speed} instead."
+                ),
+                "available": True,
+            }
+        options_dict[opt1_key] = opt1
+        options_dict["2_disable_automation"] = opt2
+        options_dict["3_fork_automation"] = {
+            "available": False,
+            "status": "not_yet_implemented",
+        }
+
     elif not api_call_failed and len(automations) > 0:
         # ALL-DISABLED PATH — API succeeded but all automations have enabled=False / run_state=False
         auto_name = None
@@ -1429,8 +1481,8 @@ async def _build_advance_conflict_response(
             "description": "Force-release this port by re-applying the disable command.",
             "tool": "disable_advance_automation",
             "instruction": (
-                "Ask me to force-release this port — I'll re-apply the disable command"
-                " and preview the action for you."
+                "Ask me to list your automations so we can identify which one is blocking this"
+                " port, then ask me to force-release it."
             ),
             "available": True,
         }
@@ -1439,6 +1491,14 @@ async def _build_advance_conflict_response(
             "status": "All automations already disabled — use option 1 to force-release the port.",
         }
         opt1_key = "1_re_disable_to_clear"
+        options_dict = {
+            opt1_key: opt1,
+            "2_disable_automation": opt2,
+            "3_fork_automation": {
+                "available": False,
+                "status": "not_yet_implemented",
+            },
+        }
     else:
         # DEGRADED PATH — API call failed OR automation list is empty
         auto_name = None
@@ -1459,8 +1519,8 @@ async def _build_advance_conflict_response(
             "description": "Find and disable the active automation, then apply your manual change.",
             "tool": "list_advance_automations",
             "instruction": (
-                "Ask me to find and disable the active automation — I'll look it up"
-                " and preview the action first."
+                "Ask me to list your automations so we can identify which one is blocking this"
+                " port, then ask me to disable it and force-release the port."
             ),
             "available": True,
         }
@@ -1469,6 +1529,14 @@ async def _build_advance_conflict_response(
             "status": "Use option 1 first to identify the automation.",
         }
         opt1_key = "1_find_and_disable"
+        options_dict = {
+            opt1_key: opt1,
+            "2_disable_automation": opt2,
+            "3_fork_automation": {
+                "available": False,
+                "status": "not_yet_implemented",
+            },
+        }
 
     return json.dumps({
         "conflict": "ADVANCE_AUTOMATION",
@@ -1482,16 +1550,9 @@ async def _build_advance_conflict_response(
         "co_governed_ports": [],
         "switching_guidance": (
             "To regain manual control: ask me to disable any active automations, then apply"
-            " your change. To instead add this port to an automation, ask me to create a new one."
+            " your change. To add this port to an automation instead, ask me to create a new one."
         ),
-        "options": {
-            opt1_key: opt1,
-            "2_disable_automation": opt2,
-            "3_fork_automation": {
-                "available": False,
-                "status": "not_yet_implemented",
-            },
-        },
+        "options": options_dict,
     }, indent=2)
 
 
@@ -1967,7 +2028,9 @@ async def set_port_speed(
     except ACInfinityAdvanceConflictError:
         port_name = _get_port_name_from_device(device, port)
         dev_id = device.get("devId") if device else None
-        return await _build_advance_conflict_response(device_id, dev_id, port, port_name)
+        return await _build_advance_conflict_response(
+            device_id, dev_id, port, port_name, requested_speed=speed
+        )
     except ACInfinityDeviceError as e:
         logger.warning("Device error in set_port_speed (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({"error": str(e)})

@@ -1438,3 +1438,116 @@ def test_set_port_mode_ai_plus_dry_run_false_returns_unsupported(authed_client):
     assert result["sent"] is False
     write_calls = [c for c in responses_lib.calls if "addDevMode" in c.request.url]
     assert len(write_calls) == 0
+
+
+# ============ Pre-write guard from device_data (Quirk 25 / Issue #133) ============
+
+# Device fixture with isOpenAutomation=1 on port 1 — simulates legacy firmware (devType=11)
+# where getdevModeSettingList may return unreliable modeType for ADVANCE-mode ports.
+LEGACY_DEVICE_DATA_WITH_OPEN_AUTOMATION = {
+    "devId": "1424979258063367506",
+    "devType": 11,
+    "newFrameworkDevice": False,
+    "deviceInfo": {
+        "ports": [
+            {"port": 1, "portName": "Filter", "speak": 5, "isOpenAutomation": 1},
+            {"port": 2, "portName": "Exhaust", "speak": 3, "isOpenAutomation": 0},
+        ],
+    },
+}
+
+# Device fixture with isOpenAutomation=0 — automation disabled; guard must NOT fire.
+LEGACY_DEVICE_DATA_AUTOMATION_DISABLED = {
+    "devId": "1424979258063367506",
+    "devType": 11,
+    "newFrameworkDevice": False,
+    "deviceInfo": {
+        "ports": [
+            {"port": 1, "portName": "Filter", "speak": 5, "isOpenAutomation": 0},
+        ],
+    },
+}
+
+# Device fixture where port 1 has no isOpenAutomation key — guard must NOT fire (safe-fail=0).
+LEGACY_DEVICE_DATA_NO_OPEN_AUTOMATION_KEY = {
+    "devId": "1424979258063367506",
+    "devType": 11,
+    "newFrameworkDevice": False,
+    "deviceInfo": {
+        "ports": [
+            {"port": 1, "portName": "Filter", "speak": 5},
+        ],
+    },
+}
+
+ADD_MODE_999999 = {"code": 999999, "msg": "Operation denied by active automation"}
+
+
+@responses_lib.activate
+def test_set_port_mode_pre_write_guard_fires_when_isOpenAutomation_1(authed_client):
+    """Pre-write guard raises ACInfinityAdvanceConflictError when port isOpenAutomation=1.
+
+    This catches the legacy firmware (devType=11) case where getdevModeSettingList returns
+    unreliable modeType. The guard fires BEFORE get_mode_settings is called.
+    """
+    # No MODE_SETTINGS_URL response registered — if the guard fires correctly,
+    # get_mode_settings is never called and no HTTP request is made to that endpoint.
+    with pytest.raises(ACInfinityAdvanceConflictError) as exc_info:
+        authed_client.set_port_mode(
+            LEGACY_DEVICE_DATA_WITH_OPEN_AUTOMATION, port=1, updates={}, dry_run=True
+        )
+    assert "isOpenAutomation=1" in str(exc_info.value)
+    # Confirm no HTTP call was made (get_mode_settings not reached)
+    mode_calls = [c for c in responses_lib.calls if "getdevModeSettingList" in c.request.url]
+    assert len(mode_calls) == 0
+
+
+@responses_lib.activate
+def test_set_port_mode_pre_write_guard_does_not_fire_when_isOpenAutomation_0(authed_client):
+    """Pre-write guard does NOT fire when isOpenAutomation=0 — automation is disabled."""
+    responses_lib.add(responses_lib.POST, MODE_SETTINGS_URL, json=MODE_SETTINGS_SUCCESS, status=200)
+    # Should not raise — automation disabled; falls through to normal dry_run
+    result = authed_client.set_port_mode(
+        LEGACY_DEVICE_DATA_AUTOMATION_DISABLED, port=1, updates={}, dry_run=True
+    )
+    assert result["dry_run"] is True
+
+
+@responses_lib.activate
+def test_set_port_mode_pre_write_guard_absent_key_falls_through(authed_client):
+    """Port with no isOpenAutomation key: pre-write guard safe-fail=0 → falls through."""
+    responses_lib.add(responses_lib.POST, MODE_SETTINGS_URL, json=MODE_SETTINGS_SUCCESS, status=200)
+    result = authed_client.set_port_mode(
+        LEGACY_DEVICE_DATA_NO_OPEN_AUTOMATION_KEY, port=1, updates={}, dry_run=True
+    )
+    assert result["dry_run"] is True
+
+
+@responses_lib.activate
+def test_set_port_mode_pre_write_guard_port_2_not_affected_when_port_1_is_advance(authed_client):
+    """Pre-write guard is port-specific: port 2 is not blocked when only port 1 is advance."""
+    responses_lib.add(responses_lib.POST, MODE_SETTINGS_URL, json=MODE_SETTINGS_SUCCESS, status=200)
+    # port 1 has isOpenAutomation=1 but we're writing to port 2 (isOpenAutomation=0)
+    result = authed_client.set_port_mode(
+        LEGACY_DEVICE_DATA_WITH_OPEN_AUTOMATION, port=2, updates={}, dry_run=True
+    )
+    assert result["dry_run"] is True
+
+
+@responses_lib.activate
+def test_set_port_mode_write_code_999999_raises_advance_conflict(authed_client):
+    """Defense-in-depth: write response code 999999 raises ACInfinityAdvanceConflictError.
+
+    This covers the case where the pre-write guard misses the conflict (e.g. no isOpenAutomation
+    key in device data and legacy getdevModeSettingList returns modeType != 15) but the API
+    rejects the write with code 999999 — the server should still return a structured conflict.
+    """
+    # No guard fires on dry_run=False: device_data has no ports list (no pre-write guard),
+    # and MODE_SETTINGS returns modeType != 15 (no modeType guard either).
+    settings_no_conflict = {"code": 200, "msg": "success.", "data": MOCK_MODE_SETTINGS_LEGACY_PORT1}
+    responses_lib.add(responses_lib.POST, MODE_SETTINGS_URL, json=settings_no_conflict, status=200)
+    responses_lib.add(responses_lib.POST, ADD_DEV_MODE_URL, json=ADD_MODE_999999, status=200)
+    with patch.object(authed_client, "_enforce_write_rate_limit"):
+        with pytest.raises(ACInfinityAdvanceConflictError) as exc_info:
+            authed_client.set_port_mode(LEGACY_DEVICE_DATA, port=1, updates={}, dry_run=False)
+    assert "999999" in str(exc_info.value)

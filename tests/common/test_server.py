@@ -5485,7 +5485,12 @@ async def test_conflict_instructions_no_function_syntax(mock_client):
 
 @pytest.mark.asyncio
 async def test_conflict_normal_path_instructions_contain_natural_language(mock_client):
-    """Normal path opt1 and opt2 instruction fields use natural-language text."""
+    """Normal path opt1 and opt2 instruction fields use natural-language text.
+
+    Verified format: "Ask me to release <port> from the '<automation>' automation ..."
+    and "Ask me to disable the '<automation>' automation — ..."
+    No Python function call syntax; no dry_run; no internal parameter names.
+    """
     mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
     mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
@@ -5493,10 +5498,14 @@ async def test_conflict_normal_path_instructions_contain_natural_language(mock_c
     data = json.loads(result)
     opt1 = data["options"]["1_break_out"]
     opt2 = data["options"]["2_disable_automation"]
-    assert "preview" in opt1["instruction"].lower()
-    assert "releasing this port" in opt1["instruction"].lower()
-    assert "preview" in opt2["instruction"].lower()
-    assert "disabling the automation" in opt2["instruction"].lower()
+    # opt1 must instruct release from the named automation in plain language
+    assert "ask me" in opt1["instruction"].lower()
+    assert "release" in opt1["instruction"].lower()
+    assert "automation" in opt1["instruction"].lower()
+    # opt2 must instruct disabling the named automation in plain language
+    assert "ask me" in opt2["instruction"].lower()
+    assert "disable" in opt2["instruction"].lower()
+    assert "automation" in opt2["instruction"].lower()
 
 
 @pytest.mark.asyncio
@@ -5512,6 +5521,133 @@ async def test_conflict_switching_guidance_no_function_names(mock_client):
     assert "disable_advance_automation" not in sg
     assert "create_advance_automation" not in sg
     assert "ask me" in sg.lower()
+
+
+# ============ Issue #107 — Option 0 (update_speed) in conflict response ============
+
+
+@pytest.mark.asyncio
+async def test_set_port_speed_conflict_includes_option_0_update_speed(mock_client):
+    """set_port_speed conflict response includes option '0_update_speed' in normal path."""
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_speed("C58ZA", 1, 7)
+    data = json.loads(result)
+    assert data["conflict"] == "ADVANCE_AUTOMATION"
+    # Option 0 must be present when called from set_port_speed (requested_speed=7)
+    assert "0_update_speed" in data["options"]
+    opt0 = data["options"]["0_update_speed"]
+    assert opt0["available"] is True
+    # Must mention the requested speed (7) in description
+    assert "7" in opt0["description"]
+    # Must mention the current auto speed
+    current_speed = str(
+        MOCK_ADVANCE_AUTOMATIONS_LIST[0]["onSpeed"]  # from fixture
+    )
+    assert current_speed in opt0["description"] or "?" in opt0["description"]
+    # instruction must be natural language
+    assert "Ask me" in opt0["instruction"]
+    assert "7" in opt0["instruction"]
+    assert "dry_run" not in opt0["instruction"]
+    assert "device_id=" not in opt0["instruction"]
+
+
+@pytest.mark.asyncio
+async def test_set_port_on_conflict_has_no_option_0_update_speed(mock_client):
+    """set_port_on conflict response does NOT include option '0_update_speed'."""
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_on("C58ZA", 1)
+    data = json.loads(result)
+    assert data["conflict"] == "ADVANCE_AUTOMATION"
+    # set_port_on passes requested_speed=None → option 0 must be absent
+    assert "0_update_speed" not in data["options"]
+
+
+@pytest.mark.asyncio
+async def test_set_port_off_conflict_has_no_option_0_update_speed(mock_client):
+    """set_port_off conflict response does NOT include option '0_update_speed'."""
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_off("C58ZA", 1)
+    data = json.loads(result)
+    assert data["conflict"] == "ADVANCE_AUTOMATION"
+    # set_port_off passes requested_speed=None → option 0 must be absent
+    assert "0_update_speed" not in data["options"]
+
+
+@pytest.mark.asyncio
+async def test_conflict_option_0_not_present_in_degraded_path(mock_client):
+    """Option '0_update_speed' must NOT appear in the degraded path (API error)."""
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
+    mock_client.get_advance_automations.side_effect = ACInfinityAPIError("fail")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_speed("C58ZA", 1, 7)
+    data = json.loads(result)
+    assert data["conflict"] == "ADVANCE_AUTOMATION"
+    # Degraded path: automation lookup failed → option 0 not available
+    assert "0_update_speed" not in data["options"]
+
+
+@pytest.mark.asyncio
+async def test_conflict_option_0_not_present_in_all_disabled_path(mock_client):
+    """Option '0_update_speed' must NOT appear in the all-disabled path."""
+    import copy
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
+    disabled_automations = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_SINGLE)
+    # MOCK_ADVANCE_AUTOMATIONS_SINGLE has isOn=0, runState=0 → all-disabled path
+    mock_client.get_advance_automations.return_value = disabled_automations
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_speed("C58ZA", 1, 7)
+    data = json.loads(result)
+    assert data["conflict"] == "ADVANCE_AUTOMATION"
+    # All-disabled path: no governing automation → option 0 not available
+    assert "0_update_speed" not in data["options"]
+
+
+# ============ Issue #133 — Pre-write guard from device_data (server level) ============
+
+
+@pytest.mark.asyncio
+async def test_set_port_speed_conflict_fires_before_get_mode_settings_on_advance_port(mock_client):
+    """ACInfinityAdvanceConflictError from pre-write guard returns structured conflict.
+
+    The conflict comes from isOpenAutomation=1 in device_data BEFORE get_mode_settings
+    is called — tests that the server's _build_advance_conflict_response is still reached.
+    """
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError(
+        "Port 1 on device 12345 is in smart automation mode (isOpenAutomation=1 in devInfoListAll)"
+    )
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_speed("C58ZA", 1, 5)
+    data = json.loads(result)
+    assert data["conflict"] == "ADVANCE_AUTOMATION"
+    assert "0_update_speed" in data["options"]  # speed=5 was passed
+    assert data["target_port"] == "Intake Fan (Port 1)"
+
+
+@pytest.mark.asyncio
+async def test_set_port_speed_conflict_999999_defense_in_depth(mock_client):
+    """ACInfinityAdvanceConflictError from 999999 fallback returns structured conflict.
+
+    Covers the defense-in-depth path where the pre-write guard misses the conflict
+    and the write API returns code 999999 (ADVANCE conflict sentinel).
+    """
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError(
+        "Port 1 on device 12345 rejected write with code 999999 — port is under Advance "
+        "Automation control."
+    )
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_speed("C58ZA", 1, 3)
+    data = json.loads(result)
+    assert data["conflict"] == "ADVANCE_AUTOMATION"
+    # speed=3 was the requested speed — option 0 should appear
+    assert "0_update_speed" in data["options"]
 
 
 async def test_enable_advance_automation_not_found(mock_client):

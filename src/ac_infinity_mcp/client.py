@@ -492,6 +492,21 @@ class ACInfinityClient:
             raise ACInfinityDeviceError("device_data missing devId field")
 
         controller_type = detect_controller_type(device_data)
+
+        # Pre-write guard (Quirk 25): check isOpenAutomation from device_data (devInfoListAll)
+        # BEFORE calling get_mode_settings. Legacy firmware (devType=11, firmware 3.2.56) may
+        # return unreliable modeType from getdevModeSettingList while the port is under ADVANCE
+        # control — the devInfoListAll port-level isOpenAutomation flag is authoritative.
+        # Safe-fail: absent field treated as 0 (not active) — we fall through to the secondary
+        # getdevModeSettingList check which has its own safe-fail of 1.
+        port_list = (device_data.get("deviceInfo") or {}).get("ports", [])
+        port_entry = next((p for p in port_list if p.get("port") == port), None)
+        if port_entry is not None and port_entry.get("isOpenAutomation") == 1:
+            raise ACInfinityAdvanceConflictError(
+                f"Port {port} on device {dev_id} is in smart automation mode "
+                "(isOpenAutomation=1 in devInfoListAll) — cannot override manually."
+            )
+
         current_settings = self.get_mode_settings(dev_id, port)
 
         # Guard: smart automation mode cannot be overridden via the write API (returns 999999)
@@ -574,6 +589,23 @@ class ACInfinityClient:
                 )
                 time.sleep(3)
                 continue
+
+            # Defense-in-depth: 999999 is the API's "conflict with active automation" code.
+            # This fires only if the pre-write guard (isOpenAutomation check above) missed the
+            # conflict — e.g. legacy firmware that does not populate isOpenAutomation in the
+            # device list, or a race condition where automation activated between the guard and
+            # the write. Raising ACInfinityAdvanceConflictError here ensures the server-layer
+            # exception handler routes to _build_advance_conflict_response instead of the
+            # generic ACInfinityAPIError path.
+            if code == 999999:
+                logger.warning(
+                    "Write returned code 999999 (ADVANCE conflict) for devId=%s port=%s",
+                    dev_id, port,
+                )
+                raise ACInfinityAdvanceConflictError(
+                    f"Port {port} on device {dev_id} rejected write with code 999999 — "
+                    "port is under Advance Automation control."
+                )
 
             logger.error("Write failed for devId=%s port=%s: %s", dev_id, port, error_msg)
             self._raise_for_api_code(code, error_msg, "Write")
