@@ -1101,6 +1101,38 @@ activity. The only available filter is the pattern detector, which requires `tra
 
 ---
 
+### Quirk 25 — Legacy firmware (devType=11) may return unreliable `modeType` from `getdevModeSettingList` for ADVANCE-mode ports
+
+**Background:** When a port is under Advance Automation control on legacy controllers
+(e.g. C58ZA, devType=11, firmware 3.2.56), the `getdevModeSettingList` endpoint may
+return `modeType != 15` even though the port is actively governed by an automation.
+This caused the primary ADVANCE conflict guard in `_set_port_mode_inner` to miss the
+conflict and fall through to the write, which then failed with the generic
+`ACInfinityAPIError` path rather than the structured `ACInfinityAdvanceConflictError`.
+
+**Discovery:** `get_port_status` correctly identified the port as ADVANCE because it
+reads `isOpenAutomation` from `devInfoListAll` (not `getdevModeSettingList`). This
+confirmed that `devInfoListAll` is the reliable source for automation state on legacy firmware.
+
+**Fix — two-layer guard:**
+
+1. **Pre-write guard (primary):** Before calling `get_mode_settings`, check the port's
+   `isOpenAutomation` field from `device_data["deviceInfo"]["ports"][N]`. If `isOpenAutomation == 1`,
+   raise `ACInfinityAdvanceConflictError` immediately — before the unreliable
+   `getdevModeSettingList` call can return misleading data.
+   - Safe-fail: absent `isOpenAutomation` key treated as `0` (not active) — falls through
+     to the secondary `getdevModeSettingList` check which has its own safe-fail of `1`.
+
+2. **999999 fallback (defense-in-depth):** In the write response loop, if the API returns
+   `code == 999999` (the legacy API's "blocked by active automation" sentinel), raise
+   `ACInfinityAdvanceConflictError`. This catches the case where both guards missed the
+   conflict (e.g. race condition between guard and write, or firmware variation not yet observed).
+
+**Code location:** `client._set_port_mode_inner`, before the `get_mode_settings` call
+and in the post-write response loop.
+
+---
+
 ## v2.0 API Endpoints Reference
 
 All endpoints below use the base URL `http://www.acinfinityserver.com/api` and require
@@ -1884,13 +1916,13 @@ lookup finds:
 }
 ```
 
-**Normal path (governing automation found and enabled):**
+**Normal path from `set_port_speed` (governing automation found, speed provided):**
 ```json
 {
   "conflict": "ADVANCE_AUTOMATION",
   "summary": "While 'Moderate Airflow' automation is running, all ports on this controller are locked from manual control. Your change requires resolving this conflict first.",
   "human_summary": "'Moderate Airflow' is actively controlling this port at target speed 5. To make manual adjustments, you need to resolve this automation conflict first.",
-  "suggested_reply": "'Moderate Airflow' automation is controlling this port right now (target speed: 5). I can release this port from the automation — but note this will also release all other ports currently on 'Moderate Airflow'. Alternatively, I could update the automation's speed settings instead. What would you prefer?",
+  "suggested_reply": "'Moderate Airflow' automation is controlling this port right now (target speed: 5). The easiest fix is to update the automation to run at speed 3 instead — the automation stays active, just at the new speed. Alternatively, I can release Inline Fan (Port 1) from the automation so you can control it manually — but that will also release all other ports currently on 'Moderate Airflow'. What would you prefer?",
   "target_port": "Inline Fan (Port 1)",
   "automation_name": "Moderate Airflow",
   "automation_id": "1234567890",
@@ -1898,18 +1930,23 @@ lookup finds:
     {"name": "Moderate Airflow", "automation_id": "1234567890"}
   ],
   "co_governed_ports": [],
-  "switching_guidance": "To regain manual control: disable all active automations using disable_advance_automation, then apply your change. To instead add this port to an automation, use create_advance_automation.",
+  "switching_guidance": "To regain manual control: ask me to disable any active automations, then apply your change. To add this port to an automation instead, ask me to create a new one.",
   "options": {
+    "0_update_speed": {
+      "description": "Change the 'Moderate Airflow' automation's target speed from 5 to 3, keeping the automation active.",
+      "instruction": "Ask me to update the 'Moderate Airflow' automation to run at speed 3 instead.",
+      "available": true
+    },
     "1_break_out": {
-      "description": "Release this port from 'Moderate Airflow' to regain manual control.",
+      "description": "Release Inline Fan (Port 1) from 'Moderate Airflow' to regain manual control.",
       "tool": "break_out_of_automation",
-      "instruction": "Call break_out_of_automation(device_id='C58ZA', port=1, dry_run=True) to preview.",
+      "instruction": "Ask me to release Inline Fan (Port 1) from the 'Moderate Airflow' automation so you can control it manually.",
       "available": true
     },
     "2_disable_automation": {
       "description": "Disable 'Moderate Airflow' entirely — releases all ports on this automation.",
       "tool": "disable_advance_automation",
-      "instruction": "Call disable_advance_automation(device_id='C58ZA', automation_id='1234567890', dry_run=True) to preview.",
+      "instruction": "Ask me to disable the 'Moderate Airflow' automation — this will release all ports it currently controls.",
       "available": true
     },
     "3_fork_automation": {
@@ -1919,6 +1956,10 @@ lookup finds:
   }
 }
 ```
+
+**Normal path from `set_port_on` / `set_port_off` (no speed provided, no option 0):**
+
+Same structure as above but **without** the `"0_update_speed"` key and with `suggested_reply` not mentioning update-speed as the primary option.
 
 **All-disabled path (API succeeded, automations non-empty, none currently active):**
 ```json
@@ -1932,12 +1973,12 @@ lookup finds:
   "automation_id": null,
   "active_automations": [],
   "co_governed_ports": [],
-  "switching_guidance": "To regain manual control: disable all active automations using disable_advance_automation, then apply your change. To instead add this port to an automation, use create_advance_automation.",
+  "switching_guidance": "To regain manual control: ask me to disable any active automations, then apply your change. To add this port to an automation instead, ask me to create a new one.",
   "options": {
     "1_re_disable_to_clear": {
       "description": "Force-release this port by re-applying the disable command.",
       "tool": "disable_advance_automation",
-      "instruction": "Call list_advance_automations(device_id='C58ZA') to find the automation_id, then call disable_advance_automation(device_id='C58ZA', automation_id='<id>', dry_run=True) to preview the force-release.",
+      "instruction": "Ask me to list your automations so we can identify which one is blocking this port, then ask me to force-release it.",
       "available": true
     },
     "2_disable_automation": {
@@ -1964,12 +2005,12 @@ lookup finds:
   "automation_id": null,
   "active_automations": [],
   "co_governed_ports": [],
-  "switching_guidance": "To regain manual control: disable all active automations using disable_advance_automation, then apply your change. To instead add this port to an automation, use create_advance_automation.",
+  "switching_guidance": "To regain manual control: ask me to disable any active automations, then apply your change. To add this port to an automation instead, ask me to create a new one.",
   "options": {
     "1_find_and_disable": {
       "description": "Find and disable the active automation, then apply your manual change.",
       "tool": "list_advance_automations",
-      "instruction": "Call list_advance_automations(device_id='C58ZA') to get the automation_id of the active automation, then call disable_advance_automation(device_id='C58ZA', automation_id='<id>', dry_run=True).",
+      "instruction": "Ask me to list your automations so we can identify which one is blocking this port, then ask me to disable it and force-release the port.",
       "available": true
     },
     "2_disable_automation": {
@@ -1988,16 +2029,19 @@ lookup finds:
 - **Auth-error path** — when `ACInfinityAuthError` is raised during the secondary automation lookup, none of the standard conflict fields (`conflict`, `options`, etc.) are present; only `error` and `detail` are returned. The caller must re-authenticate before retrying.
 - `active_automations` — list of `{"name": ..., "automation_id": ...}` objects for all enabled automations on this controller (empty list in all-disabled and degraded paths)
 - `human_summary` — plain-language summary suitable for display to the grower; always present in the normal/all-disabled/degraded paths (absent in auth-error path)
-- `suggested_reply` — pre-written reply text the LLM can use verbatim to inform the user what action it would take next; avoids exposing tool call syntax to the grower
-  - Normal path: names the specific automation and its target speed; asks whether to break out or update the automation settings
+- `suggested_reply` — pre-written reply text the LLM can use verbatim; no tool call syntax exposed to the grower
+  - Normal path (with speed): leads with update-automation-speed as the easiest option, then offers break-out as alternative
+  - Normal path (no speed): asks whether to break out or update the automation settings
   - All-disabled path: explains the stuck-in-automation-mode situation and offers to force-release via re-apply
   - Degraded path: offers to list automations to identify the blocking one (no tool names exposed to the grower)
+- `options.0_update_speed` — present in normal path only when called from `set_port_speed` (i.e. `requested_speed` is not None). Not present for `set_port_on` / `set_port_off` (no speed target applies). Not present in all-disabled or degraded paths.
 - Option key naming by path:
-  - Normal path: `"1_break_out"` (tool: `break_out_of_automation`), `"2_disable_automation"` (tool: `disable_advance_automation`)
+  - Normal path: `"0_update_speed"` (when speed provided), `"1_break_out"` (tool: `break_out_of_automation`), `"2_disable_automation"` (tool: `disable_advance_automation`)
   - All-disabled path: `"1_re_disable_to_clear"` (tool: `disable_advance_automation`), `"2_disable_automation"` (available: false)
   - Degraded path: `"1_find_and_disable"` (tool: `list_advance_automations`), `"2_disable_automation"` (available: false)
 - `options.1_break_out.available` — set to `governing.get("enabled", False) or governing.get("run_state", False)`; `true` when the automation is enabled OR actively running (handles mid-toggle transient state where `isOn=0` but `runState=1`)
-- The `isOpenAutomation` guard condition is documented in Quirk 19
+- The `isOpenAutomation` guard condition is documented in Quirk 19; the pre-write guard from devInfoListAll is documented in Quirk 25
+- **User-facing text rules:** All `instruction`, `description`, `suggested_reply`, and `switching_guidance` fields must use natural-language prose (no Python function call syntax, no `dry_run`, no `device_id=`, no raw numeric IDs). See `CLAUDE.md` § "User-facing text rules".
 
 ---
 
