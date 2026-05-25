@@ -1629,6 +1629,25 @@ All 77 mode-setting fields are preserved; only `onSpead` is updated.
 }
 ```
 
+**OFF-mode warning:** When the port is in OFF mode (`atType=0` uninitialized or `atType=1` OFF) at the
+time of the call, the response includes an additional `warning` field:
+
+```json
+{
+  "action": "set port 3 speed to 5",
+  "device_id": "8T4TC",
+  "port": 3,
+  "speed": 5,
+  "dry_run": false,
+  "controller_type": "legacy",
+  "sent": true,
+  "warning": "Left Fan (Port 3) is currently in OFF mode — speed was stored but the port will not run until the mode is changed to ON. Call set_port_mode with mode='ON' to activate it."
+}
+```
+
+The speed is stored in the controller's settings but the port does not activate. Call
+`set_port_mode(device_id, port, mode="ON")` to bring the port up at the stored speed.
+
 **AI+ note:** `dry_run=True` is supported. `dry_run=False` returns an unsupported error — see Quirk 14.
 
 ---

@@ -1854,6 +1854,11 @@ async def set_port_speed(
         JSON with action, device_id, port, speed, dry_run, controller_type,
         sent, and payload (when dry_run=True).
 
+        When the port is in OFF mode (atType=0 or atType=1) at call time, the
+        response also includes a ``warning`` field advising the grower to call
+        set_port_mode with mode='ON' to activate the port. The speed is stored
+        on the controller but the port will not run until the mode is changed.
+
         Example (dry_run=True)::
 
             {
