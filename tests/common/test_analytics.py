@@ -1584,13 +1584,14 @@ def test_count_debounced_transitions_boundary_nibble():
 # ============ weighted-median peak_hour_utc ============
 
 def test_build_activity_report_peak_hour_weighted_median_skewed():
-    """Weighted median differs from max() when a minority slot has more readings.
+    """Weighted median stays on the central mass when a single slot has a nibble spike.
 
-    max() would pick hour 6 (3 readings); weighted median picks hour 14 (central mass).
+    Scenario: 3 readings at hour 2 (API boundary nibble), 1 reading each at hours 10–14.
+    max() picks hour 2 (highest count from nibble); weighted median picks hour 12 (centre).
     """
     readings = []
-    # hour 14 appears 6 times, hour 6 appears 3 times → max() picks 6, median picks 14
-    for h in [6, 6, 6, 14, 14, 14, 14, 14, 14]:
+    # hour 2 has 3 readings (nibble artifact); hours 10-14 each have 1 reading
+    for h in [2, 2, 2, 10, 11, 12, 13, 14]:
         readings.append({
             "timestamp": _ts(h),
             "temperature_c": 24.0, "temperature_f": 75.2,
@@ -1599,7 +1600,8 @@ def test_build_activity_report_peak_hour_weighted_median_skewed():
         })
     result = build_activity_report(readings, port_loads={1: 5})
     assert result[0].peak_hour_utc is not None
-    assert result[0].peak_hour_utc.hour == 14
+    # max() would return hour 2 (count=3); weighted median returns hour 11 (index 4 of 8)
+    assert result[0].peak_hour_utc.hour == 11
 
 
 def test_build_activity_report_peak_hour_uniform():
@@ -1634,7 +1636,8 @@ def test_rule_f_excludes_identical_low_activity_custom_ports():
     # 50 readings so on_hours = 1/50*24 = 0.48 h < 1.0 threshold.
     # Port 2 'Heater' and Port 3 'Humidifer' identical: speed=1 on at reading 10, otherwise off.
     # Port 4 'Filter' has different profile (higher activity) → stays.
-    from datetime import datetime as _dt, timedelta as _td
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
     base = _dt(2024, 4, 25, 0, 0, 0)
     readings = [
         {
@@ -1681,7 +1684,8 @@ def test_rule_f_does_not_exclude_high_activity_custom_ports():
 def test_rule_f_proper_subset_guard_prevents_all_exclusion():
     """Rule F must not fire when the matching group is ALL ports — would leave empty result."""
     # 50 readings so on_hours < threshold, AND these are the only two custom-named ports.
-    from datetime import datetime as _dt, timedelta as _td
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
     base = _dt(2024, 4, 25, 0, 0, 0)
     readings = [
         {

@@ -397,7 +397,8 @@ def build_activity_report(
                 (port_map[p].on_hours / days) < _GHOST_LOAD_ZERO_THRESHOLD for p in port_nums
             ):
                 continue
-            if all(r.port in set(port_nums) for r in reports):
+            port_set = set(port_nums)
+            if all(r.port in port_set for r in reports):
                 continue  # proper-subset guard: don't exclude every port
             phantom_ports.update(port_nums)
 
