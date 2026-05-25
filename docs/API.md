@@ -973,7 +973,7 @@ The Advance Automation API returns an `onTimeSwitch` field per group entry. It m
 ### Quirk 22 — Ghost port filtering and toggle-device data quality in `get_port_activity_report`
 
 The history API returns data for all ports on a controller, including ports with no device
-attached. These phantom ports produce misleading activity data. Five filter/caveat rules are
+attached. These phantom ports produce misleading activity data. Six filter/caveat rules are
 applied by `build_activity_report`:
 
 **Ghost-port exclusion rules (port removed from response):**
@@ -999,11 +999,30 @@ applied by `build_activity_report`:
   set to OFF — producing phantom records with non-zero avg_speed and spurious transitions that
   pass Rules A–D. The `avg_speed > 1.0` condition ensures Rule E does not overlap with Rule D
   (toggle-speed devices).
+- **Rule F** (phantom clone detection, fixes #139): A custom-named port is excluded when it
+  shares an identical activity signature `(uptime_pct, transitions, peak_hour_utc)` with one
+  or more other custom-named ports AND all matching ports have average on-time < 1 h/day
+  (`_GHOST_LOAD_ZERO_THRESHOLD`). Fires only when `port_loads` is provided (requires
+  supplementary `get_devices` call). A proper-subset guard prevents excluding every port
+  — at least one non-matching port must remain. Targets phantom history artifacts on legacy
+  controllers (devType=11) where disconnected ports are cloned at identical low-activity
+  levels. Only fires when `port_loads is not None` (disabled on devType=18/22 zero-load devices).
 
 Rule A and the `data_quality` caveat rule (below) both exempt toggle hardware (loadType 4 or
 128) — toggle devices are never ghost-filtered regardless of uptime or portsLoad, because they
 appear as always-on in history. A toggle device excluded by Rule A would silently vanish from
 the report even though it is physically connected.
+
+**Transition debouncing (fixes #112, `_MIN_DWELL_READINGS = 2`):**
+
+The `transitions` count uses `_count_debounced_transitions()` to filter out single-reading
+state changes. A state change is only counted when the new state persists for at least
+`_MIN_DWELL_READINGS` (2) consecutive readings. Single-reading blips at automation window
+boundaries are API artifacts — the history API occasionally emits one record with a
+different nibble value at the edge of a scheduled automation window, creating a phantom
+on→off→on sequence that would inflate `transitions` and corrupt `peak_hour_local` if not
+filtered. After debouncing, only genuine sustained state changes (fan turning on and staying
+on for ≥ 2 readings) are counted.
 
 **Data-quality caveat rule (port kept, flagged):**
 
@@ -1086,6 +1105,12 @@ Toggle-hardware detection (data-quality caveat path) on these device types uses 
 alone: `transitions == 0` AND `uptime_pct == 100.0` AND all running speeds == 1. The
 `loadType`-based confirmation is also skipped for devType=18 and devType=22 because
 `loadType` is similarly unreliable on these devices (Issue #126).
+
+**Note behavior (fixes #136):** A device-level Note about missing load data (`no_load_signal`)
+is emitted in `human_summary` whenever the result is non-empty and the device is devType=18
+or devType=22 — regardless of whether any port has the `api_constant_speed` caveat. Previously
+the Note was suppressed when all ports had `api_constant_speed` quality; the guard is now
+`if dev_type in _ZERO_LOAD_DEV_TYPES:` (fires for any non-empty result on these devices).
 
 **Detection:**
 
@@ -1493,10 +1518,10 @@ and the report is still returned.
 **Field notes:**
 - `window_start_local` / `window_end_local` — the exact local time range analyzed, formatted in the device's timezone (e.g. "May 17, 10:35 AM CDT"). Use these fields when explaining why a report spans multiple calendar days — the window is a rolling `days`×24 h span starting from the current time, not a calendar-day boundary.
 - `on_hours` / `off_hours` — cumulative total hours over the full `days` window (not hours per day); total is `days * 24` when full data is available. Present to growers as total elapsed hours, e.g. "ran 87.5 hours over the past 7 days (52%)."
-- `transitions` — number of on↔off state changes in the period
+- `transitions` — number of debounced on↔off state changes in the period. Single-reading blips at automation window edges are API boundary artifacts (Quirk 22) and are not counted — only transitions where the new state persists for at least `MIN_DWELL_READINGS` (2) consecutive readings are recorded.
 - `avg_speed_when_running` — average `onSpead` value (1–10) across on-readings with non-zero speed
 - `uptime_pct` — `on_hours / (on_hours + off_hours) * 100`, rounded to 1 decimal
-- `peak_hour_local` — device-local time string with peak date, always including the calendar date for disambiguation across multi-day windows (e.g. "4:00 PM CDT (peak on May 20)"); `null` when port never ran (always_off case). Uses `astimezone()` for full DST-aware conversion; sub-hour UTC offsets (UTC+5:30) are handled correctly. Falls back to UTC when `zoneId` is absent (Quirk 23).
+- `peak_hour_local` — device-local time string with peak date, always including the calendar date for disambiguation across multi-day windows (e.g. "4:00 PM CDT (peak on May 20)"); `null` when port never ran (always_off case). Uses `astimezone()` for full DST-aware conversion; sub-hour UTC offsets (UTC+5:30) are handled correctly. Falls back to UTC when `zoneId` is absent (Quirk 23). Computed via weighted median of hourly activity slots — prevents a single-reading nibble from inflating peak hour to an off-peak slot (fixes #112). Specifically: all on-readings are bucketed by `(date, hour)` UTC slot; the median slot (by reading count) is selected as peak, so high-frequency hours dominate over isolated blips.
 - `data_quality` — Internal classification field used to generate `human_summary` caveat lines; **not present in the JSON output** (stripped before serialization). Internally: `null` for ports with reliable history; `"api_constant_speed"` for toggle hardware (heaters, lights, humidifiers — loadType 4 or 128) where the AC Infinity API records constant speed=1 regardless of actual runtime; `"no_load_signal"` for ports on devType=18/22 devices where load data is absent. The effects of these classifications are visible only via `human_summary`: toggle-hardware ports produce a `▎`-prefixed caveat line (e.g. "▎ Heater (Port 2): Activity data not supported (currently OFF)."), and no_load_signal ports produce a device-level Note about missing load data. Do not quote `on_hours` or `uptime_pct` for ports with a `▎` caveat — relay the caveat text verbatim.
 - `ports_excluded_count` — number of ports removed by the ghost-port filter (see Quirk 22). Capped at `devPortCount` when the device's physical port count is known (fixes over-counting on sub-8-port devices; Issue #129). On devices where `devPortCount` is absent or zero, no cap is applied and the count may reflect all 8 history slots. Do not repeat this count in prose when presenting `human_summary` to a grower.
 - `human_summary` — plain-English activity summary; preamble includes the date range (e.g. "Analyzed 7 days (May 17 – May 24)"); includes an exclusion note when `ports_excluded_count > 0` and a data-quality caveat for any toggle-hardware ports. When `ports` is empty and `ports_excluded_count > 0`, summarizes the no-activity result with the exclusion count (e.g., "No active port activity was detected over the past 7 day(s). 2 ports excluded (no power detected)."). When `ports` is empty and `ports_excluded_count == 0`, includes a troubleshooting explanation (devices off, unplugged, or no scheduled activity). Relay the caveat text for `data_quality = "api_constant_speed"` ports verbatim — do not estimate runtime from `on_hours`.

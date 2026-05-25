@@ -904,15 +904,22 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         ports_excluded_count is the number of ports removed by the ghost-port filter,
         capped at devPortCount when the device's physical port count is known (prevents
         over-counting on sub-8-port devices; unknown/zero devPortCount means no cap).
-        Five rules apply: Rule A (constant 100%% uptime + zero load), Rule B
+        Six rules apply: Rule A (constant 100%% uptime + zero load), Rule B
         (auto-named Port N with low average runtime or zero load), Rule C (named
         port with zero transitions + zero load + < 1 h/day average runtime), Rule D
         (non-toggle named port with speed history ≤ 1 and zero load — confirmed toggle
-        hardware with transitions > 0 is exempt; see Quirk 22 in docs/API.md), and Rule E
+        hardware with transitions > 0 is exempt; see Quirk 22 in docs/API.md), Rule E
         (named port, non-toggle hardware, zero current load,
         sub-threshold runtime — stale configured speed from a port previously set to
-        OFF). The human_summary field already includes a brief note about excluded ports
-        when ports_excluded_count > 0. Do not repeat the exclusion count in prose response.
+        OFF), and Rule F (phantom clone detection — custom-named ports sharing identical
+        activity signatures with low average on-time are excluded as legacy controller
+        artifacts; fires only when port_loads data is available; proper-subset guard
+        ensures at least one port is always retained). The human_summary field already
+        includes a brief note about excluded ports when ports_excluded_count > 0. Do not
+        repeat the exclusion count in prose response.
+        The transitions count uses debouncing (_MIN_DWELL_READINGS=2): single-reading
+        state changes at automation window edges are not counted — only transitions
+        where the new state persists for ≥ 2 consecutive readings are recorded.
 
         Ports whose timing data is unreliable appear only as a ▎-prefixed caveat
         line in human_summary (e.g. "▎ Heater (Port 2): Activity data not supported
