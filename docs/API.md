@@ -2221,15 +2221,36 @@ Disable a currently enabled Advance Automation. No-ops if already disabled.
   "action": "disable",
   "automation_name": "Moderate Airflow",
   "automation_id": 12345,
+  "governed_ports": [
+    {"port": 3, "port_name": "Intake Fan (Port 3)"},
+    {"port": 5, "port_name": "Exhaust Fan (Port 5)"}
+  ],
   "revert_behavior_confirmed": false,
-  "adv_ids_to_toggle": [12345],
   "dry_run": true,
   "sent": false,
   "to_restore": "Ask me to re-enable 'Moderate Airflow'."
 }
 ```
 
+**Response (live, dry_run=False):**
+```json
+{
+  "action": "disable",
+  "automation_name": "Moderate Airflow",
+  "automation_id": 12345,
+  "governed_ports": [
+    {"port": 3, "port_name": "Intake Fan (Port 3)"},
+    {"port": 5, "port_name": "Exhaust Fan (Port 5)"}
+  ],
+  "revert_behavior_confirmed": false,
+  "dry_run": false,
+  "sent": true,
+  "to_restore": "Ask me to re-enable 'Moderate Airflow'."
+}
+```
+
 **Field notes:**
+- `governed_ports` — list of `{"port": N, "port_name": "Name (Port N)"}` dicts for every port the automation controls, decoded from the `grouptDevType` bitmask across all port groups (Port N = bit N−1 set). Port names are sourced from `deviceInfo.ports` via `_sanitize_api_string`; fallback is `"Port N (Port N)"` when `portName` is absent or empty.
 - `revert_behavior_confirmed` — whether port revert-on-disable behavior has been confirmed via live test
 - `to_restore` — natural-language hint for re-enabling the automation by name; intentionally avoids Python function-call syntax so the MCP caller can relay it to the user verbatim
 
