@@ -3175,7 +3175,7 @@ async def disable_advance_automation(
 
     Returns:
         JSON with action, automation_name, automation_id, revert_behavior_confirmed,
-        dry_run, sent, and to_restore (restore command string).
+        dry_run, sent, and to_restore (natural-language hint for re-enabling).
         On failure returns ``{"error": "..."}``.
     """
     try:
@@ -3200,10 +3200,7 @@ async def disable_advance_automation(
             return json.dumps({"error": f"Automation {automation_id} not found"})
 
         name = found["name"]
-        to_restore = (
-            f"Call enable_advance_automation(device_id='{device_id}', "
-            f"automation_id='{automation_id}') to re-enable."
-        )
+        to_restore = f"Ask me to re-enable '{name}'."
 
         if not found["enabled"]:
             return json.dumps({

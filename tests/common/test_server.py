@@ -4761,6 +4761,7 @@ async def test_disable_advance_automation_dry_run(mock_client):
     assert "revert_behavior_confirmed" in data
     assert data["revert_behavior_confirmed"] is True
     assert "to_restore" in data
+    assert data["to_restore"] == "Ask me to re-enable 'Moderate Airflow'."
     mock_client.disable_advance_automation.assert_not_called()
 
 
@@ -5372,6 +5373,7 @@ async def test_disable_advance_automation_live_calls_once(mock_client):
         result = await disable_advance_automation("C58ZA", "1342758", dry_run=False)
     data = json.loads(result)
     assert data.get("sent") is True
+    assert data["to_restore"] == "Ask me to re-enable 'Moderate Airflow'."
     assert mock_client.disable_advance_automation.call_count == 1
     mock_client.disable_advance_automation.assert_called_once_with(
         mock_client.get_devices.return_value[0]["devId"],
