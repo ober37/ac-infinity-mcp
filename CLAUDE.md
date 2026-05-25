@@ -248,6 +248,11 @@ Run each command and confirm the expected output before checking the box:
 - Report pass/fail per test case explicitly as user-query + agent-says pairs
 - On any failure: file a new GitHub issue immediately; do not ask to merge until user resolves
 
+**After all gates pass — update the PR body before requesting merge:**
+Tick every checklist item (`[ ]` → `[x]`) in the PR description and add the Gate 5
+result (date + PASS) to the smoke test line. A PR with unchecked boxes must not be merged.
+Use `gh pr edit <N> --body "..."` to update — do not leave checkboxes unchecked.
+
 **Failure at any gate → fix → restart from Gate 1.**
 
 ### Quality Cycle (every 5 phases, or before any major release)
