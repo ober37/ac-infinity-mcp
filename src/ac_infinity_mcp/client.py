@@ -519,7 +519,7 @@ class ACInfinityClient:
             "dry_run": dry_run,
             "controller_type": controller_type.value,
             "sent": False,
-            "prior_mode_type": mode_type,
+            "prior_mode_type": current_settings.get("atType"),
         }
 
         if dry_run:
