@@ -2226,13 +2226,13 @@ Disable a currently enabled Advance Automation. No-ops if already disabled.
   "adv_ids_to_toggle": [12345],
   "dry_run": true,
   "sent": false,
-  "to_restore": "Call enable_advance_automation(device_id='C58ZA', automation_id='12345') to re-enable."
+  "to_restore": "Ask me to re-enable 'Moderate Airflow'."
 }
 ```
 
 **Field notes:**
 - `revert_behavior_confirmed` — whether port revert-on-disable behavior has been confirmed via live test
-- `to_restore` — human-readable restore instruction included for safety
+- `to_restore` — natural-language hint for re-enabling the automation by name; intentionally avoids Python function-call syntax so the MCP caller can relay it to the user verbatim
 
 ---
 
