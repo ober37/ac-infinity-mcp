@@ -1495,8 +1495,8 @@ def _make_toggle_device(port_num: int = 2, load_type: int = 4, ports_load: int =
     return device
 
 
-async def test_get_port_activity_report_data_quality_in_output(mock_client):
-    """Port dict includes data_quality key for all ports."""
+async def test_get_port_activity_report_data_quality_not_in_output(mock_client):
+    """Port dicts do not expose the internal data_quality field."""
     readings = _make_port_readings(24, speed=5, on=True)
     mock_client.get_historical_data.return_value = [{}] * 24
     mock_client.parse_history_record.side_effect = lambda r, port_names=None: readings[0]
@@ -1504,8 +1504,7 @@ async def test_get_port_activity_report_data_quality_in_output(mock_client):
         result = await get_port_activity_report("C58ZA", 1)
     data = json.loads(result)
     assert len(data["ports"]) == 1
-    assert "data_quality" in data["ports"][0]
-    assert data["ports"][0]["data_quality"] is None  # speed=5, not toggle artifact
+    assert "data_quality" not in data["ports"][0]
 
 
 async def test_get_port_activity_report_data_quality_caveat_human_summary(mock_client):
@@ -1526,14 +1525,15 @@ async def test_get_port_activity_report_data_quality_caveat_human_summary(mock_c
         result = await get_port_activity_report("C58ZA", 3)
     data = json.loads(result)
 
-    # The Heater should be present with data_quality set
+    # The Heater should be present without data_quality exposed
     heater_ports = [p for p in data["ports"] if p["name"] == "Heater"]
     assert len(heater_ports) == 1, "Heater (portsLoad>0) must not be filtered"
-    assert heater_ports[0]["data_quality"] == "api_constant_speed"
+    assert "data_quality" not in heater_ports[0]
 
-    # human_summary must mention the caveat, not quote uptime
+    # human_summary must mention the ▎ caveat, not quote uptime
     summary = data["human_summary"]
-    assert "activity data not supported" in summary
+    assert "▎" in summary
+    assert "Activity data not supported" in summary
     assert "Heater (Port 2)" in summary
     assert "currently ON" in summary  # portsLoad=5 → ON
 
@@ -1577,7 +1577,7 @@ async def test_get_port_activity_report_reliable_ports_shown_normally(mock_clien
     assert "Exhaust Fan (Port 1)" in summary
     assert "uptime" in summary
     # Caveat heater should appear with caveat text, not uptime
-    assert "activity data not supported" in summary
+    assert "Activity data not supported" in summary
 
 
 async def test_get_port_activity_report_data_quality_currently_off(mock_client):
@@ -1597,15 +1597,16 @@ async def test_get_port_activity_report_data_quality_currently_off(mock_client):
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_port_activity_report("C58ZA", 3)
     data = json.loads(result)
-    # Toggle hardware survives Rule D exemption — appears with caveat showing "currently OFF"
+    # Toggle hardware survives Rule D exemption — appears with ▎ caveat showing "currently OFF"
     heater_ports = [p for p in data["ports"] if p["name"] == "Heater"]
     assert len(heater_ports) == 1, "Toggle hardware must NOT be filtered even when portsLoad=0"
-    assert heater_ports[0]["data_quality"] == "api_constant_speed"
+    assert "data_quality" not in heater_ports[0]
+    assert "▎" in data["human_summary"]
     assert "currently OFF" in data["human_summary"]
 
 
 async def test_get_port_activity_report_all_caveat_human_summary(mock_client):
-    """When every port has data_quality='api_constant_speed', summary omits the uptime line."""
+    """When every port is a toggle-caveat port, summary omits the uptime line."""
     # Only a heater port — the exhaust fan port is removed from this device fixture
     device = _make_toggle_device()
     device["deviceInfo"]["ports"] = [
@@ -1629,7 +1630,7 @@ async def test_get_port_activity_report_all_caveat_human_summary(mock_client):
     summary = data["human_summary"]
     # Summary should not have orphaned "." from empty port_lines
     assert " ." not in summary
-    assert "activity data not supported" in summary
+    assert "Activity data not supported" in summary
 
 
 async def test_get_port_activity_report_ports_excluded_count_unchanged_with_caveat(mock_client):
@@ -1672,14 +1673,15 @@ async def test_get_port_activity_report_ports_excluded_count_unchanged_with_cave
         result = await get_port_activity_report("C58ZA", 3)
     data = json.loads(result)
     # Port 3 (Port N, avg speed=1<=1, portsLoad=0) → Rule D filters it → excluded_count=1
-    # Port 2 (Heater, toggle, portsLoad=5) → caveat → in ports with data_quality set
+    # Port 2 (Heater, toggle, portsLoad=5) → ▎ caveat in human_summary, no data_quality in JSON
     # Port 1 (Exhaust Fan, speed=5, portsLoad=5) → reliable → in ports
     assert data["ports_excluded_count"] == 1
     port_names = [p["name"] for p in data["ports"]]
     assert "Exhaust Fan" in port_names
     assert "Heater" in port_names
     heater = next(p for p in data["ports"] if p["name"] == "Heater")
-    assert heater["data_quality"] == "api_constant_speed"
+    assert "data_quality" not in heater
+    assert "▎" in data["human_summary"]
 
 
 def _make_devtype18_device(ports: list[dict]) -> dict:
@@ -1713,7 +1715,7 @@ def _make_devtype18_port_readings(
 
 
 async def test_get_port_activity_report_devtype18_no_load_signal_port_in_output(mock_client):
-    """devType=18: named port with short runtime appears with data_quality='no_load_signal'."""
+    """devType=18: named port with short runtime appears in output without data_quality field."""
     # 4 on out of 288 total over 3 days → 0.333 h/day; Rule E would filter on devType=11
     device = _make_devtype18_device([
         {"port": 3, "portName": "Left Fan", "portsLoad": 0, "loadType": 0},
@@ -1736,7 +1738,7 @@ async def test_get_port_activity_report_devtype18_no_load_signal_port_in_output(
 
     left_fan = next((p for p in data["ports"] if p["name"] == "Left Fan"), None)
     assert left_fan is not None, "Left Fan must appear in output for devType=18"
-    assert left_fan["data_quality"] == "no_load_signal"
+    assert "data_quality" not in left_fan, "data_quality must not be exposed in port JSON"
     assert data["ports_excluded_count"] == 0, "No ports should be excluded via load-based rules"
 
 
@@ -1768,7 +1770,7 @@ async def test_get_port_activity_report_devtype18_no_load_signal_in_human_summar
 
 
 async def test_get_port_activity_report_devtype18_toggle_still_api_constant_speed(mock_client):
-    """devType=18 with toggle hardware still gets api_constant_speed, not no_load_signal."""
+    """devType=18 toggle port: ▎ caveat in summary, no data_quality in JSON."""
     device = _make_devtype18_device([
         {"port": 2, "portName": "Heater", "portsLoad": 0, "loadType": 4},
     ])
@@ -1790,8 +1792,9 @@ async def test_get_port_activity_report_devtype18_toggle_still_api_constant_spee
 
     heater = next((p for p in data["ports"] if p["name"] == "Heater"), None)
     assert heater is not None
-    assert heater["data_quality"] == "api_constant_speed"
-    assert "activity data not supported" in data["human_summary"]
+    assert "data_quality" not in heater
+    assert "▎" in data["human_summary"]
+    assert "Activity data not supported" in data["human_summary"]
     assert "does not report power draw" not in data["human_summary"]
 
 

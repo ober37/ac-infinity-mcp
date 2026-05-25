@@ -906,18 +906,14 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         OFF). The human_summary field already includes a brief note about excluded ports
         when ports_excluded_count > 0. Do not repeat the exclusion count in prose response.
 
-        data_quality is null for ports with reliable history. When data_quality is
-        "api_constant_speed", the AC Infinity API cannot distinguish the device's
-        configured speed from its actual runtime state (affects heaters, lights,
-        humidifiers — toggle hardware, loadType 4 or 128). For these ports, on_hours
-        and uptime_pct are fabricated and MUST NOT be presented to the grower as actual
-        runtime data. The human_summary caveat text for these ports should be relayed
-        verbatim — do not quote on_hours or uptime_pct even "with caveats."
+        Ports whose timing data is unreliable appear only as a ▎-prefixed caveat
+        line in human_summary (e.g. "▎ Heater (Port 2): Activity data not supported
+        (currently OFF)."). Do NOT quote on_hours or uptime_pct for these ports —
+        relay the caveat line verbatim instead.
 
-        When data_quality is "no_load_signal", on_hours and uptime_pct ARE reliable
-        and should be presented normally to the grower. The human_summary already
-        includes a device-level note about the missing load data — do not add further
-        caveats when describing these ports.
+        All ports listed under the main runtime sentences have reliable timing data
+        and should be presented normally. When a device-level note about missing load
+        data appears in human_summary, relay it once — do not add further caveats.
 
     Presentation guidance:
         - Always refer to ports as 'Name (Port N)', e.g., 'Exhaust Fan (Port 3)'.
@@ -930,8 +926,7 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
           calendar-day boundary).
         - peak_hour_local is already in device-local time with a date prefix when the
           window spans multiple calendar days, e.g. 'May 23, 4:00 PM CDT'.
-        - When data_quality is "api_constant_speed", relay the human_summary caveat
-          text for that port verbatim. Do not estimate or infer runtime from on_hours.
+        - Ports with a ▎ caveat line: relay the caveat verbatim, no runtime numbers.
     """
     try:
         if not 1 <= days <= 30:
@@ -1032,7 +1027,7 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
                 for p in reliable_dicts
             )
             caveat_lines = " ".join(
-                f"{r.name} (Port {r.port}): activity data not supported"
+                f"▎ {r.name} (Port {r.port}): Activity data not supported"
                 f" (currently {'ON' if port_loads.get(r.port, 0) > 0 else 'OFF'})."
                 for r in caveat_results
             )
@@ -1075,13 +1070,17 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
                     "your devices are connected and scheduled to run in the AC Infinity app."
                 )
 
+        output_port_dicts = [
+            {k: v for k, v in d.items() if k != "data_quality"}
+            for d in port_dicts
+        ]
         return json.dumps({
             "device_id": device_id,
             "days_analyzed": days,
             "window_start_local": window_start_local,
             "window_end_local": window_end_local,
             "readings_used": len(readings),
-            "ports": port_dicts,
+            "ports": output_port_dicts,
             "ports_excluded_count": ports_excluded_count,
             "human_summary": human_summary,
         }, indent=2)
