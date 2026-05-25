@@ -895,7 +895,9 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         never ran), and
         data_quality (null for reliable history; 'api_constant_speed' for toggle
         hardware whose history is unreliable — heaters, lights, humidifiers).
-        ports_excluded_count is the number of ports removed by the ghost-port filter.
+        ports_excluded_count is the number of ports removed by the ghost-port filter,
+        capped at devPortCount when the device's physical port count is known (prevents
+        over-counting on sub-8-port devices; unknown/zero devPortCount means no cap).
         Five rules apply: Rule A (constant 100%% uptime + zero load), Rule B
         (auto-named Port N with low average runtime or zero load), Rule C (named
         port with zero transitions + zero load + < 1 h/day average runtime), Rule D
