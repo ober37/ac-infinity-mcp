@@ -3183,9 +3183,10 @@ async def disable_advance_automation(
         dry_run: If True (default), returns the action plan without executing.
 
     Returns:
-        JSON with action, automation_name, automation_id, revert_behavior_confirmed,
-        dry_run, sent, and to_restore (natural-language hint for re-enabling).
-        On failure returns ``{"error": "..."}``.
+        JSON with action, automation_name, automation_id, governed_ports (list of
+        ``{port, port_name}`` dicts decoded from the automation's grouptDevType bitmasks),
+        revert_behavior_confirmed, dry_run, sent, and to_restore (natural-language hint
+        for re-enabling). On failure returns ``{"error": "..."}``.
     """
     try:
         adv_id_int = _validate_automation_id(automation_id)
@@ -3217,13 +3218,37 @@ async def disable_advance_automation(
                 "dry_run": dry_run,
             })
 
+        # Decode which ports this automation governs from port_group bitmasks.
+        # grouptDevType is a port bitmask: Port N → 2^(N-1) (bit N-1 set).
+        # Using the bitmask rather than isOpenAutomation flags avoids false positives
+        # when multiple automations are simultaneously active.
+        _device_ports = device.get("deviceInfo", {}).get("ports", [])
+        _port_map = {p["port"]: p for p in _device_ports if p.get("port") is not None}
+        _seen: set[int] = set()
+        governed_ports: list[dict] = []
+        for _pg in found["port_groups"]:
+            _bitmask = int(_pg.get("grp_dev_type") or 0)
+            for _bit in range(8):
+                if _bitmask & (1 << _bit):
+                    _pnum = _bit + 1
+                    if _pnum not in _seen:
+                        _seen.add(_pnum)
+                        _p = _port_map.get(_pnum)
+                        _raw_nm = _p.get("portName") if _p else None
+                        _label = (
+                            (_sanitize_api_string(_raw_nm, 64) if _raw_nm else f"Port {_pnum}")
+                            + f" (Port {_pnum})"
+                        )
+                        governed_ports.append({"port": _pnum, "port_name": _label})
+        governed_ports.sort(key=lambda x: x["port"])
+
         if dry_run:
             return json.dumps({
                 "action": "disable",
                 "automation_name": name,
                 "automation_id": found["automation_id"],
+                "governed_ports": governed_ports,
                 "revert_behavior_confirmed": ADVANCE_REVERT_BEHAVIOR_CONFIRMED,
-                "adv_ids_to_toggle": found["adv_ids"],
                 "dry_run": True,
                 "sent": False,
                 "to_restore": to_restore,
@@ -3240,6 +3265,7 @@ async def disable_advance_automation(
             "action": "disable",
             "automation_name": name,
             "automation_id": found["automation_id"],
+            "governed_ports": governed_ports,
             "revert_behavior_confirmed": ADVANCE_REVERT_BEHAVIOR_CONFIRMED,
             "dry_run": False,
             "sent": True,

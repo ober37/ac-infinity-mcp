@@ -4824,7 +4824,7 @@ async def test_enable_advance_automation_invalid_id(mock_client):
 # ============ disable_advance_automation ============
 
 async def test_disable_advance_automation_dry_run(mock_client):
-    """Automation is enabled → dry run returns revert_behavior_confirmed and to_restore."""
+    """dry_run=True returns governed_ports, revert_behavior_confirmed, and to_restore."""
     mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await disable_advance_automation("C58ZA", "1342758", dry_run=True)
@@ -4836,11 +4836,94 @@ async def test_disable_advance_automation_dry_run(mock_client):
     assert data["revert_behavior_confirmed"] is True
     assert "to_restore" in data
     assert data["to_restore"] == "Ask me to re-enable 'Moderate Airflow'."
+    assert "adv_ids_to_toggle" not in data
+    # "Moderate Airflow" governs ports 4, 5, 6 (grouptDevType 8 and 48).
+    # MOCK_DEVICE_LEGACY only has ports 1–2, so all three fall back to "Port N (Port N)".
+    assert isinstance(data["governed_ports"], list)
+    assert len(data["governed_ports"]) == 3
+    for entry in data["governed_ports"]:
+        assert "port" in entry and isinstance(entry["port"], int)
+        assert "port_name" in entry and isinstance(entry["port_name"], str)
+        assert f"(Port {entry['port']})" in entry["port_name"]
+    assert [e["port"] for e in data["governed_ports"]] == [4, 5, 6]
     mock_client.disable_advance_automation.assert_not_called()
 
 
+async def test_disable_advance_automation_dry_run_governed_ports(mock_client):
+    """governed_ports contains named port entries when device has matching port names."""
+    import copy
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device["deviceInfo"]["ports"].extend([
+        {"port": 4, "portName": "Clip Fan"},
+        {"port": 5, "portName": "Left Outlet"},
+        {"port": 6, "portName": "Right Outlet"},
+    ])
+    mock_client.get_devices.return_value = [device]
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await disable_advance_automation("C58ZA", "1342758", dry_run=True)
+    data = json.loads(result)
+    assert data["governed_ports"] == [
+        {"port": 4, "port_name": "Clip Fan (Port 4)"},
+        {"port": 5, "port_name": "Left Outlet (Port 5)"},
+        {"port": 6, "port_name": "Right Outlet (Port 6)"},
+    ]
+    mock_client.disable_advance_automation.assert_not_called()
+
+
+async def test_disable_advance_automation_live_governed_ports(mock_client):
+    """Live path also includes governed_ports with named entries."""
+    import copy
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device["deviceInfo"]["ports"].extend([
+        {"port": 4, "portName": "Clip Fan"},
+        {"port": 5, "portName": "Left Outlet"},
+        {"port": 6, "portName": "Right Outlet"},
+    ])
+    mock_client.get_devices.return_value = [device]
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await disable_advance_automation("C58ZA", "1342758", dry_run=False)
+    data = json.loads(result)
+    assert data["sent"] is True
+    assert data["governed_ports"] == [
+        {"port": 4, "port_name": "Clip Fan (Port 4)"},
+        {"port": 5, "port_name": "Left Outlet (Port 5)"},
+        {"port": 6, "port_name": "Right Outlet (Port 6)"},
+    ]
+
+
+async def test_disable_advance_automation_dry_run_zero_bitmask(mock_client):
+    """grouptDevType=0 for all port groups → governed_ports is empty list."""
+    import copy
+    automations = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST)
+    for e in automations:
+        e["grouptDevType"] = 0
+    mock_client.get_advance_automations.return_value = automations
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await disable_advance_automation("C58ZA", "1342758", dry_run=True)
+    data = json.loads(result)
+    assert data["governed_ports"] == []
+    mock_client.disable_advance_automation.assert_not_called()
+
+
+async def test_disable_advance_automation_dry_run_port_name_sanitized(mock_client):
+    """portName with control characters is sanitized before appearing in governed_ports."""
+    import copy
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device["deviceInfo"]["ports"].append({"port": 4, "portName": "Clip\x00Fan"})
+    mock_client.get_devices.return_value = [device]
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await disable_advance_automation("C58ZA", "1342758", dry_run=True)
+    data = json.loads(result)
+    port4 = next(e for e in data["governed_ports"] if e["port"] == 4)
+    assert "\x00" not in port4["port_name"]
+    assert "(Port 4)" in port4["port_name"]
+
+
 async def test_disable_advance_automation_already_disabled(mock_client):
-    """Automation is already disabled → info response."""
+    """Automation is already disabled → info response, no governed_ports."""
     import copy
     automations = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST)
     for e in automations:
@@ -4851,6 +4934,7 @@ async def test_disable_advance_automation_already_disabled(mock_client):
     data = json.loads(result)
     assert "info" in data
     assert "already disabled" in data["info"]
+    assert "governed_ports" not in data
     mock_client.disable_advance_automation.assert_not_called()
 
 
@@ -5441,13 +5525,14 @@ async def test_enable_advance_automation_not_found(mock_client):
 
 
 async def test_disable_advance_automation_live_calls_once(mock_client):
-    """Live disable sends exactly one toggle using adv_ids[0]."""
+    """Live disable sends exactly one toggle using adv_ids[0] and includes governed_ports."""
     mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await disable_advance_automation("C58ZA", "1342758", dry_run=False)
     data = json.loads(result)
     assert data.get("sent") is True
     assert data["to_restore"] == "Ask me to re-enable 'Moderate Airflow'."
+    assert isinstance(data["governed_ports"], list)
     assert mock_client.disable_advance_automation.call_count == 1
     mock_client.disable_advance_automation.assert_called_once_with(
         mock_client.get_devices.return_value[0]["devId"],
