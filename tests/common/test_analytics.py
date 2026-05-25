@@ -1302,6 +1302,34 @@ def test_dev_type_18_no_load_signal_on_surviving_non_toggle_ports() -> None:
     assert by_port[2].data_quality == "api_constant_speed"
 
 
+def test_dev_type_18_toggle_pattern_no_loadtype_gets_api_constant_speed() -> None:
+    """devType=18: toggle artifact detected by pattern when loadType is not 4/128.
+
+    On devType=18 devices the API does not return loadType 4/128 for toggle ports,
+    so is_toggle_hardware is False. The pattern (transitions=0, uptime=100%, speed=1)
+    must be sufficient to flag api_constant_speed (Issue #126).
+    """
+    readings = [
+        {
+            "timestamp": _ts(i, day=25),
+            "temperature_c": 22.0, "temperature_f": 71.6,
+            "humidity": 55.0, "vpd": 1.2,
+            "ports": [_port(2, "Heater", 1, True)],
+        }
+        for i in range(24)
+    ]
+    result = build_activity_report(
+        readings, days=1,
+        port_loads={2: 0},
+        port_load_types={2: 0},  # loadType=0, NOT toggle hardware per loadType
+        dev_type=18,
+    )
+    assert len(result) == 1
+    assert result[0].data_quality == "api_constant_speed", (
+        "devType=18 toggle pattern must yield api_constant_speed without loadType 4/128"
+    )
+
+
 def test_dev_type_18_rule_c_named_port_zero_transitions_kept() -> None:
     """devType=18: named port with transitions=0 and sub-threshold runtime is kept.
 
