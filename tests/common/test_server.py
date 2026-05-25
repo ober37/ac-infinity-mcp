@@ -5117,7 +5117,7 @@ async def test_build_advance_conflict_response_degraded(mock_client):
     assert data.get("automation_name") is None
     assert data.get("active_automations") == []
     assert "None" not in data["options"]["1_find_and_disable"]["instruction"]
-    assert "list_advance_automations" in data["options"]["1_find_and_disable"]["instruction"]
+    assert "Ask me" in data["options"]["1_find_and_disable"]["instruction"]
     assert "1_break_out" not in data["options"]
     assert "suggested_reply" in data
 
@@ -5259,8 +5259,100 @@ async def test_conflict_response_all_automations_disabled_uses_all_disabled_path
     data = json.loads(result)
     assert data["automation_name"] is None
     assert data["active_automations"] == []
-    assert "list_advance_automations" in data["options"]["1_re_disable_to_clear"]["instruction"]
+    assert "Ask me" in data["options"]["1_re_disable_to_clear"]["instruction"]
     assert "suggested_reply" in data
+
+
+@pytest.mark.asyncio
+async def test_conflict_instructions_no_dry_run(mock_client):
+    """No instruction field in any conflict path contains the string 'dry_run'."""
+    import copy
+
+    # Normal path
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_off("C58ZA", port=1, dry_run=False)
+    data = json.loads(result)
+    for opt in data.get("options", {}).values():
+        assert "dry_run" not in opt.get("instruction", "")
+    assert "dry_run" not in data.get("switching_guidance", "")
+
+    # All-disabled path
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
+    disabled = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_SINGLE)
+    mock_client.get_advance_automations.return_value = disabled
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result2 = await set_port_off("C58ZA", port=1, dry_run=False)
+    data2 = json.loads(result2)
+    for opt in data2.get("options", {}).values():
+        assert "dry_run" not in opt.get("instruction", "")
+
+    # Degraded path
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
+    mock_client.get_advance_automations.side_effect = ACInfinityAPIError("fail")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result3 = await set_port_off("C58ZA", port=1, dry_run=False)
+    data3 = json.loads(result3)
+    for opt in data3.get("options", {}).values():
+        assert "dry_run" not in opt.get("instruction", "")
+
+
+@pytest.mark.asyncio
+async def test_conflict_instructions_no_function_syntax(mock_client):
+    """No instruction or switching_guidance field exposes Python function call syntax."""
+    # Normal path — check device_id=, automation_id= absent from all instructions
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_off("C58ZA", port=1, dry_run=False)
+    data = json.loads(result)
+    for opt in data.get("options", {}).values():
+        assert "device_id=" not in opt.get("instruction", "")
+        assert "automation_id=" not in opt.get("instruction", "")
+    assert "disable_advance_automation" not in data.get("switching_guidance", "")
+    assert "create_advance_automation" not in data.get("switching_guidance", "")
+
+    # Degraded path
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
+    mock_client.get_advance_automations.side_effect = ACInfinityAPIError("fail")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result2 = await set_port_off("C58ZA", port=1, dry_run=False)
+    data2 = json.loads(result2)
+    for opt in data2.get("options", {}).values():
+        assert "device_id=" not in opt.get("instruction", "")
+        assert "automation_id=" not in opt.get("instruction", "")
+
+
+@pytest.mark.asyncio
+async def test_conflict_normal_path_instructions_contain_natural_language(mock_client):
+    """Normal path opt1 and opt2 instruction fields use natural-language text."""
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_off("C58ZA", port=1, dry_run=False)
+    data = json.loads(result)
+    opt1 = data["options"]["1_break_out"]
+    opt2 = data["options"]["2_disable_automation"]
+    assert "preview" in opt1["instruction"].lower()
+    assert "releasing this port" in opt1["instruction"].lower()
+    assert "preview" in opt2["instruction"].lower()
+    assert "disabling the automation" in opt2["instruction"].lower()
+
+
+@pytest.mark.asyncio
+async def test_conflict_switching_guidance_no_function_names(mock_client):
+    """switching_guidance field must not contain raw tool function names."""
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_off("C58ZA", port=1, dry_run=False)
+    data = json.loads(result)
+    sg = data.get("switching_guidance", "")
+    assert "switching_guidance" in data
+    assert "disable_advance_automation" not in sg
+    assert "create_advance_automation" not in sg
+    assert "ask me" in sg.lower()
 
 
 async def test_enable_advance_automation_not_found(mock_client):

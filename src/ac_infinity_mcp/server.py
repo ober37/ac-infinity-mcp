@@ -1384,8 +1384,7 @@ async def _build_advance_conflict_response(
             "description": f"Release this port from '{auto_name}' to regain manual control.",
             "tool": "break_out_of_automation",
             "instruction": (
-                f"Call break_out_of_automation(device_id='{device_id}', port={port},"
-                " dry_run=True) to preview."
+                "Ask me to preview releasing this port from automation control first."
             ),
             "available": governing.get("enabled", False) or governing.get("run_state", False),
         }
@@ -1395,9 +1394,7 @@ async def _build_advance_conflict_response(
             ),
             "tool": "disable_advance_automation",
             "instruction": (
-                f"Call disable_advance_automation(device_id='{device_id}',"
-                f" automation_id='{str(auto_id) if auto_id is not None else 'unknown'}',"
-                " dry_run=True) to preview."
+                "Ask me to preview disabling the automation entirely — this will release all ports."
             ),
             "available": True,
         }
@@ -1423,9 +1420,8 @@ async def _build_advance_conflict_response(
             "description": "Force-release this port by re-applying the disable command.",
             "tool": "disable_advance_automation",
             "instruction": (
-                f"Call list_advance_automations(device_id='{device_id}') to find the"
-                f" automation_id, then call disable_advance_automation(device_id='{device_id}',"
-                " automation_id='<id>', dry_run=True) to preview the force-release."
+                "Ask me to force-release this port — I'll re-apply the disable command"
+                " and preview the action for you."
             ),
             "available": True,
         }
@@ -1454,10 +1450,8 @@ async def _build_advance_conflict_response(
             "description": "Find and disable the active automation, then apply your manual change.",
             "tool": "list_advance_automations",
             "instruction": (
-                f"Call list_advance_automations(device_id='{device_id}') to get the"
-                " automation_id of the active automation, then call"
-                f" disable_advance_automation(device_id='{device_id}',"
-                " automation_id='<id>', dry_run=True)."
+                "Ask me to find and disable the active automation — I'll look it up"
+                " and preview the action first."
             ),
             "available": True,
         }
@@ -1478,9 +1472,8 @@ async def _build_advance_conflict_response(
         "active_automations": active_automations,
         "co_governed_ports": [],
         "switching_guidance": (
-            "To regain manual control: disable all active automations using"
-            " disable_advance_automation, then apply your change. To instead add this port"
-            " to an automation, use create_advance_automation."
+            "To regain manual control: ask me to disable any active automations, then apply"
+            " your change. To instead add this port to an automation, ask me to create a new one."
         ),
         "options": {
             opt1_key: opt1,
