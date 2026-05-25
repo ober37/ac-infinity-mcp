@@ -1682,6 +1682,147 @@ async def test_get_port_activity_report_ports_excluded_count_unchanged_with_cave
     assert heater["data_quality"] == "api_constant_speed"
 
 
+def _make_devtype18_device(ports: list[dict]) -> dict:
+    """Device fixture with devType=18 (8T4TC — always reports portsLoad=0)."""
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device["devType"] = 18
+    device["deviceInfo"]["ports"] = ports
+    return device
+
+
+def _make_devtype18_port_readings(
+    port_num: int, name: str, speed: int, on_count: int, total: int
+) -> list[dict]:
+    """Build readings for a single named port: on_count on-readings then off."""
+    from datetime import datetime, timedelta
+    base = datetime(2024, 4, 18, 0, 0, 0)
+    readings = []
+    for i in range(on_count):
+        readings.append({
+            "timestamp": (base + timedelta(hours=i)).isoformat() + "Z",
+            "temperature_c": 22.0, "humidity": 55.0, "vpd": 1.2,
+            "ports": [{"port": port_num, "name": name, "speed": speed, "on": True}],
+        })
+    for i in range(total - on_count):
+        readings.append({
+            "timestamp": (base + timedelta(hours=on_count + i)).isoformat() + "Z",
+            "temperature_c": 22.0, "humidity": 55.0, "vpd": 1.2,
+            "ports": [{"port": port_num, "name": name, "speed": 0, "on": False}],
+        })
+    return readings
+
+
+async def test_get_port_activity_report_devtype18_no_load_signal_port_in_output(mock_client):
+    """devType=18: named port with short runtime appears with data_quality='no_load_signal'."""
+    # 4 on out of 288 total over 3 days → 0.333 h/day; Rule E would filter on devType=11
+    device = _make_devtype18_device([
+        {"port": 3, "portName": "Left Fan", "portsLoad": 0, "loadType": 0},
+    ])
+    mock_client.get_devices.return_value = [device]
+    readings = _make_devtype18_port_readings(3, "Left Fan", speed=5, on_count=4, total=288)
+    mock_client.get_historical_data.return_value = [{}] * 288
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        val = readings[idx % len(readings)]
+        idx += 1
+        return val
+
+    mock_client.parse_history_record.side_effect = _side_effect
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 3)
+    data = json.loads(result)
+
+    left_fan = next((p for p in data["ports"] if p["name"] == "Left Fan"), None)
+    assert left_fan is not None, "Left Fan must appear in output for devType=18"
+    assert left_fan["data_quality"] == "no_load_signal"
+    assert data["ports_excluded_count"] == 0, "No ports should be excluded via load-based rules"
+
+
+async def test_get_port_activity_report_devtype18_no_load_signal_in_human_summary(mock_client):
+    """devType=18: Left Fan appears in port_lines and device-level note in human_summary."""
+    device = _make_devtype18_device([
+        {"port": 3, "portName": "Left Fan", "portsLoad": 0, "loadType": 0},
+    ])
+    mock_client.get_devices.return_value = [device]
+    readings = _make_devtype18_port_readings(3, "Left Fan", speed=5, on_count=4, total=288)
+    mock_client.get_historical_data.return_value = [{}] * 288
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        val = readings[idx % len(readings)]
+        idx += 1
+        return val
+
+    mock_client.parse_history_record.side_effect = _side_effect
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 3)
+    data = json.loads(result)
+    summary = data["human_summary"]
+
+    assert "Left Fan (Port 3)" in summary, "Port uptime line must appear in human_summary"
+    assert "uptime" in summary, "Runtime data must appear in human_summary"
+    assert "does not report power draw" in summary, "Device-level note must appear for devType=18"
+
+
+async def test_get_port_activity_report_devtype18_toggle_still_api_constant_speed(mock_client):
+    """devType=18 with toggle hardware still gets api_constant_speed, not no_load_signal."""
+    device = _make_devtype18_device([
+        {"port": 2, "portName": "Heater", "portsLoad": 0, "loadType": 4},
+    ])
+    mock_client.get_devices.return_value = [device]
+    readings = _make_toggle_port_readings(72)
+    mock_client.get_historical_data.return_value = [{}] * 72
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        val = readings[idx % len(readings)]
+        idx += 1
+        return val
+
+    mock_client.parse_history_record.side_effect = _side_effect
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 3)
+    data = json.loads(result)
+
+    heater = next((p for p in data["ports"] if p["name"] == "Heater"), None)
+    assert heater is not None
+    assert heater["data_quality"] == "api_constant_speed"
+    assert "activity data not supported" in data["human_summary"]
+    assert "does not report power draw" not in data["human_summary"]
+
+
+async def test_get_port_activity_report_devtype11_rule_e_still_filters(mock_client):
+    """devType=11 (non-18): Rule E still filters a named port with stale speed."""
+    # devType=11 is the MOCK_DEVICE_LEGACY default; Rule E must apply normally
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)  # devType=11
+    device["deviceInfo"]["ports"] = [
+        {"port": 3, "portName": "Left Fan", "portsLoad": 0, "loadType": 0},
+    ]
+    mock_client.get_devices.return_value = [device]
+    readings = _make_devtype18_port_readings(3, "Left Fan", speed=5, on_count=4, total=288)
+    mock_client.get_historical_data.return_value = [{}] * 288
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        val = readings[idx % len(readings)]
+        idx += 1
+        return val
+
+    mock_client.parse_history_record.side_effect = _side_effect
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 3)
+    data = json.loads(result)
+
+    assert len(data["ports"]) == 0, "devType=11 must still filter via Rule E"
+    assert data["ports_excluded_count"] == 1
+    assert "does not report power draw" not in data["human_summary"]
+
+
 async def test_get_port_activity_report_get_devices_api_error_degrades_gracefully(mock_client):
     """get_devices failure → ACInfinityAPIError is caught by the error handler."""
     # In the new implementation, get_devices failure propagates as an API error.

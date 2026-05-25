@@ -914,6 +914,11 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         runtime data. The human_summary caveat text for these ports should be relayed
         verbatim — do not quote on_hours or uptime_pct even "with caveats."
 
+        When data_quality is "no_load_signal", on_hours and uptime_pct ARE reliable
+        and should be presented normally to the grower. The human_summary already
+        includes a device-level note about the missing load data — do not add further
+        caveats when describing these ports.
+
     Presentation guidance:
         - Always refer to ports as 'Name (Port N)', e.g., 'Exhaust Fan (Port 3)'.
         - When presenting on_hours to a grower, translate it from raw hours to natural
@@ -983,6 +988,7 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
             days=days,
             port_loads=port_loads if port_loads else None,
             port_load_types=port_load_types if port_load_types else None,
+            dev_type=device.get("devType"),
         )
         ports_excluded_count = max(0, unique_port_count - len(result))
 
@@ -1008,8 +1014,9 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
             for p in result
         ]
 
-        reliable_dicts = [d for d in port_dicts if d.get("data_quality") is None]
+        reliable_dicts = [d for d in port_dicts if d.get("data_quality") in (None, "no_load_signal")]
         caveat_results = [r for r in result if r.data_quality == "api_constant_speed"]
+        no_load_signal_ports = [r for r in result if r.data_quality == "no_load_signal"]
 
         day_word = "day" if days == 1 else "days"
         if result:
@@ -1045,6 +1052,11 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
                 summary_parts.append(caveat_lines)
             if excl:
                 summary_parts.append(excl.strip())
+            if no_load_signal_ports:
+                summary_parts.append(
+                    "Note: This controller does not report power draw for individual"
+                    " ports — activity results are based on recorded run times only."
+                )
             human_summary = " ".join(summary_parts)
         else:
             port_word = "port" if ports_excluded_count == 1 else "ports"

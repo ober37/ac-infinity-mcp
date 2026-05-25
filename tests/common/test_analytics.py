@@ -4,6 +4,7 @@ import pytest
 
 from ac_infinity_mcp.analytics import (
     _GHOST_LOAD_ZERO_THRESHOLD,
+    _ZERO_LOAD_DEV_TYPES,
     STAGE_TARGETS,
     HealthScore,
     TrendReport,
@@ -1216,3 +1217,111 @@ def test_rule_d_handles_toggle_speed_before_rule_e_is_reached() -> None:
     readings = _filter_port_readings(4, "Misting Pump", speed=1, on_count=4, total=288, days=3)
     result = build_activity_report(readings, days=3, port_loads={4: 0})
     assert len(result) == 0, "avg_speed=1.0 port with zero load must be filtered by Rule D"
+
+
+# ============ Issue #120: devType=18 zero-load quirk ============
+
+
+def test_zero_load_dev_types_constant_is_exactly_type_18() -> None:
+    """_ZERO_LOAD_DEV_TYPES must contain exactly {18} — regression guard."""
+    assert _ZERO_LOAD_DEV_TYPES == frozenset({18})
+
+
+@pytest.mark.parametrize("dev_type,expected_kept", [
+    (18, True),   # devType=18: Rule E disabled, port kept
+    (11, False),  # devType=11: Rule E fires, port filtered
+    (None, False),  # dev_type=None (default): Rule E fires, port filtered
+])
+def test_dev_type_18_bypasses_rule_e_vs_non_18(dev_type, expected_kept: bool) -> None:
+    """devType=18 bypasses Rule E; devType=11 and None apply Rule E normally."""
+    # 4 on-readings out of 288 total over 3 days → 0.333 h/day < 1.0 threshold
+    # avg_speed=5, transitions>0 → Rule D skips; Rule E fires when load check is active
+    readings = _filter_port_readings(4, "Left Fan", speed=5, on_count=4, total=288, days=3)
+    result = build_activity_report(
+        readings, days=3, port_loads={4: 0}, dev_type=dev_type
+    )
+    assert (len(result) == 1) == expected_kept, (
+        f"dev_type={dev_type}: expected {'kept' if expected_kept else 'filtered'}, "
+        f"got {len(result)} port(s)"
+    )
+    if expected_kept:
+        assert result[0].data_quality == "no_load_signal"
+
+
+def test_dev_type_18_rule_b_runtime_threshold_still_fires() -> None:
+    """devType=18: auto-named 'Port N' with < 1h/day is still filtered by Rule B."""
+    # 1 on-reading out of 48 total over 2 days → on_hours = 1/48*24*2 = 1.0h; 1.0/2 = 0.5 h/day < 1.0
+    readings = _filter_port_readings(3, "Port 3", speed=5, on_count=1, total=48, days=2)
+    result = build_activity_report(readings, days=2, port_loads={3: 0}, dev_type=18)
+    assert len(result) == 0, "Auto-named 'Port N' with sub-threshold runtime must still be filtered"
+
+
+def test_dev_type_18_api_constant_speed_takes_priority() -> None:
+    """devType=18 toggle hardware gets api_constant_speed, not no_load_signal."""
+    readings = [
+        {
+            "timestamp": _ts(i % 24, day=25 + i // 24),
+            "temperature_c": 22.0, "temperature_f": 71.6,
+            "humidity": 55.0, "vpd": 1.2,
+            "ports": [_port(2, "Heater", 1, True)],
+        }
+        for i in range(24)
+    ]
+    result = build_activity_report(
+        readings, days=1,
+        port_loads={2: 0},
+        port_load_types={2: 4},  # toggle hardware
+        dev_type=18,
+    )
+    assert len(result) == 1
+    assert result[0].data_quality == "api_constant_speed"
+
+
+def test_dev_type_18_no_load_signal_on_surviving_non_toggle_ports() -> None:
+    """devType=18: non-toggle ports get no_load_signal; toggle gets api_constant_speed."""
+    base_on = [
+        {
+            "timestamp": _ts(i % 24, day=25 + i // 24),
+            "temperature_c": 22.0, "temperature_f": 71.6,
+            "humidity": 55.0, "vpd": 1.2,
+            "ports": [
+                _port(1, "Exhaust Fan", 5, True),   # named, high uptime → kept
+                _port(2, "Heater", 1, True),          # toggle hardware → api_constant_speed
+            ],
+        }
+        for i in range(24)
+    ]
+    result = build_activity_report(
+        base_on, days=1,
+        port_loads={1: 0, 2: 0},
+        port_load_types={1: 0, 2: 4},
+        dev_type=18,
+    )
+    by_port = {r.port: r for r in result}
+    assert by_port[1].data_quality == "no_load_signal"
+    assert by_port[2].data_quality == "api_constant_speed"
+
+
+def test_dev_type_18_rule_c_named_port_zero_transitions_kept() -> None:
+    """devType=18: named port with transitions=0 and sub-threshold runtime is kept.
+
+    Rule C fires when port_loads is provided and portsLoad==0 (transitions==0,
+    on_hours/days < 1.0). For devType=18, port_loads is forced to None, so
+    Rule C's port_loads guard fails and the port is kept with no_load_signal.
+    """
+    # All off = transitions=0, on_hours=0; on a non-18 device Rule C would filter this
+    readings = [
+        {
+            "timestamp": _ts(i, day=25),
+            "temperature_c": 22.0, "temperature_f": 71.6,
+            "humidity": 55.0, "vpd": 1.2,
+            "ports": [_port(1, "Misting Pump", 0, False)],
+        }
+        for i in range(24)
+    ]
+    result = build_activity_report(readings, days=1, port_loads={1: 0}, dev_type=18)
+    # Port has zero uptime — it's all-off, so on_hours=0 and avg_speed=0
+    # Rule C would filter it on non-18 (transitions=0, load=0, sub-threshold)
+    # On devType=18, port_loads=None so Rule C doesn't fire
+    assert len(result) == 1
+    assert result[0].data_quality == "no_load_signal"
