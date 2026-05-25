@@ -1014,7 +1014,9 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
             for p in result
         ]
 
-        reliable_dicts = [d for d in port_dicts if d.get("data_quality") in (None, "no_load_signal")]
+        reliable_dicts = [
+            d for d in port_dicts if d.get("data_quality") in (None, "no_load_signal")
+        ]
         caveat_results = [r for r in result if r.data_quality == "api_constant_speed"]
         no_load_signal_ports = [r for r in result if r.data_quality == "no_load_signal"]
 

@@ -1250,7 +1250,7 @@ def test_dev_type_18_bypasses_rule_e_vs_non_18(dev_type, expected_kept: bool) ->
 
 def test_dev_type_18_rule_b_runtime_threshold_still_fires() -> None:
     """devType=18: auto-named 'Port N' with < 1h/day is still filtered by Rule B."""
-    # 1 on-reading out of 48 total over 2 days → on_hours = 1/48*24*2 = 1.0h; 1.0/2 = 0.5 h/day < 1.0
+    # 1 on-reading / 48 total over 2 days → on_hours=1.0h total; 1.0/2 = 0.5 h/day < threshold
     readings = _filter_port_readings(3, "Port 3", speed=5, on_count=1, total=48, days=2)
     result = build_activity_report(readings, days=2, port_loads={3: 0}, dev_type=18)
     assert len(result) == 0, "Auto-named 'Port N' with sub-threshold runtime must still be filtered"
