@@ -502,7 +502,7 @@ devId=REDACTED_DEV_ID&externalPort=1&onSpead=5&modeType=2&offSpead=0&...
 
 ---
 
-## All 24 Known API Quirks
+## All 25 Known API Quirks
 
 ### Quirk 1 — Auth typo: `appPasswordl`
 
@@ -1007,6 +1007,14 @@ applied by `build_activity_report`:
   — at least one non-matching port must remain. Targets phantom history artifacts on legacy
   controllers (devType=11) where disconnected ports are cloned at identical low-activity
   levels. Only fires when `port_loads is not None` (disabled on devType=18/22 zero-load devices).
+- **Rule G** (fixes #142/#143): A custom-named port on a devType=18/22 device
+  (`_ZERO_LOAD_DEV_TYPES = frozenset({18, 22})`) is excluded when `avg_speed_when_running == 1.0`
+  AND `on_hours / days < _GHOST_LOAD_ZERO_THRESHOLD` (1.0 h/day). This rule fires after the
+  `api_constant_speed` early-exit (which retains toggle hardware) and after Rule F, before Rule A.
+  It targets zero-load controller ghosts that the api_constant_speed path would skip (speed=1 but
+  no toggle-hardware classification available) and that Rule F cannot catch (Rule F is disabled
+  when `port_loads is None`). Because `port_loads` is always forced `None` on devType=18/22,
+  Rule G provides the only ghost-exclusion path for these devices.
 
 Rule A and the `data_quality` caveat rule (below) both exempt toggle hardware (loadType 4 or
 128) — toggle devices are never ghost-filtered regardless of uptime or portsLoad, because they
@@ -1106,11 +1114,13 @@ alone: `transitions == 0` AND `uptime_pct == 100.0` AND all running speeds == 1.
 `loadType`-based confirmation is also skipped for devType=18 and devType=22 because
 `loadType` is similarly unreliable on these devices (Issue #126).
 
-**Note behavior (fixes #136):** A device-level Note about missing load data (`no_load_signal`)
-is emitted in `human_summary` whenever the result is non-empty and the device is devType=18
-or devType=22 — regardless of whether any port has the `api_constant_speed` caveat. Previously
-the Note was suppressed when all ports had `api_constant_speed` quality; the guard is now
-`if dev_type in _ZERO_LOAD_DEV_TYPES:` (fires for any non-empty result on these devices).
+**Note behavior (fixes #136):** A device-level Note about missing load data is emitted in
+`human_summary` whenever the result is non-empty and the device is devType=18 or devType=22
+— regardless of whether any port has the `api_constant_speed` caveat. The Note text reads:
+"ON/OFF state is the only reliable activity indicator — history-based runtime data is not
+available for this controller type." Previously the Note was suppressed when all ports had
+`api_constant_speed` quality; the guard is now `if dev_type in _ZERO_LOAD_DEV_TYPES:`
+(fires for any non-empty result on these devices).
 
 **Detection:**
 
@@ -1511,7 +1521,7 @@ and the report is still returned.
     }
   ],
   "ports_excluded_count": 2,
-  "human_summary": "Analyzed 7 days (May 17 – May 24) of activity across 1 active port. Inline Fan (Port 1) ran 52.1% uptime (87.5h total), most active around 4:00 PM CDT (peak on May 20). ▎ Heater (Port 2): Activity data not supported (currently OFF). 2 ports excluded (no power detected)."
+  "human_summary": "Analyzed 7 days (May 17 – May 24) of activity across 1 active port. Inline Fan (Port 1) ran 52.1% uptime (87.5h total), most active around 4:00 PM CDT (peak on May 20). ▎ Currently OFF: Heater (Port 2). 2 ports excluded (no power detected)."
 }
 ```
 
@@ -1522,9 +1532,9 @@ and the report is still returned.
 - `avg_speed_when_running` — average `onSpead` value (1–10) across on-readings with non-zero speed
 - `uptime_pct` — `on_hours / (on_hours + off_hours) * 100`, rounded to 1 decimal
 - `peak_hour_local` — device-local time string with peak date, always including the calendar date for disambiguation across multi-day windows (e.g. "4:00 PM CDT (peak on May 20)"); `null` when port never ran (always_off case). Uses `astimezone()` for full DST-aware conversion; sub-hour UTC offsets (UTC+5:30) are handled correctly. Falls back to UTC when `zoneId` is absent (Quirk 23). Computed via weighted median of hourly activity slots — prevents a single-reading nibble from inflating peak hour to an off-peak slot (fixes #112). Specifically: all on-readings are bucketed by `(date, hour)` UTC slot; the median slot (by reading count) is selected as peak, so high-frequency hours dominate over isolated blips.
-- `data_quality` — Internal classification field used to generate `human_summary` caveat lines; **not present in the JSON output** (stripped before serialization). Internally: `null` for ports with reliable history; `"api_constant_speed"` for toggle hardware (heaters, lights, humidifiers — loadType 4 or 128) where the AC Infinity API records constant speed=1 regardless of actual runtime; `"no_load_signal"` for ports on devType=18/22 devices where load data is absent. The effects of these classifications are visible only via `human_summary`: toggle-hardware ports produce a `▎`-prefixed caveat line (e.g. "▎ Heater (Port 2): Activity data not supported (currently OFF)."), and no_load_signal ports produce a device-level Note about missing load data. Do not quote `on_hours` or `uptime_pct` for ports with a `▎` caveat — relay the caveat text verbatim.
+- `data_quality` — Internal classification field used to generate `human_summary` caveat lines; **not present in the JSON output** (stripped before serialization). Internally: `null` for ports with reliable history; `"api_constant_speed"` for toggle hardware (heaters, lights, humidifiers — loadType 4 or 128) where the AC Infinity API records constant speed=1 regardless of actual runtime; `"no_load_signal"` for ports on devType=18/22 devices where load data is absent. The effects of these classifications are visible only via `human_summary`: toggle-hardware ports produce `▎`-prefixed caveat lines grouped by current ON/OFF state, e.g. "▎ Currently ON: Heater (Port 2)." or "▎ Currently OFF: Humidifier (Port 3)." — all ON ports in one line, all OFF ports in another. No_load_signal ports produce a device-level Note: "ON/OFF state is the only reliable activity indicator — history-based runtime data is not available for this controller type." Do not quote `on_hours` or `uptime_pct` for ports with a `▎` caveat — relay the caveat text verbatim.
 - `ports_excluded_count` — number of ports removed by the ghost-port filter (see Quirk 22). Capped at `devPortCount` when the device's physical port count is known (fixes over-counting on sub-8-port devices; Issue #129). On devices where `devPortCount` is absent or zero, no cap is applied and the count may reflect all 8 history slots. Do not repeat this count in prose when presenting `human_summary` to a grower.
-- `human_summary` — plain-English activity summary; preamble includes the date range (e.g. "Analyzed 7 days (May 17 – May 24)"); includes an exclusion note when `ports_excluded_count > 0` and a data-quality caveat for any toggle-hardware ports. When `ports` is empty and `ports_excluded_count > 0`, summarizes the no-activity result with the exclusion count (e.g., "No active port activity was detected over the past 7 day(s). 2 ports excluded (no power detected)."). When `ports` is empty and `ports_excluded_count == 0`, includes a troubleshooting explanation (devices off, unplugged, or no scheduled activity). Relay the caveat text for `data_quality = "api_constant_speed"` ports verbatim — do not estimate runtime from `on_hours`.
+- `human_summary` — plain-English activity summary. The preamble varies by device type: on standard devices the preamble is "Analyzed N days (date range) of activity across M active port(s)."; on devType=18/22 zero-load devices the preamble is "Analyzed N days (date range) across M port(s)." (no "active" qualifier, since load data is absent). Includes an exclusion note when `ports_excluded_count > 0`: on zero-load devices the note includes port names, e.g. "N port(s) excluded (no activity detected): Name (Port N)."; on standard devices it says "N port(s) excluded (no activity detected)." or "N port(s) excluded (no power detected)." depending on whether port names are available. Includes `▎`-prefixed caveat lines for toggle-hardware ports grouped by ON/OFF state. When `ports` is empty and `ports_excluded_count > 0`, summarizes the no-activity result with the exclusion count (e.g., "No active port activity was detected over the past 7 day(s). 2 ports excluded (no power detected)."). When `ports` is empty and `ports_excluded_count == 0`, includes a troubleshooting explanation (devices off, unplugged, or no scheduled activity). Relay the caveat text for `data_quality = "api_constant_speed"` ports verbatim — do not estimate runtime from `on_hours`.
 
 ---
 
