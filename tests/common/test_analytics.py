@@ -1276,9 +1276,9 @@ def test_rule_d_handles_toggle_speed_before_rule_e_is_reached() -> None:
 # ============ Issue #120: devType=18 zero-load quirk ============
 
 
-def test_zero_load_dev_types_constant_is_exactly_type_18() -> None:
-    """_ZERO_LOAD_DEV_TYPES must contain exactly {18} — regression guard."""
-    assert _ZERO_LOAD_DEV_TYPES == frozenset({18})
+def test_zero_load_dev_types_contains_18_and_22() -> None:
+    """_ZERO_LOAD_DEV_TYPES must contain exactly {18, 22} — regression guard."""
+    assert _ZERO_LOAD_DEV_TYPES == frozenset({18, 22})
 
 
 @pytest.mark.parametrize("dev_type,expected_kept", [
@@ -1407,3 +1407,145 @@ def test_dev_type_18_rule_c_named_port_zero_transitions_kept() -> None:
     # On devType=18, port_loads=None so Rule C doesn't fire
     assert len(result) == 1
     assert result[0].data_quality == "no_load_signal"
+
+
+# ============ Issues #117 / #128: devType=22 zero-load quirk ============
+
+
+@pytest.mark.parametrize("dev_type,expected_kept", [
+    (22, True),   # devType=22: load-based rules disabled, port kept
+    (11, False),  # devType=11: Rule D fires (avg_speed=1.0, load=0), port filtered
+    (None, False),  # dev_type=None (default): Rule D fires, port filtered
+])
+def test_dev_type_22_bypasses_rules_vs_non_22(dev_type: int | None, expected_kept: bool) -> None:
+    """devType=22 bypasses Rule D; devType=11 and None apply Rule D normally.
+
+    port_load_types={N: 0} ensures is_toggle_hardware is False (0 not in _TOGGLE_LOAD_TYPES).
+    Readings use 50% uptime (on_count=12/24) so the toggle pattern (100% uptime + speed=1) is
+    NOT triggered — data_quality for devType=22 is no_load_signal, not api_constant_speed.
+    Rule D fires on non-22 devices: avg_speed=1.0, load=0, not is_toggle → port filtered.
+    """
+    # 12 on-readings at speed=1 then 12 off → transitions=1, uptime=50%, avg_speed=1.0
+    readings = _filter_port_readings(3, "R1 Clone Lights", speed=1, on_count=12, total=24, days=1)
+    result = build_activity_report(
+        readings, days=1, port_loads={3: 0}, port_load_types={3: 0}, dev_type=dev_type
+    )
+    assert (len(result) == 1) == expected_kept, (
+        f"dev_type={dev_type}: expected {'kept' if expected_kept else 'filtered'}, "
+        f"got {len(result)} port(s)"
+    )
+    if expected_kept:
+        assert result[0].data_quality == "no_load_signal"
+
+
+def test_dev_type_22_no_load_signal_on_cycling_ports() -> None:
+    """devType=22: port with genuine transitions gets no_load_signal caveat."""
+    readings = []
+    for i in range(24):
+        on = i % 2 == 0  # alternating ON/OFF → transitions > 0
+        readings.append({
+            "timestamp": _ts(i, day=25),
+            "temperature_c": 22.0, "temperature_f": 71.6,
+            "humidity": 55.0, "vpd": 1.2,
+            "ports": [_port(2, "R1 Clone Lights", 1 if on else 0, on)],
+        })
+    result = build_activity_report(
+        readings, days=1, port_loads={2: 0}, port_load_types={2: 129}, dev_type=22
+    )
+    assert len(result) == 1
+    assert result[0].data_quality == "no_load_signal"
+    assert result[0].transitions > 0
+
+
+def test_dev_type_22_api_constant_speed_on_toggle_pattern() -> None:
+    """devType=22: toggle pattern detected via dev_type membership, not loadType.
+
+    loadType=129 is NOT in _TOGGLE_LOAD_TYPES={4, 128}, so is_toggle_hardware is False.
+    The api_constant_speed caveat fires via: is_toggle_pattern AND dev_type in _ZERO_LOAD_DEV_TYPES.
+    This exercises the live Q0KT4 scenario where loadType=129 (heat pad/lights) is non-standard.
+    """
+    readings = [
+        {
+            "timestamp": _ts(i, day=25),
+            "temperature_c": 22.0, "temperature_f": 71.6,
+            "humidity": 55.0, "vpd": 1.2,
+            "ports": [_port(1, "R1 Clone Heat Pad", 1, True)],
+        }
+        for i in range(24)
+    ]
+    result = build_activity_report(
+        readings, days=1, port_loads={1: 0}, port_load_types={1: 129}, dev_type=22
+    )
+    assert len(result) == 1
+    assert result[0].data_quality == "api_constant_speed", (
+        "devType=22 toggle pattern must yield api_constant_speed via pattern alone "
+        "(loadType=129 is non-standard; dev_type membership is the trigger)"
+    )
+
+
+def test_dev_type_22_rule_b_runtime_threshold_still_fires() -> None:
+    """devType=22: auto-named 'Port N' with < 1h/day is still filtered by Rule B."""
+    readings = _filter_port_readings(4, "Port 4", speed=1, on_count=1, total=48, days=2)
+    result = build_activity_report(readings, days=2, port_loads={4: 0}, dev_type=22)
+    assert len(result) == 0, "Auto-named 'Port N' with sub-threshold runtime must still be filtered"
+
+
+def test_dev_type_22_user_named_all_off_port_gets_no_load_signal() -> None:
+    """devType=22: user-named all-off port (0% uptime) is kept with no_load_signal.
+
+    Rule B does not apply (not auto-named). Rule C, D, E require port_loads is not None
+    (port_loads is forced to None for devType=22). Port is kept.
+    """
+    readings = [
+        {
+            "timestamp": _ts(i, day=25),
+            "temperature_c": 22.0, "temperature_f": 71.6,
+            "humidity": 55.0, "vpd": 1.2,
+            "ports": [_port(4, "R1 Outlet 4", 0, False)],
+        }
+        for i in range(24)
+    ]
+    result = build_activity_report(readings, days=1, port_loads={4: 0}, dev_type=22)
+    assert len(result) == 1
+    assert result[0].data_quality == "no_load_signal"
+    assert result[0].uptime_pct == 0.0
+
+
+def test_dev_type_22_auto_named_all_off_filtered_by_rule_b() -> None:
+    """devType=22: auto-named 'Port N' at 0% uptime is filtered by Rule B runtime arm.
+
+    Rule B's runtime arm (on_hours/days < 1.0) fires independently of port_loads.
+    Port is excluded even though load-based rules are disabled for devType=22.
+    """
+    readings = [
+        {
+            "timestamp": _ts(i, day=25),
+            "temperature_c": 22.0, "temperature_f": 71.6,
+            "humidity": 55.0, "vpd": 1.2,
+            "ports": [_port(4, "Port 4", 0, False)],
+        }
+        for i in range(24)
+    ]
+    result = build_activity_report(readings, days=1, port_loads={4: 0}, dev_type=22)
+    assert len(result) == 0, (
+        "Auto-named 'Port 4' at 0% uptime must be filtered by Rule B runtime arm"
+    )
+
+
+def test_dev_type_22_rule_b_load_guard_disabled_sufficient_runtime() -> None:
+    """devType=22: auto-named 'Port N' with >= 1h/day is kept even with load=0.
+
+    Rule B's portsLoad guard requires port_loads is not None, which is False for devType=22.
+    On devType=11, the same port is filtered by Rule B's load guard.
+    """
+    # 2 on-readings / 24 total → on_hours=2.0 ≥ 1.0 threshold
+    readings = _filter_port_readings(3, "Port 3", speed=5, on_count=2, total=24, days=1)
+
+    result_22 = build_activity_report(readings, days=1, port_loads={3: 0}, dev_type=22)
+    assert len(result_22) == 1, (
+        "devType=22: Rule B load guard disabled; port with sufficient runtime kept"
+    )
+    assert result_22[0].data_quality == "no_load_signal"
+
+    result_11 = build_activity_report(readings, days=1, port_loads={3: 0}, dev_type=11)
+    assert len(result_11) == 0, "devType=11: Rule B load guard fires; port with load=0 filtered"

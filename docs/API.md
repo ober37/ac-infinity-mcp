@@ -1068,35 +1068,36 @@ metrics use `"temperature"` as the metric key (matching the read-side field name
 
 ---
 
-### Quirk 24 — devType=18 (`69 Pro+`) always reports `portsLoad=0`
+### Quirk 24 — devType=18 (`69 Pro+`) and devType=22 (`Q0KT4`) always report `portsLoad=0`/`None`
 
 Devices with `devType=18` (UIS Controller 69 Pro+) return `portsLoad=0` for all ports in
-`devInfoListAll` regardless of actual device load state. This is a firmware reporting gap —
-the UIS 69 Pro+ does not populate the load field.
+`devInfoListAll` regardless of actual device load state. Devices with `devType=22` (Q0KT4
+Genetics Lab) return `portsLoad=None` for all ports (converted to 0 via `or 0` in the
+server). Both are firmware reporting gaps — these controllers do not populate the load field.
 
 **Impact on `get_port_activity_report`:**
 
 All five load-based ghost-port rules (A, B-portsLoad guard, C, D, E) use `portsLoad` to
-confirm a port has no physical device connected. On devType=18, these rules are disabled
-by forcing `port_loads=None` for the device — otherwise, every port would be filtered out
-as a "ghost" even when devices are physically connected and actively running.
+confirm a port has no physical device connected. On devType=18 and devType=22, these rules
+are disabled by forcing `port_loads=None` for the device — otherwise, every port would be
+filtered out as a "ghost" even when devices are physically connected and actively running.
 
-Toggle-hardware detection (data-quality caveat path) on devType=18 uses pattern alone:
-`transitions == 0` AND `uptime_pct == 100.0` AND all running speeds == 1. The
-`loadType`-based confirmation is also skipped for devType=18 because `loadType` is
-similarly unreliable on these devices (Issue #126).
+Toggle-hardware detection (data-quality caveat path) on these device types uses pattern
+alone: `transitions == 0` AND `uptime_pct == 100.0` AND all running speeds == 1. The
+`loadType`-based confirmation is also skipped for devType=18 and devType=22 because
+`loadType` is similarly unreliable on these devices (Issue #126).
 
 **Detection:**
 
 ```python
-_ZERO_LOAD_DEV_TYPES = frozenset({18})
+_ZERO_LOAD_DEV_TYPES = frozenset({18, 22})
 if device.get("devType") in _ZERO_LOAD_DEV_TYPES:
     port_loads = None  # bypass all load-based ghost rules
 ```
 
 **Known limitation:** Without a load signal, a briefly-run port (transitions > 0) on a
-devType=18 device cannot be reliably distinguished from phantom API artifact activity.
-The only available filter is the pattern detector, which requires `transitions == 0`.
+devType=18 or devType=22 device cannot be reliably distinguished from phantom API artifact
+activity. The only available filter is the pattern detector, which requires `transitions == 0`.
 
 ---
 

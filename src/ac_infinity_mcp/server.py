@@ -944,14 +944,17 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         tz = _effective_tz(zone_id)
 
         # port_loads for ghost-port Rule A filter; port_load_types for data_quality detection
+        # port_speaks: current ON/OFF state (speak: 0=off, None=unavailable; treat both as off)
         port_loads: dict[int, int] = {}
         port_load_types: dict[int, int] = {}
+        port_speaks: dict[int, bool] = {}
         port_names: dict[int, str] = {}
         for p in device.get("deviceInfo", {}).get("ports", []):
             pn = p.get("port")
             if pn is not None:
                 port_loads[pn] = p.get("portsLoad") or 0
                 port_load_types[pn] = p.get("loadType") or 0
+                port_speaks[pn] = (p.get("speak") or 0) > 0
                 port_names[pn] = p.get("portName", f"Port {pn}")
 
         now_utc = _utcnow()
@@ -1034,7 +1037,7 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
             )
             caveat_lines = " ".join(
                 f"▎ {r.name} (Port {r.port}): Activity data not supported"
-                f" (currently {'ON' if port_loads.get(r.port, 0) > 0 else 'OFF'})."
+                f" (currently {'ON' if port_speaks.get(r.port, False) else 'OFF'})."
                 for r in caveat_results
             )
             port_word = "port" if ports_excluded_count == 1 else "ports"

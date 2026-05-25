@@ -15,7 +15,7 @@ from typing import Any
 _GHOST_LOAD_ZERO_THRESHOLD: float = 1.0
 
 # devType values where portsLoad is always 0 regardless of actual current draw (Quirk 24)
-_ZERO_LOAD_DEV_TYPES: frozenset[int] = frozenset({18})
+_ZERO_LOAD_DEV_TYPES: frozenset[int] = frozenset({18, 22})
 
 STAGE_TARGETS: dict[str, dict[str, tuple[float, float]]] = {
     "clones":       {"temp_c": (22.0, 26.0), "humidity": (70.0, 80.0), "vpd": (0.8, 1.2)},
