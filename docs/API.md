@@ -1440,8 +1440,7 @@ and the report is still returned.
       "transitions": 14,
       "avg_speed_when_running": 5.2,
       "uptime_pct": 52.1,
-      "peak_hour_local": "4:00 PM CDT (peak on May 20)",
-      "data_quality": null
+      "peak_hour_local": "4:00 PM CDT (peak on May 20)"
     },
     {
       "port": 2,
@@ -1451,12 +1450,11 @@ and the report is still returned.
       "transitions": 0,
       "avg_speed_when_running": 1.0,
       "uptime_pct": 100.0,
-      "peak_hour_local": null,
-      "data_quality": "api_constant_speed"
+      "peak_hour_local": null
     }
   ],
   "ports_excluded_count": 2,
-  "human_summary": "Analyzed 7 days (May 17 – May 24) of activity across 1 active port. Inline Fan (Port 1) ran 52.1% uptime (87.5h total), most active around 4:00 PM CDT (peak on May 20). Heater (Port 2): activity data not supported (currently OFF). 2 ports excluded (no power detected)."
+  "human_summary": "Analyzed 7 days (May 17 – May 24) of activity across 1 active port. Inline Fan (Port 1) ran 52.1% uptime (87.5h total), most active around 4:00 PM CDT (peak on May 20). ▎ Heater (Port 2): Activity data not supported (currently OFF). 2 ports excluded (no power detected)."
 }
 ```
 
@@ -1467,7 +1465,7 @@ and the report is still returned.
 - `avg_speed_when_running` — average `onSpead` value (1–10) across on-readings with non-zero speed
 - `uptime_pct` — `on_hours / (on_hours + off_hours) * 100`, rounded to 1 decimal
 - `peak_hour_local` — device-local time string with peak date, always including the calendar date for disambiguation across multi-day windows (e.g. "4:00 PM CDT (peak on May 20)"); `null` when port never ran (always_off case). Uses `astimezone()` for full DST-aware conversion; sub-hour UTC offsets (UTC+5:30) are handled correctly. Falls back to UTC when `zoneId` is absent (Quirk 23).
-- `data_quality` — `null` for ports with reliable history; `"api_constant_speed"` for toggle hardware (heaters, lights, humidifiers — loadType 4 or 128) where the AC Infinity API cannot distinguish configured speed from actual runtime state. When `data_quality` is `"api_constant_speed"`, `on_hours` and `uptime_pct` are fabricated and **must not** be quoted to growers as runtime data. Relay the `human_summary` caveat text for these ports verbatim.
+- `data_quality` — Internal classification field used to generate `human_summary` caveat lines; **not present in the JSON output** (stripped before serialization). Internally: `null` for ports with reliable history; `"api_constant_speed"` for toggle hardware (heaters, lights, humidifiers — loadType 4 or 128) where the AC Infinity API records constant speed=1 regardless of actual runtime; `"no_load_signal"` for ports on devType=18/22 devices where load data is absent. The effects of these classifications are visible only via `human_summary`: toggle-hardware ports produce a `▎`-prefixed caveat line (e.g. "▎ Heater (Port 2): Activity data not supported (currently OFF)."), and no_load_signal ports produce a device-level Note about missing load data. Do not quote `on_hours` or `uptime_pct` for ports with a `▎` caveat — relay the caveat text verbatim.
 - `ports_excluded_count` — number of ports removed by the ghost-port filter (see Quirk 22). Capped at `devPortCount` when the device's physical port count is known (fixes over-counting on sub-8-port devices; Issue #129). On devices where `devPortCount` is absent or zero, no cap is applied and the count may reflect all 8 history slots. Do not repeat this count in prose when presenting `human_summary` to a grower.
 - `human_summary` — plain-English activity summary; preamble includes the date range (e.g. "Analyzed 7 days (May 17 – May 24)"); includes an exclusion note when `ports_excluded_count > 0` and a data-quality caveat for any toggle-hardware ports. When `ports` is empty and `ports_excluded_count > 0`, summarizes the no-activity result with the exclusion count (e.g., "No active port activity was detected over the past 7 day(s). 2 ports excluded (no power detected)."). When `ports` is empty and `ports_excluded_count == 0`, includes a troubleshooting explanation (devices off, unplugged, or no scheduled activity). Relay the caveat text for `data_quality = "api_constant_speed"` ports verbatim — do not estimate runtime from `on_hours`.
 

@@ -890,11 +890,16 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         JSON with window_start_local and window_end_local (the exact local time range
         analyzed, e.g. 'May 23, 10:35 AM CDT' to 'May 24, 10:35 AM CDT'), per-port
         on_hours (total hours ON over the full period), off_hours, transitions,
-        avg_speed_when_running, uptime_pct, peak_hour_local (device-local time string
-        with peak date, e.g. '3:00 PM CDT (peak on May 23)', or null if the port
-        never ran), and
-        data_quality (null for reliable history; 'api_constant_speed' for toggle
-        hardware whose history is unreliable — heaters, lights, humidifiers).
+        avg_speed_when_running, uptime_pct, and peak_hour_local (device-local time
+        string with peak date, e.g. '3:00 PM CDT (peak on May 23)', or null if the
+        port never ran).
+        Note: data_quality is an internal classification field stripped from the JSON
+        output before serialization — it is NOT present in the response JSON. Its
+        effects are visible only in human_summary: toggle hardware (heaters, lights,
+        humidifiers — loadType 4 or 128 on standard devices, or pattern-detected on
+        devType=18/22 where loadType is unreliable) produces a ▎-prefixed caveat line;
+        no_load_signal ports (devType=18 UIS 69 Pro+, devType=22 Q0KT4 Genetics Lab)
+        produce a device-level Note about missing power-draw data.
         ports_excluded_count is the number of ports removed by the ghost-port filter,
         capped at devPortCount when the device's physical port count is known (prevents
         over-counting on sub-8-port devices; unknown/zero devPortCount means no cap).
@@ -914,8 +919,9 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         relay the caveat line verbatim instead.
 
         All ports listed under the main runtime sentences have reliable timing data
-        and should be presented normally. When a device-level note about missing load
-        data appears in human_summary, relay it once — do not add further caveats.
+        and should be presented normally. When a device-level Note about missing load
+        data appears in human_summary (devType=18/22 devices), relay it once — do not
+        add further caveats.
 
     Presentation guidance:
         - Always refer to ports as 'Name (Port N)', e.g., 'Exhaust Fan (Port 3)'.
