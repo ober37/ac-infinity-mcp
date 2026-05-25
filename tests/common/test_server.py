@@ -1185,6 +1185,7 @@ async def test_get_port_activity_report_no_ports(mock_client):
         result = await get_port_activity_report("C58ZA", 1)
     data = json.loads(result)
     assert data["ports"] == []
+    assert "verify that your devices" in data["human_summary"]
 
 
 async def test_get_port_activity_report_port_always_off(mock_client):
@@ -1291,8 +1292,10 @@ async def test_get_port_activity_report_rule_a_ghost_excluded(mock_client):
     data = json.loads(result)
     assert data["ports"] == []
     assert data["ports_excluded_count"] == 1
-    # When all ports are filtered, human_summary reports no active activity
+    # When all ports are filtered, human_summary reports no active activity with exclusion count
     assert "No active port activity" in data["human_summary"]
+    assert "1 port excluded" in data["human_summary"]
+    assert "verify that your devices" not in data["human_summary"]
 
 
 async def test_get_port_activity_report_rule_a_not_excluded_with_load(mock_client):
@@ -1355,7 +1358,10 @@ async def test_get_port_activity_report_all_ports_excluded(mock_client):
     data = json.loads(result)
     assert data["ports"] == []
     assert data["ports_excluded_count"] == 2
+    # human_summary should describe 0 active ports and include the exclusion count
     assert "No active port activity" in data["human_summary"]
+    assert "2 ports excluded" in data["human_summary"]
+    assert "verify that your devices" not in data["human_summary"]
     assert "window_start_local" in data
     assert "window_end_local" in data
 
@@ -1457,6 +1463,8 @@ async def test_get_port_activity_report_rule_e_stale_speed_phantom(mock_client):
     data = json.loads(result)
     assert data["ports"] == [], "Rule E must exclude the stale-speed phantom port"
     assert data["ports_excluded_count"] == 1
+    assert "1 port excluded" in data["human_summary"]
+    assert "verify that your devices" not in data["human_summary"]
 
 
 # ============ get_port_activity_report — data_quality (#85) ============

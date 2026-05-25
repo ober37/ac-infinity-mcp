@@ -1047,12 +1047,19 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
                 summary_parts.append(excl.strip())
             human_summary = " ".join(summary_parts)
         else:
-            human_summary = (
-                f"No active port activity was detected over the past {days} {day_word}. "
-                "This can happen if all devices were off, unplugged, or no scheduled activity "
-                "occurred during the analysis window. If you expected activity, verify that your "
-                "devices are connected and scheduled to run in the AC Infinity app."
-            )
+            port_word = "port" if ports_excluded_count == 1 else "ports"
+            if ports_excluded_count > 0:
+                human_summary = (
+                    f"No active port activity was detected over the past {days} {day_word}."
+                    f" {ports_excluded_count} {port_word} excluded (no power detected)."
+                )
+            else:
+                human_summary = (
+                    f"No active port activity was detected over the past {days} {day_word}. "
+                    "This can happen if all devices were off, unplugged, or no scheduled activity "
+                    "occurred during the analysis window. If you expected activity, verify that "
+                    "your devices are connected and scheduled to run in the AC Infinity app."
+                )
 
         return json.dumps({
             "device_id": device_id,
