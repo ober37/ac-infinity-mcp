@@ -1845,7 +1845,7 @@ async def get_port_status(device_id: str, port: int) -> str:
             "mode": mode_str,
             "remain_time_seconds": port_data.get("remainTime") or 0,
         }
-        if not port_data.get("loadState", 0):
+        if not port_data.get("loadState", 0) and not port_data.get("speak", 0):
             result["plug_status"] = "not powered"
         if _is_port_empty(port_data, port, device):
             _port_label_s = port_data.get("portName", f"Port {port}")
