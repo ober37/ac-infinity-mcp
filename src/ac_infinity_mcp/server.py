@@ -1204,13 +1204,6 @@ def _decode_mode(mode_int: int | None) -> str:
 
 _MODE_AT_TYPES: dict[str, int] = {v: k for k, v in _MODE_LABELS.items()}
 
-_GRP_DEV_TYPE_LABELS: dict[int, str] = {
-    0: "Unknown",
-    4: "Inline fan/exhaust",
-    8: "Clip fan",
-    48: "Mixed speed",
-}
-
 
 def _format_schedule_time(minutes: int | None) -> str | None:
     """Convert minutes-since-midnight to HH:MM string. Returns None when disabled.
@@ -2123,19 +2116,9 @@ async def set_port_speed(
         )
 
         if write_result.get("ai_plus_write_unsupported"):
-            return json.dumps({
-                "error": (
-                    "AI+ controllers (devType=22) live write path is not yet implemented. "
-                    "dry_run=True is fully supported and returns the payload that would be sent. "
-                    "See docs/API.md for details."
-                ),
-                "device_id": device_id,
-                "port": port,
-                "dry_run": False,
-                "controller_type": write_result["controller_type"],
-            })
+            return _ai_plus_unsupported_error(device_id, port, write_result["controller_type"])
 
-        ports_list = device.get("deviceInfo", {}).get("ports", []) if device else []
+        ports_list = device.get("deviceInfo", {}).get("ports", [])
         port_data = next((p for p in ports_list if p.get("port") == port), None)
         has_custom_name = bool(port_data and port_data.get("portName"))
         port_name = _get_port_name_from_device(device, port)
@@ -2155,9 +2138,8 @@ async def set_port_speed(
 
         prior_mode_type = write_result.get("prior_mode_type")
         if prior_mode_type in (0, 1):
-            port_name = _get_port_name_from_device(device, port)
             response["warning"] = (
-                f"{port_name} is currently in OFF mode — speed was stored but the port "
+                f"{port_label} is currently in OFF mode — speed was stored but the port "
                 "will not run until the mode is changed to ON. "
                 "To activate it, ask me to switch this port to ON mode."
             )
@@ -2225,19 +2207,9 @@ async def set_port_on(
         )
 
         if write_result.get("ai_plus_write_unsupported"):
-            return json.dumps({
-                "error": (
-                    "AI+ controllers (devType=22) live write path is not yet implemented. "
-                    "dry_run=True is fully supported and returns the payload that would be sent. "
-                    "See docs/API.md for details."
-                ),
-                "device_id": device_id,
-                "port": port,
-                "dry_run": False,
-                "controller_type": write_result["controller_type"],
-            })
+            return _ai_plus_unsupported_error(device_id, port, write_result["controller_type"])
 
-        ports_list = device.get("deviceInfo", {}).get("ports", []) if device else []
+        ports_list = device.get("deviceInfo", {}).get("ports", [])
         port_data = next((p for p in ports_list if p.get("port") == port), None)
         has_custom_name = bool(port_data and port_data.get("portName"))
         port_name = _get_port_name_from_device(device, port)
@@ -2321,19 +2293,9 @@ async def set_port_off(
         )
 
         if write_result.get("ai_plus_write_unsupported"):
-            return json.dumps({
-                "error": (
-                    "AI+ controllers (devType=22) live write path is not yet implemented. "
-                    "dry_run=True is fully supported and returns the payload that would be sent. "
-                    "See docs/API.md for details."
-                ),
-                "device_id": device_id,
-                "port": port,
-                "dry_run": False,
-                "controller_type": write_result["controller_type"],
-            })
+            return _ai_plus_unsupported_error(device_id, port, write_result["controller_type"])
 
-        ports_list = device.get("deviceInfo", {}).get("ports", []) if device else []
+        ports_list = device.get("deviceInfo", {}).get("ports", [])
         port_data = next((p for p in ports_list if p.get("port") == port), None)
         has_custom_name = bool(port_data and port_data.get("portName"))
         port_name = _get_port_name_from_device(device, port)
@@ -2384,9 +2346,9 @@ def _ai_plus_unsupported_error(device_id: str, port: int, controller_type: str) 
     # only on the live-write path (dry_run returns early before the guard is reached).
     return json.dumps({
         "error": (
-            "AI+ controllers (devType=22) live write path is not yet implemented. "
-            "dry_run=True is fully supported and returns the payload that would be sent. "
-            "See docs/API.md for details."
+            "AI+ controllers live write path is not yet implemented. "
+            "Preview mode (showing what would happen) is fully supported for this device type "
+            "— ask me to preview the action first."
         ),
         "device_id": device_id,
         "port": port,
@@ -2446,7 +2408,7 @@ async def set_vpd_automation(
         if write_result.get("ai_plus_write_unsupported"):
             return _ai_plus_unsupported_error(device_id, port, write_result["controller_type"])
 
-        ports_list = device.get("deviceInfo", {}).get("ports", []) if device else []
+        ports_list = device.get("deviceInfo", {}).get("ports", [])
         port_data = next((p for p in ports_list if p.get("port") == port), None)
         has_custom_name = bool(port_data and port_data.get("portName"))
         port_name = _get_port_name_from_device(device, port)
@@ -2592,7 +2554,7 @@ async def set_temperature_automation(
         if write_result.get("ai_plus_write_unsupported"):
             return _ai_plus_unsupported_error(device_id, port, write_result["controller_type"])
 
-        ports_list = device.get("deviceInfo", {}).get("ports", []) if device else []
+        ports_list = device.get("deviceInfo", {}).get("ports", [])
         port_data = next((p for p in ports_list if p.get("port") == port), None)
         has_custom_name = bool(port_data and port_data.get("portName"))
         port_name = _get_port_name_from_device(device, port)
@@ -2704,7 +2666,7 @@ async def set_humidity_automation(
         if write_result.get("ai_plus_write_unsupported"):
             return _ai_plus_unsupported_error(device_id, port, write_result["controller_type"])
 
-        ports_list = device.get("deviceInfo", {}).get("ports", []) if device else []
+        ports_list = device.get("deviceInfo", {}).get("ports", [])
         port_data = next((p for p in ports_list if p.get("port") == port), None)
         has_custom_name = bool(port_data and port_data.get("portName"))
         port_name = _get_port_name_from_device(device, port)
@@ -2870,7 +2832,7 @@ async def set_port_mode(
         if write_result.get("ai_plus_write_unsupported"):
             return _ai_plus_unsupported_error(device_id, port, write_result["controller_type"])
 
-        ports_list = device.get("deviceInfo", {}).get("ports", []) if device else []
+        ports_list = device.get("deviceInfo", {}).get("ports", [])
         port_data = next((p for p in ports_list if p.get("port") == port), None)
         has_custom_name = bool(port_data and port_data.get("portName"))
         port_name = _get_port_name_from_device(device, port)
@@ -3184,22 +3146,38 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
         state_str = "enabled" if enabled else "disabled"
         port_groups = found["port_groups"]
 
-        # Transform grp_dev_type integer → human-readable device_type string.
-        port_groups_out = [
-            {
+        # Build port_name_map once: port number → base name (without "(Port N)" suffix).
+        # Used by both port_groups_out (device_type label) and governed_ports.
+        port_name_map: dict[int, str] = {}
+        try:
+            for _p in device.get("deviceInfo", {}).get("ports", []):
+                _pnum = _p.get("port")
+                if _pnum is None:
+                    continue
+                _raw = _p.get("portName")
+                port_name_map[int(_pnum)] = (
+                    _sanitize_api_string(_raw, 64) if _raw else f"Port {_pnum}"
+                )
+        except (TypeError, ValueError, AttributeError):
+            pass  # port_name_map stays partially built; bitmask fallback uses "Port N"
+
+        # Transform port_groups: resolve device_type from grp_dev_type bitmask.
+        # Range(8) = 8-port ceiling matching AC Infinity hardware maximum.
+        port_groups_out = []
+        for pg in port_groups:
+            _bitmask = int(pg.get("grp_dev_type") or 0)
+            _pg_names = [
+                f"{port_name_map.get(_bit + 1, f'Port {_bit + 1}')} (Port {_bit + 1})"
+                for _bit in range(8)
+                if _bitmask & (1 << _bit)
+            ]
+            port_groups_out.append({
                 "adv_id": pg["adv_id"],
                 "on_speed": pg["on_speed"],
-                "device_type": _GRP_DEV_TYPE_LABELS.get(
-                    pg.get("grp_dev_type"),
-                    f"Type {pg.get('grp_dev_type')}"
-                    if pg.get("grp_dev_type") is not None
-                    else "Unknown",
-                ),
-            }
-            for pg in port_groups
-        ]
+                "device_type": ", ".join(_pg_names) if _pg_names else "Unknown",
+            })
 
-        # Port resolution: decode governed ports from the automation's port_group bitmasks.
+        # Governed ports from bitmask (uses shared port_name_map).
         # grouptDevType is a bitmask: Port N → bit (N-1). This approach correctly handles
         # multiple simultaneous automations by attributing each port to the automation that
         # explicitly claims it, rather than using the isOpenAutomation flag which becomes
@@ -3207,20 +3185,6 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
         governed_ports: list[dict] = []
         port_resolution: str = "resolved"
         try:
-            ports = device.get("deviceInfo", {}).get("ports", [])
-            # Build a lookup from port number → port name from deviceInfo.
-            port_name_map: dict[int, str] = {}
-            for p in ports:
-                pnum = p.get("port")
-                if pnum is None:
-                    continue
-                raw_pname = p.get("portName")
-                label = (
-                    _sanitize_api_string(raw_pname, 64) if raw_pname else f"Port {pnum}"
-                )
-                port_name_map[int(pnum)] = label
-
-            # Decode port numbers from this automation's port_group bitmasks.
             governed_port_nums: set[int] = set()
             for pg in found.get("port_groups", []):
                 bitmask = int(pg.get("grp_dev_type") or 0)
@@ -3229,10 +3193,10 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
                         governed_port_nums.add(bit + 1)
 
             for pnum in sorted(governed_port_nums):
-                port_label = port_name_map.get(pnum, f"Port {pnum}")
+                _name = port_name_map.get(pnum, f"Port {pnum}")
                 governed_ports.append({
                     "port": pnum,
-                    "port_name": f"{port_label} (Port {pnum})",
+                    "port_name": f"{_name} (Port {pnum})",
                 })
         except (KeyError, TypeError, AttributeError, ValueError):
             governed_ports = []
