@@ -1680,7 +1680,7 @@ async def _build_advance_conflict_response(
             "description": (
                 f"Release {port_display} from '{auto_name}' to regain manual control."
             ),
-            "tool": "break_out_of_automation",
+            "_tool": "break_out_of_automation",
             "instruction": (
                 f"Ask me to release {port_display} from the '{auto_name}'"
                 " automation so you can control it manually."
@@ -1691,7 +1691,7 @@ async def _build_advance_conflict_response(
             "description": (
                 f"Disable '{auto_name}' entirely — releases all ports on this automation."
             ),
-            "tool": "disable_advance_automation",
+            "_tool": "disable_advance_automation",
             "instruction": (
                 f"Ask me to disable the '{auto_name}' automation to release all ports"
                 " on this controller from automation control."
@@ -1744,7 +1744,7 @@ async def _build_advance_conflict_response(
         )
         opt1 = {
             "description": "Disable the active automation to release this controller.",
-            "tool": "disable_advance_automation",
+            "_tool": "disable_advance_automation",
             "instruction": (
                 f"Ask me to list your automations for this controller to identify '{_b_name}',"
                 " then ask me to disable it to release the controller lock."
@@ -1786,7 +1786,7 @@ async def _build_advance_conflict_response(
         )
         opt1 = {
             "description": "Force-release this port by re-applying the disable command.",
-            "tool": "disable_advance_automation",
+            "_tool": "disable_advance_automation",
             "instruction": (
                 "Ask me to list your automations so I can find the one holding this port,"
                 " then ask me to disable it to force-release the port."
@@ -1824,7 +1824,7 @@ async def _build_advance_conflict_response(
         )
         opt1 = {
             "description": "Find and disable the active automation, then apply your manual change.",
-            "tool": "list_advance_automations",
+            "_tool": "list_advance_automations",
             "instruction": (
                 "Ask me to list your automations for this controller so I can identify"
                 " which one is active, then ask me to disable it."
@@ -4369,21 +4369,22 @@ async def break_out_of_automation(
         if confirm_automation_name is None:
             return json.dumps({
                 "error": (
-                    "confirm_automation_name is required to proceed. "
-                    f"Provide the automation name '{auto_name}' to confirm "
-                    "you intend to disable it."
+                    f"Please confirm which automation to disable. "
+                    f"Tell me '{auto_name}' to proceed."
                 ),
             })
 
         if len(confirm_automation_name) > 256:
-            return json.dumps({"error": "confirm_automation_name is too long (max 256 characters)"})
+            return json.dumps(
+                {"error": "The automation name you provided is too long (max 256 characters)."}
+            )
 
         if confirm_automation_name.casefold() != auto_name.casefold():
             safe_confirm = _sanitize_api_string(confirm_automation_name or "", 64)
             return json.dumps({
                 "error": (
-                    f"confirm_automation_name '{safe_confirm}' does not match "
-                    f"governing automation '{auto_name}'. Re-run with the correct name."
+                    f"'{safe_confirm}' doesn't match the governing automation '{auto_name}'. "
+                    "Please use the exact automation name."
                 ),
             })
 

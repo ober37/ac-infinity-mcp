@@ -181,6 +181,52 @@ async def test_discover_devices_metadata_absent_fields_are_none(mock_client):
     assert device["hardware_version"] is None
 
 
+async def test_discover_devices_human_summary_single(mock_client):
+    """1 device → prose human_summary with name, id, status."""
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await discover_devices()
+    data = json.loads(result)
+    assert "human_summary" in data
+    summary = data["human_summary"]
+    assert "1 device found" in summary
+    assert "C58ZA" in summary
+
+
+async def test_discover_devices_human_summary_two_devices(mock_client):
+    """2 devices → prose human_summary (below table threshold)."""
+    mock_client.get_devices.return_value = [
+        {"devCode": "A1", "devName": "Tent A", "online": True},
+        {"devCode": "B2", "devName": "Tent B", "online": False},
+    ]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await discover_devices()
+    data = json.loads(result)
+    assert "human_summary" in data
+    summary = data["human_summary"]
+    assert "2 devices found" in summary
+    assert "A1" in summary
+    assert "B2" in summary
+    assert "|" not in summary  # prose, not a table
+
+
+async def test_discover_devices_human_summary_table_three_devices(mock_client):
+    """≥3 devices → markdown table in human_summary."""
+    mock_client.get_devices.return_value = [
+        {"devCode": "A1", "devName": "Tent A", "online": True},
+        {"devCode": "B2", "devName": "Tent B", "online": False},
+        {"devCode": "C3", "devName": "Tent C", "online": True},
+    ]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await discover_devices()
+    data = json.loads(result)
+    assert "human_summary" in data
+    summary = data["human_summary"]
+    assert "| Device | ID | Status |" in summary
+    assert "Tent A" in summary
+    assert "A1" in summary
+    assert "C3" in summary
+
+
 # ============ appEmail PII filtering (P2-F003) ============
 #
 # docs/API.md warns that device list responses include the authenticated user's
@@ -489,6 +535,18 @@ async def test_get_device_reading_success(mock_client):
     assert "vpd" in data
 
 
+async def test_get_device_reading_human_summary(mock_client):
+    """human_summary contains temp, humidity, and VPD for quick grower read."""
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_device_reading("C58ZA")
+    data = json.loads(result)
+    assert "human_summary" in data
+    summary = data["human_summary"]
+    assert "RH" in summary
+    assert "kPa" in summary
+    assert "Reading from" in summary
+
+
 
 async def test_get_device_reading_no_load_field_in_ports(mock_client):
     """Regression guard: 'load' key must be absent from ports in get_device_reading output."""
@@ -595,6 +653,32 @@ async def test_get_all_device_readings_parse_error_isolated(mock_client):
     readings = {r["device_id"]: r for r in data["readings"]}
     assert "error" in readings["BAD"]
     assert "error" not in readings["C58ZA"]
+
+
+async def test_get_all_device_readings_human_summary_prose(mock_client):
+    """2 devices → prose human_summary (below table threshold)."""
+    second = {**MOCK_DEVICE_LEGACY, "devCode": "D2"}
+    mock_client.get_devices.return_value = [MOCK_DEVICE_LEGACY, second]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_all_device_readings()
+    data = json.loads(result)
+    assert "human_summary" in data
+    assert "|" not in data["human_summary"]  # prose, not a table
+    assert "kPa" in data["human_summary"]
+
+
+async def test_get_all_device_readings_human_summary_table(mock_client):
+    """≥3 devices → markdown table in human_summary."""
+    d2 = {**MOCK_DEVICE_LEGACY, "devCode": "D2"}
+    d3 = {**MOCK_DEVICE_LEGACY, "devCode": "D3"}
+    mock_client.get_devices.return_value = [MOCK_DEVICE_LEGACY, d2, d3]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_all_device_readings()
+    data = json.loads(result)
+    assert "human_summary" in data
+    summary = data["human_summary"]
+    assert "| Device | Temp | Humidity | VPD |" in summary
+    assert "kPa" in summary
 
 
 # ============ get_historical_readings ============
@@ -825,6 +909,31 @@ async def test_check_vpd_drift_device_not_found(mock_client):
         result = await check_vpd_drift("NOTEXIST", "veg")
     data = json.loads(result)
     assert "error" in data
+
+
+async def test_check_vpd_drift_human_summary_ok(mock_client):
+    """OK status → human_summary says VPD is on target."""
+    mock_client.parse_device_data.return_value = {
+        **mock_client.parse_device_data.return_value, "vpd": 1.24,
+    }
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await check_vpd_drift("C58ZA", "veg")
+    data = json.loads(result)
+    assert "human_summary" in data
+    assert "on target" in data["human_summary"]
+    assert "kPa" in data["human_summary"]
+
+
+async def test_check_vpd_drift_human_summary_high(mock_client):
+    """HIGH status → human_summary equals the alert text."""
+    mock_client.parse_device_data.return_value = {
+        **mock_client.parse_device_data.return_value, "vpd": 2.5,
+    }
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await check_vpd_drift("C58ZA", "veg")
+    data = json.loads(result)
+    assert "human_summary" in data
+    assert data["human_summary"] == data["alert"]
 
 
 # ============ _parse_duration_seconds ============
@@ -1153,6 +1262,21 @@ async def test_detect_environment_trends_single_reading_flat(mock_client):
     for trend in data["trends"]:
         assert trend["slope"] == 0.0
         assert trend["direction"] == "flat"
+
+
+async def test_detect_environment_trends_human_summary_table(mock_client):
+    """human_summary is a markdown table with all three metrics."""
+    readings = _make_hourly_readings(7)
+    mock_client.get_historical_data.return_value = [{}] * 7
+    mock_client.parse_history_record.side_effect = lambda r, port_names=None: readings[0]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await detect_environment_trends("C58ZA", 7)
+    data = json.loads(result)
+    assert "human_summary" in data
+    summary = data["human_summary"]
+    assert "| Metric | Direction | Slope | 7-Day Projection |" in summary
+    assert "Temperature" in summary
+    assert "Humidity" in summary
 
 
 # ============ get_port_activity_report ============
@@ -3768,6 +3892,17 @@ async def test_get_port_status_port_zero(mock_client):
     assert "port" in data["error"]
 
 
+async def test_get_port_status_human_summary_present(mock_client):
+    """human_summary describes port name, mode, and speed in one sentence."""
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_status("C58ZA", 1)
+    data = json.loads(result)
+    assert "human_summary" in data
+    summary = data["human_summary"]
+    assert "Intake Fan" in summary or "Port 1" in summary
+    assert "AUTO" in summary or "speed" in summary
+
+
 async def test_get_port_status_auth_error(mock_client):
     mock_client.get_devices.side_effect = ACInfinityAuthError("token expired")
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
@@ -4121,6 +4256,17 @@ async def test_get_port_settings_success_basic(mock_client):
     # timer fields are omitted when 0 (not configured)
     assert "timer_on_seconds" not in data
     assert "timer_off_seconds" not in data
+
+
+async def test_get_port_settings_timer_fields_present_when_nonzero(mock_client):
+    """Non-zero timer values are included in the response (only omitted when 0)."""
+    settings = {**MOCK_MODE_SETTINGS_BASIC, "acitveTimerOn": 3600, "acitveTimerOff": 7200}
+    mock_client.get_mode_settings.return_value = settings
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_settings("C58ZA", 1)
+    data = json.loads(result)
+    assert data["timer_on_seconds"] == 3600
+    assert data["timer_off_seconds"] == 7200
 
 
 async def test_get_port_settings_vpd_target_active(mock_client):
@@ -6027,7 +6173,7 @@ async def test_break_out_confirm_name_required(mock_client):
         )
     data = json.loads(result)
     assert "error" in data
-    assert "confirm_automation_name" in data["error"]
+    assert "confirm" in data["error"].lower()
 
 
 async def test_break_out_confirm_name_mismatch(mock_client):
@@ -6041,7 +6187,7 @@ async def test_break_out_confirm_name_mismatch(mock_client):
         )
     data = json.loads(result)
     assert "error" in data
-    assert "does not match" in data["error"]
+    assert "match" in data["error"]
 
 
 async def test_break_out_confirm_name_case_insensitive(mock_client):
@@ -6066,6 +6212,28 @@ async def test_break_out_confirm_name_case_insensitive(mock_client):
     assert data.get("sent") is True
     # Disable called exactly once (single toggle — not once per adv_id)
     assert mock_client.disable_advance_automation.call_count == 1
+
+
+async def test_break_out_live_human_summary(mock_client):
+    """Live break_out response includes human_summary saying port is released."""
+    def mode_settings_side_effect(dev_id, port):
+        return {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 2}
+
+    mock_client.get_mode_settings.side_effect = mode_settings_side_effect
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    mock_client.disable_advance_automation.return_value = {"code": 200}
+    mock_client.set_port_mode.return_value = {
+        "dry_run": False, "sent": True, "controller_type": "legacy", "payload": {}
+    }
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await break_out_of_automation(
+            "C58ZA", port=1, dry_run=False,
+            confirm_automation_name="Moderate Airflow",
+        )
+    data = json.loads(result)
+    assert data.get("sent") is True
+    assert "human_summary" in data
+    assert "manually" in data["human_summary"]
 
 
 # ============ dry_run_never_writes parametrize ============
@@ -6262,7 +6430,7 @@ async def test_conflict_response_option_1_is_break_out(mock_client):
         result = await set_port_off("C58ZA", port=4, dry_run=False)
     data = json.loads(result)
     assert "1_break_out" in data["options"]
-    assert data["options"]["1_break_out"]["tool"] == "break_out_of_automation"
+    assert data["options"]["1_break_out"]["_tool"] == "break_out_of_automation"
     assert data["options"]["1_break_out"]["available"] is True
     assert "suggested_reply" in data
 
@@ -6636,6 +6804,16 @@ async def test_disable_advance_automation_live_calls_once(mock_client):
         mock_client.get_devices.return_value[0]["devId"],
         1342758,  # adv_ids[0] for "Moderate Airflow"
     )
+
+
+async def test_disable_advance_automation_live_human_summary(mock_client):
+    """Live disable response includes human_summary confirming immediate restore."""
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await disable_advance_automation("C58ZA", "1342758", dry_run=False)
+    data = json.loads(result)
+    assert "human_summary" in data
+    assert "restore automation control immediately" in data["human_summary"]
 
 
 async def test_break_out_no_enabled_automation(mock_client):
@@ -7282,7 +7460,7 @@ async def test_conflict_response_sub_path_a_break_out_offered(mock_client):
     data = json.loads(result)
     assert data.get("conflict") == "ADVANCE_AUTOMATION"
     assert "1_break_out" in data["options"]
-    assert data["options"]["1_break_out"]["tool"] == "break_out_of_automation"
+    assert data["options"]["1_break_out"]["_tool"] == "break_out_of_automation"
     assert data["options"]["1_break_out"]["available"] is True
     # Speed must come from port_groups[1] (grp_dev_type=8, on_speed=1), not port_groups[0]
     assert "1" in data["human_summary"]
