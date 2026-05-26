@@ -20,6 +20,8 @@ from ac_infinity_mcp.server import (
     _check_advance_mode,
     _decode_mode,
     _filter_readings_by_time,
+    _find_governing_automation,
+    _find_governing_port_group,
     _format_schedule_time,
     _format_window_dt,
     _group_automations,
@@ -1775,7 +1777,7 @@ async def test_get_port_activity_report_devtype18_no_load_signal_in_human_summar
 
     assert "Left Fan (Port 3)" in summary, "Port uptime line must appear in human_summary"
     assert "uptime" in summary, "Runtime data must appear in human_summary"
-    assert "does not report power draw" in summary, "Device-level note must appear for devType=18"
+    assert "does not report power draw" not in summary  # note must not appear for devType=18
 
 
 async def test_get_port_activity_report_devtype18_toggle_still_api_constant_speed(mock_client):
@@ -1804,8 +1806,33 @@ async def test_get_port_activity_report_devtype18_toggle_still_api_constant_spee
     assert "data_quality" not in heater
     assert "▎" in data["human_summary"]
     assert "Currently OFF: Heater (Port 2)" in data["human_summary"]
-    # Note appears for all devType=18/22 devices when result is non-empty (#136)
-    assert "does not report power draw" in data["human_summary"]
+    # Note only appears for devType=22 after #151 — devType=18 suppressed
+    assert "does not report power draw" not in data["human_summary"]
+
+
+async def test_get_port_activity_report_devtype18_note_absent_with_active_ports(mock_client):
+    """devType=18 with active ports: 'does not report power draw' note must not appear (#151)."""
+    device = _make_devtype18_device([
+        {"port": 3, "portName": "Left Fan", "portsLoad": 0, "loadType": 0},
+    ])
+    mock_client.get_devices.return_value = [device]
+    readings = _make_devtype18_port_readings(3, "Left Fan", speed=5, on_count=12, total=288)
+    mock_client.get_historical_data.return_value = [{}] * 288
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        val = readings[idx % len(readings)]
+        idx += 1
+        return val
+
+    mock_client.parse_history_record.side_effect = _side_effect
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 3)
+    data = json.loads(result)
+
+    assert "does not report power draw" not in data["human_summary"]
+    assert len(data["ports"]) > 0  # vacuity guard
 
 
 async def test_get_port_activity_report_devtype11_rule_e_still_filters(mock_client):
@@ -2043,7 +2070,7 @@ async def test_note_mentions_on_off_reliable_devtype22(mock_client):
 
 
 async def test_note_mentions_on_off_reliable_devtype18(mock_client):
-    """#142/#143: devType=18 Note mentions ON/OFF state as the only reliable indicator."""
+    """#151: devType=18 Note is suppressed after fix — only devType=22 emits the Note."""
     device = _make_devtype18_device([
         {"port": 3, "portName": "Left Fan", "portsLoad": 0, "loadType": 0},
     ])
@@ -2062,8 +2089,8 @@ async def test_note_mentions_on_off_reliable_devtype18(mock_client):
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_port_activity_report("C58ZA", 3)
     data = json.loads(result)
-    assert "ON/OFF state is the only reliable activity indicator" in data["human_summary"], (
-        "#143: devType=18 Note must mention ON/OFF reliability"
+    assert "ON/OFF state is the only reliable activity indicator" not in data["human_summary"], (
+        "#151: devType=18 Note must not appear — only devType=22 emits the Note"
     )
 
 
@@ -2655,7 +2682,9 @@ async def test_set_port_speed_off_mode_warning_modeType_0(mock_client):
     data = json.loads(result)
     assert "warning" in data
     assert "OFF mode" in data["warning"]
-    assert "set_port_mode" in data["warning"]
+    assert "set_port_mode" not in data["warning"]
+    assert "Call" not in data["warning"]
+    assert "ON mode" in data["warning"]
 
 
 async def test_set_port_speed_off_mode_warning_modeType_1(mock_client):
@@ -2667,7 +2696,9 @@ async def test_set_port_speed_off_mode_warning_modeType_1(mock_client):
     data = json.loads(result)
     assert "warning" in data
     assert "OFF mode" in data["warning"]
-    assert "set_port_mode" in data["warning"]
+    assert "set_port_mode" not in data["warning"]
+    assert "Call" not in data["warning"]
+    assert "ON mode" in data["warning"]
 
 
 async def test_set_port_speed_no_warning_when_on_mode(mock_client):
@@ -2677,6 +2708,86 @@ async def test_set_port_speed_no_warning_when_on_mode(mock_client):
         result = await set_port_speed("C58ZA", 2, 5, dry_run=True)
     data = json.loads(result)
     assert "warning" not in data
+
+
+@pytest.mark.asyncio
+async def test_set_port_speed_action_uses_port_name(mock_client):
+    """action field uses port name + number for a named port."""
+    mock_client.set_port_mode.return_value = MOCK_SET_PORT_MODE_DRY
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_speed("C58ZA", 2, 5)
+    data = json.loads(result)
+    assert data["action"] == "set Exhaust Fan (Port 2) speed to 5"
+
+
+@pytest.mark.asyncio
+async def test_set_port_speed_action_unnamed_port_fallback(mock_client):
+    """action field falls back to 'Port N' when port has no custom name."""
+    mock_client.set_port_mode.return_value = MOCK_SET_PORT_MODE_DRY
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_speed("C58ZA", 3, 5)
+    data = json.loads(result)
+    assert data["action"] == "set Port 3 speed to 5"
+
+
+@pytest.mark.asyncio
+async def test_set_port_on_action_uses_port_name(mock_client):
+    """set_port_on action field uses port name + number for a named port."""
+    mock_client.set_port_mode.return_value = MOCK_SET_PORT_ON_DRY
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_on("C58ZA", 1)
+    data = json.loads(result)
+    assert data["action"] == "turn Intake Fan (Port 1) on"
+
+
+@pytest.mark.asyncio
+async def test_set_port_off_action_uses_port_name(mock_client):
+    """set_port_off action field uses port name + number for a named port."""
+    mock_client.set_port_mode.return_value = MOCK_SET_PORT_OFF_DRY
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_off("C58ZA", 2)
+    data = json.loads(result)
+    assert data["action"] == "turn Exhaust Fan (Port 2) off"
+
+
+@pytest.mark.asyncio
+async def test_set_port_mode_action_uses_port_name(mock_client):
+    """set_port_mode action field uses port name + number for a named port."""
+    mock_client.set_port_mode.return_value = MOCK_SET_PORT_MODE_DRY
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_mode("C58ZA", 1, "ON")
+    data = json.loads(result)
+    assert data["action"] == "set Intake Fan (Port 1) mode to ON"
+
+
+@pytest.mark.asyncio
+async def test_set_vpd_automation_action_uses_port_name(mock_client):
+    """set_vpd_automation action field includes port name + number."""
+    mock_client.set_port_mode.return_value = MOCK_VPD_DRY
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_vpd_automation("C58ZA", 1, 1.4)
+    data = json.loads(result)
+    assert "Intake Fan (Port 1)" in data["action"]
+
+
+@pytest.mark.asyncio
+async def test_set_temperature_automation_action_uses_port_name(mock_client):
+    """set_temperature_automation action field includes port name + number."""
+    mock_client.set_port_mode.return_value = MOCK_TEMP_DRY
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_temperature_automation("C58ZA", 1, 20.0, 28.0)
+    data = json.loads(result)
+    assert "Intake Fan (Port 1)" in data["action"]
+
+
+@pytest.mark.asyncio
+async def test_set_humidity_automation_action_uses_port_name(mock_client):
+    """set_humidity_automation action field includes port name + number."""
+    mock_client.set_port_mode.return_value = MOCK_HUMI_DRY
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_humidity_automation("C58ZA", 1, 50.0, 70.0)
+    data = json.loads(result)
+    assert "Intake Fan (Port 1)" in data["action"]
 
 
 # ============ set_port_on ============
@@ -2896,18 +3007,23 @@ async def test_set_port_off_not_affected_by_load_type_guard(mock_client):
 
 
 async def test_set_port_speed_returns_conflict_for_modeType_15(mock_client):
-    """ACInfinityAdvanceConflictError from modeType=15 guard returns structured conflict."""
+    """ACInfinityAdvanceConflictError from modeType=15 guard returns structured conflict.
+
+    Port 4 is used because MOCK_ADVANCE_AUTOMATIONS_LIST includes a port_group with
+    grouptDevType=8 (bitmask bit 3 = Port 4), so the bitmask lookup yields Sub-path A
+    and offers break_out_of_automation.
+    """
     mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError(
-        "Port 1 on device 12345 is in smart automation mode (modeType=15)"
+        "Port 4 on device 12345 is in smart automation mode (modeType=15)"
     )
     mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        result = await set_port_speed("C58ZA", 1, 5)
+        result = await set_port_speed("C58ZA", 4, 5)
     data = json.loads(result)
     assert data["conflict"] == "ADVANCE_AUTOMATION"
     assert "summary" in data
     assert "automation" in data["summary"].lower() and "controller" in data["summary"].lower()
-    assert data["target_port"] == "Intake Fan (Port 1)"
+    assert data["target_port"] == "Port 4 (Port 4)"
     assert "options" in data
     assert "1_break_out" in data["options"]
     assert "1_re_disable_to_clear" not in data["options"]
@@ -3747,23 +3863,34 @@ async def test_get_port_settings_generic_exception(mock_client):
 
 
 async def test_get_port_settings_advance_mode_returns_early(mock_client):
-    """modeType=15 in settings returns ADVANCE mode enriched with automation info."""
+    """modeType=15 in settings returns ADVANCE mode enriched with automation info.
+
+    Uses port=4 because MOCK_ADVANCE_AUTOMATIONS_LIST has grouptDevType=8 (Port 4),
+    so the bitmask lookup resolves Moderate Airflow as the governing automation.
+    """
+    import copy
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    # Add port 4 to device so speak value is accessible.
+    device["deviceInfo"]["ports"].append(
+        {"port": 4, "portName": "Inline Fan", "speak": 3, "portsLoad": 1,
+         "loadState": 1, "curMode": 15, "remainTime": 0}
+    )
+    mock_client.get_devices.return_value = [device]
     mock_client.get_mode_settings.return_value = {
         **MOCK_MODE_SETTINGS_BASIC,
         "modeType": 15,
         "onSpead": 2,
     }
-    # Conftest default: get_devices returns MOCK_DEVICE_LEGACY (port 1 speak=5)
     # Conftest default: get_advance_automations returns MOCK_ADVANCE_AUTOMATIONS_LIST
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        result = await get_port_settings("C58ZA", 1)
+        result = await get_port_settings("C58ZA", 4)
     data = json.loads(result)
     assert data["mode"] == "ADVANCE"
     assert data["advance_automation"] is True
     assert data["speed_target"] is None
     assert data["automation_name"] == "Moderate Airflow"
     assert data["automation_id"] == 1342758
-    assert data["current_speed"] == 5  # from MOCK_DEVICE_LEGACY port 1 speak=5
+    assert data["current_speed"] == 3  # from port 4 speak=3
     assert data["vpd_target_kpa"] is None
     assert data["temp_range"] is None
     assert data["humidity_range_pct"] is None
@@ -5582,7 +5709,7 @@ async def test_build_advance_conflict_response_degraded(mock_client):
     assert data.get("automation_name") is None
     assert data.get("active_automations") == []
     assert "None" not in data["options"]["1_find_and_disable"]["instruction"]
-    assert "Ask me" in data["options"]["1_find_and_disable"]["instruction"]
+    assert "automations" in data["options"]["1_find_and_disable"]["instruction"].lower()
     assert "1_break_out" not in data["options"]
     assert "suggested_reply" in data
 
@@ -5615,11 +5742,15 @@ async def test_conflict_response_summary_is_controller_level(mock_client):
 
 
 async def test_conflict_response_option_1_is_break_out(mock_client):
-    """Option 1 uses break_out_of_automation tool with available=True."""
+    """Option 1 uses break_out_of_automation tool with available=True.
+
+    Port 4 is used because MOCK_ADVANCE_AUTOMATIONS_LIST has grouptDevType=8 (Port 4),
+    so the bitmask lookup yields Sub-path A and 1_break_out is offered.
+    """
     mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
     mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        result = await set_port_off("C58ZA", port=1, dry_run=False)
+        result = await set_port_off("C58ZA", port=4, dry_run=False)
     data = json.loads(result)
     assert "1_break_out" in data["options"]
     assert data["options"]["1_break_out"]["tool"] == "break_out_of_automation"
@@ -5660,8 +5791,10 @@ async def test_conflict_response_option_1_available_includes_run_state(
     automations[1]["isOn"] = is_on
     automations[1]["runState"] = run_state_val
     mock_client.get_advance_automations.return_value = automations
+    # Port 4 is in MOCK_ADVANCE_AUTOMATIONS_LIST (grouptDevType=8, bit 3 = Port 4),
+    # so the bitmask lookup yields Sub-path A and offers 1_break_out.
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        result = await set_port_speed("C58ZA", port=1, speed=3, dry_run=False)
+        result = await set_port_speed("C58ZA", port=4, speed=3, dry_run=False)
     data = json.loads(result)
     assert data.get("conflict") == "ADVANCE_AUTOMATION"
     assert "1_break_out" in data["options"], (
@@ -5724,7 +5857,7 @@ async def test_conflict_response_all_automations_disabled_uses_all_disabled_path
     data = json.loads(result)
     assert data["automation_name"] is None
     assert data["active_automations"] == []
-    assert "Ask me" in data["options"]["1_re_disable_to_clear"]["instruction"]
+    assert "automations" in data["options"]["1_re_disable_to_clear"]["instruction"].lower()
     assert "suggested_reply" in data
 
 
@@ -5796,11 +5929,14 @@ async def test_conflict_normal_path_instructions_contain_natural_language(mock_c
     Verified format: "Ask me to release <port> from the '<automation>' automation ..."
     and "Ask me to disable the '<automation>' automation — ..."
     No Python function call syntax; no dry_run; no internal parameter names.
+
+    Port 4 is used because MOCK_ADVANCE_AUTOMATIONS_LIST has grouptDevType=8 (bit 3 = Port 4),
+    so the bitmask lookup yields Sub-path A and 1_break_out is offered.
     """
     mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
     mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        result = await set_port_off("C58ZA", port=1, dry_run=False)
+        result = await set_port_off("C58ZA", port=4, dry_run=False)
     data = json.loads(result)
     opt1 = data["options"]["1_break_out"]
     opt2 = data["options"]["2_disable_automation"]
@@ -5834,11 +5970,15 @@ async def test_conflict_switching_guidance_no_function_names(mock_client):
 
 @pytest.mark.asyncio
 async def test_set_port_speed_conflict_includes_option_0_update_speed(mock_client):
-    """set_port_speed conflict response includes option '0_update_speed' in normal path."""
+    """set_port_speed conflict response includes option '0_update_speed' in normal path.
+
+    Port 4 is used because MOCK_ADVANCE_AUTOMATIONS_LIST has grouptDevType=8 (bit 3 = Port 4),
+    so the bitmask lookup yields Sub-path A where 0_update_speed is offered.
+    """
     mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
     mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        result = await set_port_speed("C58ZA", 1, 7)
+        result = await set_port_speed("C58ZA", 4, 7)
     data = json.loads(result)
     assert data["conflict"] == "ADVANCE_AUTOMATION"
     # Option 0 must be present when called from set_port_speed (requested_speed=7)
@@ -5847,9 +5987,10 @@ async def test_set_port_speed_conflict_includes_option_0_update_speed(mock_clien
     assert opt0["available"] is True
     # Must mention the requested speed (7) in description
     assert "7" in opt0["description"]
-    # Must mention the current auto speed
+    # Must mention the current auto speed — port 4 is governed by entry index 1
+    # (grouptDevType=8 = bit 3 = Port 4, onSpeed=1).
     current_speed = str(
-        MOCK_ADVANCE_AUTOMATIONS_LIST[0]["onSpeed"]  # from fixture
+        MOCK_ADVANCE_AUTOMATIONS_LIST[1]["onSpeed"]  # entry with grouptDevType=8 (Port 4)
     )
     assert current_speed in opt0["description"] or "?" in opt0["description"]
     # instruction must be natural language
@@ -5923,17 +6064,20 @@ async def test_set_port_speed_conflict_fires_before_get_mode_settings_on_advance
 
     The conflict comes from isOpenAutomation=1 in device_data BEFORE get_mode_settings
     is called — tests that the server's _build_advance_conflict_response is still reached.
+
+    Port 4 is used because MOCK_ADVANCE_AUTOMATIONS_LIST has grouptDevType=8 (bit 3 = Port 4),
+    so the bitmask lookup yields Sub-path A where 0_update_speed is offered.
     """
     mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError(
-        "Port 1 on device 12345 is in smart automation mode (isOpenAutomation=1 in devInfoListAll)"
+        "Port 4 on device 12345 is in smart automation mode (isOpenAutomation=1 in devInfoListAll)"
     )
     mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        result = await set_port_speed("C58ZA", 1, 5)
+        result = await set_port_speed("C58ZA", 4, 5)
     data = json.loads(result)
     assert data["conflict"] == "ADVANCE_AUTOMATION"
     assert "0_update_speed" in data["options"]  # speed=5 was passed
-    assert data["target_port"] == "Intake Fan (Port 1)"
+    assert data["target_port"] == "Port 4 (Port 4)"
 
 
 @pytest.mark.asyncio
@@ -5942,14 +6086,17 @@ async def test_set_port_speed_conflict_999999_defense_in_depth(mock_client):
 
     Covers the defense-in-depth path where the pre-write guard misses the conflict
     and the write API returns code 999999 (ADVANCE conflict sentinel).
+
+    Port 4 is used because MOCK_ADVANCE_AUTOMATIONS_LIST has grouptDevType=8 (bit 3 = Port 4),
+    so the bitmask lookup yields Sub-path A where 0_update_speed is offered.
     """
     mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError(
-        "Port 1 on device 12345 rejected write with code 999999 — port is under Advance "
+        "Port 4 on device 12345 rejected write with code 999999 — port is under Advance "
         "Automation control."
     )
     mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        result = await set_port_speed("C58ZA", 1, 3)
+        result = await set_port_speed("C58ZA", 4, 3)
     data = json.loads(result)
     assert data["conflict"] == "ADVANCE_AUTOMATION"
     # speed=3 was the requested speed — option 0 should appear
@@ -6187,11 +6334,15 @@ async def test_get_advance_automation_unknown_on_time_switch_treated_as_continuo
 # ============ Issue #68 — suggested_reply in conflict response ============
 
 async def test_build_advance_conflict_suggested_reply_normal(mock_client):
-    """suggested_reply on normal path contains automation name."""
+    """suggested_reply on Sub-path A (port in bitmask) contains automation name.
+
+    Port 4 is used because MOCK_ADVANCE_AUTOMATIONS_LIST has grouptDevType=8 (Port 4),
+    so the bitmask lookup yields Sub-path A and suggested_reply names the automation.
+    """
     mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
     mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        result = await set_port_off("C58ZA", port=1, dry_run=False)
+        result = await set_port_off("C58ZA", port=4, dry_run=False)
     data = json.loads(result)
     assert "suggested_reply" in data
     assert "Moderate Airflow" in data["suggested_reply"]
@@ -6213,17 +6364,29 @@ async def test_build_advance_conflict_suggested_reply_degraded(mock_client):
 # ============ Issue #60 — get_port_settings ADVANCE enrichment ============
 
 async def test_get_port_settings_advance_enrichment_governing_found(mock_client):
-    """modeType=15 + active automation → response includes automation_name and id."""
+    """modeType=15 + active automation → response includes automation_name and id.
+
+    Port 5 is used because MOCK_ADVANCE_AUTOMATIONS_LIST has grouptDevType=48
+    (bitmask 0b110000 = bits 4 and 5 = Ports 5 and 6), so the bitmask lookup
+    resolves Moderate Airflow as the governing automation for port 5.
+    """
+    import copy
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device["deviceInfo"]["ports"].append(
+        {"port": 5, "portName": "Exhaust 2", "speak": 2, "portsLoad": 1,
+         "loadState": 1, "curMode": 15, "remainTime": 0}
+    )
+    mock_client.get_devices.return_value = [device]
     mock_client.get_mode_settings.return_value = {**MOCK_MODE_SETTINGS_BASIC, "modeType": 15}
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        result = await get_port_settings("C58ZA", 1)
+        result = await get_port_settings("C58ZA", 5)
     data = json.loads(result)
     assert data["mode"] == "ADVANCE"
     assert data["advance_automation"] is True
     assert data["automation_name"] == "Moderate Airflow"
     assert data["automation_id"] == 1342758
     assert data["speed_target"] is None
-    assert data["current_speed"] == 5  # MOCK_DEVICE_LEGACY port 1 speak=5
+    assert data["current_speed"] == 2  # port 5 speak=2
     assert "automation_on_speed" in data
     assert data["automation_running"] is True
     assert data["automation_configured"] is True
@@ -6279,11 +6442,14 @@ async def test_get_port_settings_advance_isOpenAutomation_zero_falls_through(moc
 
 
 async def test_conflict_response_normal_suggested_reply_discloses_consequence(mock_client):
-    """Normal path suggested_reply discloses that releasing affects all ports on the automation."""
+    """Sub-path A suggested_reply discloses that releasing affects all ports on the automation.
+
+    Port 4 is used (grouptDevType=8 = Port 4) so the bitmask lookup yields Sub-path A.
+    """
     mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
     mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        result = await set_port_off("C58ZA", port=1, dry_run=False)
+        result = await set_port_off("C58ZA", port=4, dry_run=False)
     data = json.loads(result)
     suggested = data["suggested_reply"]
     assert any(word in suggested.lower() for word in ["all", "other", "ports"])
@@ -6364,50 +6530,72 @@ async def test_get_advance_automation_device_type_labels(mock_client):
 
 
 async def test_get_advance_automation_no_advance_ports(mock_client):
-    """No ports with isOpenAutomation=1 → governed_ports=[], port_resolution='resolved'."""
-    # MOCK_DEVICE_LEGACY has no isOpenAutomation key on any port
+    """Bitmask decode populates governed_ports from automation port_groups.
+
+    MOCK_ADVANCE_AUTOMATIONS_LIST "Moderate Airflow" has two port_groups:
+      - grouptDevType=48 → bits 4,5 → Ports 5 and 6
+      - grouptDevType=8  → bit 3  → Port 4
+    MOCK_DEVICE_LEGACY only has ports 1 and 2, so ports 4/5/6 fall back to
+    'Port N' labels.  port_resolution is 'resolved'.
+    """
     mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_advance_automation("C58ZA", "1342758")
     data = json.loads(result)
     assert data["port_resolution"] == "resolved"
-    assert data["governed_ports"] == []
+    port_nums = [gp["port"] for gp in data["governed_ports"]]
+    assert sorted(port_nums) == [4, 5, 6]
 
 
 async def test_get_advance_automation_port_resolution_single_automation(mock_client):
-    """Single active automation → governed_ports lists ports with isOpenAutomation=1."""
-    import copy
-    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
-    device["deviceInfo"]["ports"][0]["isOpenAutomation"] = 1
-    mock_client.get_devices.return_value = [device]
-    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    """Single-group automation: governed_ports decoded from bitmask.
+
+    MOCK_ADVANCE_AUTOMATIONS_SINGLE has grouptDevType=4 (bit 2 = Port 3).
+    MOCK_DEVICE_LEGACY has no port 3, so the label falls back to 'Port 3 (Port 3)'.
+    port_resolution is 'resolved'.
+    """
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_SINGLE
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        result = await get_advance_automation("C58ZA", "1342758")
+        result = await get_advance_automation("C58ZA", "999001")
     data = json.loads(result)
     assert data["port_resolution"] == "resolved"
     assert len(data["governed_ports"]) == 1
-    assert data["governed_ports"][0]["port"] == 1
-    assert data["governed_ports"][0]["port_name"] == "Intake Fan (Port 1)"
+    assert data["governed_ports"][0]["port"] == 3
+    assert data["governed_ports"][0]["port_name"] == "Port 3 (Port 3)"
 
 
 async def test_get_advance_automation_governed_ports_missing_port_name(mock_client):
-    """Port with no portName in deviceInfo falls back to 'Port N (Port N)' not '(unnamed)'."""
+    """Port in bitmask with no portName falls back to 'Port N (Port N)' not '(unnamed)'.
+
+    MOCK_ADVANCE_AUTOMATIONS_LIST "Moderate Airflow" has grouptDevType=8 (Port 4).
+    We add port 4 to the device without a portName — the fallback label is 'Port 4 (Port 4)'.
+    """
     import copy
     device = copy.deepcopy(MOCK_DEVICE_LEGACY)
-    device["deviceInfo"]["ports"][0].pop("portName", None)
-    device["deviceInfo"]["ports"][0]["isOpenAutomation"] = 1
+    # Add port 4 without portName to test the fallback label path.
+    device["deviceInfo"]["ports"].append(
+        {"port": 4, "speak": 0, "portsLoad": 0, "loadState": 0, "curMode": 15}
+    )
     mock_client.get_devices.return_value = [device]
     mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_advance_automation("C58ZA", "1342758")
     data = json.loads(result)
     assert data["port_resolution"] == "resolved"
-    assert len(data["governed_ports"]) == 1
-    assert data["governed_ports"][0]["port_name"] == "Port 1 (Port 1)"
+    port_nums = [gp["port"] for gp in data["governed_ports"]]
+    assert 4 in port_nums
+    # Port 4 has no portName → label is 'Port 4 (Port 4)'
+    port4_entry = next(gp for gp in data["governed_ports"] if gp["port"] == 4)
+    assert port4_entry["port_name"] == "Port 4 (Port 4)"
 
 
-async def test_get_advance_automation_port_resolution_multiple_automations_ambiguous(mock_client):
-    """Two active automations → port_resolution='multiple_automations_ambiguous'."""
+async def test_get_advance_automation_port_resolution_multiple_automations_bitmask(mock_client):
+    """Two active automations → governed_ports decoded from each automation's bitmask.
+
+    Auto A (advId=1) has grouptDevType=4 (Port 3); Auto B (advId=2) has grouptDevType=8
+    (Port 4).  Each automation correctly reports only its own port.
+    port_resolution='resolved' in both cases.
+    """
     two_active = [
         {
             "advId": 1, "advName": "Auto A", "isOn": 1, "onSpeed": 5, "offSpeed": 0,
@@ -6420,10 +6608,18 @@ async def test_get_advance_automation_port_resolution_multiple_automations_ambig
     ]
     mock_client.get_advance_automations.return_value = two_active
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        result = await get_advance_automation("C58ZA", "1")
-    data = json.loads(result)
-    assert data["port_resolution"] == "multiple_automations_ambiguous"
-    assert data["governed_ports"] == []
+        result_a = await get_advance_automation("C58ZA", "1")
+    data_a = json.loads(result_a)
+    assert data_a["port_resolution"] == "resolved"
+    assert len(data_a["governed_ports"]) == 1
+    assert data_a["governed_ports"][0]["port"] == 3
+
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result_b = await get_advance_automation("C58ZA", "2")
+    data_b = json.loads(result_b)
+    assert data_b["port_resolution"] == "resolved"
+    assert len(data_b["governed_ports"]) == 1
+    assert data_b["governed_ports"][0]["port"] == 4
 
 
 async def test_get_advance_automation_port_resolution_error(mock_client):
@@ -6459,6 +6655,189 @@ async def test_get_advance_automation_human_summary_multi_group_no_raw_terms(moc
     data = json.loads(result)
     assert "port_groups" not in data["human_summary"]
     assert "Moderate Airflow" in data["human_summary"]
+
+
+# ============ Issues #149 #150 #152 — bitmask helpers and conflict fix ============
+
+
+def test_find_governing_automation_returns_automation_when_port_in_bitmask():
+    """_find_governing_automation returns the enabled automation whose bitmask covers the port."""
+    automations = _group_automations([
+        {"advId": 10, "advName": "Auto A", "isOn": 1, "runState": 1, "onSpeed": 5,
+         "offSpeed": 0, "grouptDevType": 8, "beginTime": 255, "endTime": 255},
+    ])
+    # grouptDevType=8 = bit 3 = Port 4
+    result = _find_governing_automation(automations, 4)
+    assert result is not None
+    assert result["name"] == "Auto A"
+
+
+def test_find_governing_automation_returns_none_when_port_not_in_bitmask():
+    """_find_governing_automation returns None when port is not in any automation bitmask."""
+    automations = _group_automations([
+        {"advId": 10, "advName": "Auto A", "isOn": 1, "runState": 1, "onSpeed": 5,
+         "offSpeed": 0, "grouptDevType": 8, "beginTime": 255, "endTime": 255},
+    ])
+    # grouptDevType=8 covers Port 4 only; Port 1 (bit 0) is not covered
+    result = _find_governing_automation(automations, 1)
+    assert result is None
+
+
+def test_find_governing_automation_returns_none_when_automation_disabled():
+    """_find_governing_automation returns None when port IS in bitmask but automation disabled."""
+    automations = _group_automations([
+        {"advId": 10, "advName": "Auto A", "isOn": 0, "runState": 0, "onSpeed": 5,
+         "offSpeed": 0, "grouptDevType": 8, "beginTime": 255, "endTime": 255},
+    ])
+    result = _find_governing_automation(automations, 4)
+    assert result is None
+
+
+def test_find_governing_automation_returns_first_match_when_multiple_cover_port():
+    """_find_governing_automation returns the first automation whose bitmask covers the port."""
+    automations = _group_automations([
+        {"advId": 1, "advName": "First", "isOn": 1, "runState": 1, "onSpeed": 3,
+         "offSpeed": 0, "grouptDevType": 4, "beginTime": 255, "endTime": 255},
+        {"advId": 2, "advName": "Second", "isOn": 1, "runState": 1, "onSpeed": 7,
+         "offSpeed": 0, "grouptDevType": 4, "beginTime": 255, "endTime": 255},
+    ])
+    # Both cover Port 3 (bit 2 = 4); first match wins
+    result = _find_governing_automation(automations, 3)
+    assert result is not None
+    assert result["name"] == "First"
+
+
+def test_find_governing_port_group_returns_group_when_port_in_bitmask():
+    """_find_governing_port_group returns the port_group entry covering the port."""
+    automation = {
+        "port_groups": [
+            {"adv_id": 1, "on_speed": 5, "grp_dev_type": 8},   # Port 4
+            {"adv_id": 2, "on_speed": 2, "grp_dev_type": 48},  # Ports 5 and 6
+        ]
+    }
+    pg = _find_governing_port_group(automation, 4)
+    assert pg is not None
+    assert pg["on_speed"] == 5
+
+
+def test_find_governing_port_group_returns_none_when_port_not_in_bitmask():
+    """_find_governing_port_group returns None when port has no matching bitmask entry."""
+    automation = {
+        "port_groups": [
+            {"adv_id": 1, "on_speed": 5, "grp_dev_type": 8},   # Port 4 only
+        ]
+    }
+    pg = _find_governing_port_group(automation, 1)
+    assert pg is None
+
+
+async def test_conflict_response_sub_path_a_break_out_offered(mock_client):
+    """Sub-path A (port in bitmask): 1_break_out offered and speed from matched port_group.
+
+    Port 4 maps to grouptDevType=8 (advId=2179295, on_speed=1 in MOCK_ADVANCE_AUTOMATIONS_LIST).
+    The conflict response should read speed=1, not speed=2 from port_groups[0].
+    """
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_off("C58ZA", port=4, dry_run=False)
+    data = json.loads(result)
+    assert data.get("conflict") == "ADVANCE_AUTOMATION"
+    assert "1_break_out" in data["options"]
+    assert data["options"]["1_break_out"]["tool"] == "break_out_of_automation"
+    assert data["options"]["1_break_out"]["available"] is True
+    # Speed must come from port_groups[1] (grp_dev_type=8, on_speed=1), not port_groups[0]
+    assert "1" in data["human_summary"]
+
+
+async def test_conflict_response_sub_path_a_speed_from_matched_port_group(mock_client):
+    """Sub-path A reads current_auto_speed from the bitmask-matched port_group, not port_groups[0].
+
+    Port 4 is in port_groups[1] (grouptDevType=8, on_speed=1).
+    Port_groups[0] has on_speed=2 (for ports 5&6, grouptDevType=48).
+    The human_summary must show speed 1, not speed 2.
+    """
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_off("C58ZA", port=4, dry_run=False)
+    data = json.loads(result)
+    # human_summary contains "target speed 1" from port_groups[1], not "target speed 2"
+    assert "target speed 1" in data["human_summary"]
+    assert "target speed 2" not in data["human_summary"]
+
+
+async def test_conflict_response_sub_path_b_controller_wide_lock(mock_client):
+    """Sub-path B (port NOT in bitmask): controller-wide lock language, no 1_break_out.
+
+    Port 1 (bit 0) is not covered by MOCK_ADVANCE_AUTOMATIONS_LIST (bits 3,4,5).
+    The response should describe a controller-wide lock and NOT offer 1_break_out.
+    """
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_off("C58ZA", port=1, dry_run=False)
+    data = json.loads(result)
+    assert data.get("conflict") == "ADVANCE_AUTOMATION"
+    assert "1_break_out" not in data["options"]
+    assert "1_disable_automation" in data["options"]
+    assert "controller" in data["human_summary"].lower()
+    assert "Moderate Airflow" in data["human_summary"]
+    # active_automations is still populated even in Sub-path B
+    assert isinstance(data["active_automations"], list)
+    assert len(data["active_automations"]) > 0
+
+
+async def test_get_advance_automation_bitmask_multi_automation(mock_client):
+    """Multi-automation scenario: governed_ports decoded from bitmasks, not isOpenAutomation.
+
+    MOCK_ADVANCE_AUTOMATIONS_LIST "Moderate Airflow" covers ports 4, 5, 6.
+    port_resolution must be 'resolved'.
+    """
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_advance_automation("C58ZA", "1342758")
+    data = json.loads(result)
+    assert data["port_resolution"] == "resolved"
+    port_nums = sorted(gp["port"] for gp in data["governed_ports"])
+    assert port_nums == [4, 5, 6]
+
+
+async def test_get_advance_automation_bitmask_decode_fallback_port_name(mock_client):
+    """Port in bitmask but not in deviceInfo.ports → falls back to 'Port N (Port N)'."""
+    # MOCK_DEVICE_LEGACY has only ports 1 and 2; Moderate Airflow covers 4, 5, 6.
+    # All three should fall back to 'Port N (Port N)'.
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_advance_automation("C58ZA", "1342758")
+    data = json.loads(result)
+    assert data["port_resolution"] == "resolved"
+    for gp in data["governed_ports"]:
+        pnum = gp["port"]
+        assert gp["port_name"] == f"Port {pnum} (Port {pnum})"
+
+
+async def test_get_port_settings_advance_speed_from_matched_port_group(mock_client):
+    """get_port_settings ADVANCE enrichment: automation_on_speed from bitmask-matched group.
+
+    Port 4 (bit 3) maps to grouptDevType=8 (on_speed=1 in MOCK_ADVANCE_AUTOMATIONS_LIST).
+    automation_on_speed must be 1, not 2 (which is port_groups[0].on_speed for ports 5&6).
+    """
+    import copy
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device["deviceInfo"]["ports"].append(
+        {"port": 4, "portName": "Inline Fan", "speak": 1, "portsLoad": 1,
+         "loadState": 1, "curMode": 15, "remainTime": 0}
+    )
+    mock_client.get_devices.return_value = [device]
+    mock_client.get_mode_settings.return_value = {**MOCK_MODE_SETTINGS_BASIC, "modeType": 15}
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_settings("C58ZA", 4)
+    data = json.loads(result)
+    assert data["mode"] == "ADVANCE"
+    assert data["automation_name"] == "Moderate Airflow"
+    # Port 4 maps to port_groups[1] (grouptDevType=8, on_speed=1) not port_groups[0] (on_speed=2)
+    assert data["automation_on_speed"] == 1
 
 
 # ============ Issue #62 — create_advance_automation port parameter ============
