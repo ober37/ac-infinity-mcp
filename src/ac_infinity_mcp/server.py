@@ -1516,8 +1516,8 @@ async def _build_advance_conflict_response(
             ),
             "tool": "break_out_of_automation",
             "instruction": (
-                f"Ask me to release {port_name} (Port {port}) from the '{auto_name}'"
-                " automation so you can control it manually."
+                f"Ask me to release {port_name} from the '{auto_name}' automation"
+                " so you can control it manually."
             ),
             "available": governing.get("enabled", False) or governing.get("run_state", False),
         }
@@ -1527,8 +1527,8 @@ async def _build_advance_conflict_response(
             ),
             "tool": "disable_advance_automation",
             "instruction": (
-                f"Ask me to disable the '{auto_name}' automation — this will release all ports"
-                " it currently controls."
+                f"Ask me to disable the '{auto_name}' automation to release all ports"
+                " on this controller from automation control."
             ),
             "available": True,
         }
@@ -1614,8 +1614,8 @@ async def _build_advance_conflict_response(
             "description": "Force-release this port by re-applying the disable command.",
             "tool": "disable_advance_automation",
             "instruction": (
-                "Ask me to list your automations so we can identify which one is blocking this"
-                " port, then ask me to force-release it."
+                "Ask me to list your automations so I can find the one holding this port,"
+                " then ask me to disable it to force-release the port."
             ),
             "available": True,
         }
@@ -1652,8 +1652,8 @@ async def _build_advance_conflict_response(
             "description": "Find and disable the active automation, then apply your manual change.",
             "tool": "list_advance_automations",
             "instruction": (
-                "Ask me to list your automations so we can identify which one is blocking this"
-                " port, then ask me to disable it and force-release the port."
+                "Ask me to list your automations for this controller so I can identify"
+                " which one is active, then ask me to disable it."
             ),
             "available": True,
         }
@@ -1682,8 +1682,9 @@ async def _build_advance_conflict_response(
         "active_automations": active_automations,
         "co_governed_ports": [],
         "switching_guidance": (
-            "To regain manual control: ask me to disable any active automations, then apply"
-            " your change. To add this port to an automation instead, ask me to create a new one."
+            "To regain manual control: ask me to disable any active automations on this"
+            " controller, then apply your change. To add this port to an automation instead,"
+            " ask me to create or update an automation."
         ),
         "options": options_dict,
     }, indent=2)

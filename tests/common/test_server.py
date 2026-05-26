@@ -5710,7 +5710,7 @@ async def test_build_advance_conflict_response_degraded(mock_client):
     assert data.get("automation_name") is None
     assert data.get("active_automations") == []
     assert "None" not in data["options"]["1_find_and_disable"]["instruction"]
-    assert "Ask me" in data["options"]["1_find_and_disable"]["instruction"]
+    assert "automations" in data["options"]["1_find_and_disable"]["instruction"].lower()
     assert "1_break_out" not in data["options"]
     assert "suggested_reply" in data
 
@@ -5858,7 +5858,7 @@ async def test_conflict_response_all_automations_disabled_uses_all_disabled_path
     data = json.loads(result)
     assert data["automation_name"] is None
     assert data["active_automations"] == []
-    assert "Ask me" in data["options"]["1_re_disable_to_clear"]["instruction"]
+    assert "automations" in data["options"]["1_re_disable_to_clear"]["instruction"].lower()
     assert "suggested_reply" in data
 
 
