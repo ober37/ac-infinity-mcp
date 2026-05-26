@@ -1588,7 +1588,7 @@ async def _build_advance_conflict_response(
         opt2 = {
             "available": False,
             "status": (
-                "This port is not directly governed by any active automation — use option 1 to"
+                "This port is not directly controlled by any active automation — use option 1 to"
                 " disable the automation locking the controller."
             ),
         }
@@ -3264,15 +3264,16 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
             port_list_str = (
                 ", ".join(gp["port_name"] for gp in governed_ports)
                 if governed_ports
-                else "ports (port details unavailable)"
+                else "multiple ports (port list could not be read)"
             )
             schedule_suffix = (
                 f" from {begin_str} to {end_str}{_tz_suffix}"
                 if is_scheduled and begin_str and end_str
                 else ""
             )
+            speed_phrase = " at varying speeds" if governed_ports else ""
             human_summary = (
-                f"'{name}' controls {port_list_str} at varying speeds.{schedule_suffix}"
+                f"'{name}' controls {port_list_str}{speed_phrase}.{schedule_suffix}"
                 f" Currently {state_str}."
             )
 
