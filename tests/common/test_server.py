@@ -3797,7 +3797,7 @@ async def test_get_port_status_advance_mode_via_is_open_automation(mock_client):
     # grouptDevType 48=ports5+6, 8=port4, 4=port3 — none cover port 1.
     assert "automation_name" not in data
     mock_client.get_mode_settings.assert_not_called()
-    mock_client.get_advance_automations.assert_called_once()
+    mock_client.get_advance_automations.assert_called_once_with("1424979258063367506")
 
 
 async def test_get_port_status_genuine_off_no_secondary_call(mock_client):
@@ -3837,7 +3837,7 @@ async def test_get_port_status_advance_heuristic_curmode1_speak_nonzero(mock_cli
     data = json.loads(result)
     assert data["mode"] == "Automation"
     mock_client.get_mode_settings.assert_called_once()
-    mock_client.get_advance_automations.assert_called_once()
+    mock_client.get_advance_automations.assert_called_once_with("1424979258063367506")
 
 
 async def test_get_port_status_advance_heuristic_secondary_call_returns_non_advance(mock_client):
@@ -3857,6 +3857,7 @@ async def test_get_port_status_advance_heuristic_secondary_call_returns_non_adva
         result = await get_port_status("C58ZA", 1)
     data = json.loads(result)
     assert data["mode"] == "OFF"
+    mock_client.get_advance_automations.assert_not_called()
 
 
 async def test_get_port_status_advance_automation_name_resolved(mock_client):
@@ -3898,6 +3899,27 @@ async def test_get_port_status_advance_automation_lookup_fails_graceful(mock_cli
     data = json.loads(result)
     assert data["mode"] == "Automation"
     assert "automation_name" not in data
+
+
+async def test_get_port_status_advance_automation_api_error_graceful(mock_client):
+    """get_advance_automations raises ACInfinityAPIError → swallowed, mode=Automation, no name."""
+    mock_client.get_advance_automations.side_effect = ACInfinityAPIError("503 Service Unavailable")
+    mock_client.get_devices.return_value = [{
+        **MOCK_DEVICE_LEGACY,
+        "deviceInfo": {
+            **MOCK_DEVICE_LEGACY["deviceInfo"],
+            "ports": [
+                {"port": 1, "portName": "Left Fan", "speak": 2, "portsLoad": 1,
+                 "loadState": 1, "curMode": 1, "remainTime": 0, "isOpenAutomation": 1},
+            ],
+        },
+    }]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_status("C58ZA", 1)
+    data = json.loads(result)
+    assert data["mode"] == "Automation"
+    assert "automation_name" not in data
+    assert "error" not in data
 
 
 async def test_get_port_status_advance_automation_auth_error_propagates(mock_client):
