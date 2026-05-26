@@ -3599,7 +3599,7 @@ async def test_get_port_status_success(mock_client):
     assert data["power_level"] == 5
     assert "plug_status" not in data
     assert data["mode"] == "AUTO"        # curMode=3
-    assert data["remain_time_seconds"] == 0
+    assert "remain_time_seconds" not in data
 
 
 async def test_get_port_status_mode_on(mock_client):
@@ -3610,8 +3610,8 @@ async def test_get_port_status_mode_on(mock_client):
     assert data["mode"] == "ON"
 
 
-async def test_get_port_status_remain_time_none_defaults_to_zero(mock_client):
-    """remainTime=None in fixture → remain_time_seconds=0 in output."""
+async def test_get_port_status_remain_time_none_absent_from_output(mock_client):
+    """remainTime=None → remain_time_seconds absent (not a zero value)."""
     mock_client.get_devices.return_value = [{
         **MOCK_DEVICE_LEGACY,
         "deviceInfo": {
@@ -3625,7 +3625,25 @@ async def test_get_port_status_remain_time_none_defaults_to_zero(mock_client):
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_port_status("C58ZA", 1)
     data = json.loads(result)
-    assert data["remain_time_seconds"] == 0
+    assert "remain_time_seconds" not in data
+
+
+async def test_get_port_status_remain_time_positive_included(mock_client):
+    """remainTime=300 → remain_time_seconds=300 present in output."""
+    mock_client.get_devices.return_value = [{
+        **MOCK_DEVICE_LEGACY,
+        "deviceInfo": {
+            **MOCK_DEVICE_LEGACY["deviceInfo"],
+            "ports": [
+                {"port": 1, "portName": "Fan", "speak": 5,
+                 "portsLoad": 1, "loadState": 1, "curMode": 4, "remainTime": 300},
+            ],
+        },
+    }]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_status("C58ZA", 1)
+    data = json.loads(result)
+    assert data["remain_time_seconds"] == 300
 
 
 async def test_get_port_status_load_not_detected(mock_client):

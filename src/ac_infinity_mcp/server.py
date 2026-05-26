@@ -1784,13 +1784,14 @@ async def get_port_status(device_id: str, port: int) -> str:
               "port_name": "Humidifier",
               "power_level": 0,
               "mode": "OFF",
-              "plug_status": "not powered",
-              "remain_time_seconds": 0
+              "plug_status": "not powered"
             }
 
         ``mode`` is one of: OFF, ON, AUTO, TIMER_TO_ON, TIMER_TO_OFF, CYCLE, SCHEDULE, VPD,
         ADVANCE. ``plug_status`` is only present when no current is detected on the port (the
         port is not powered or nothing is connected). It is omitted when the port is running.
+        ``remain_time_seconds`` is only present when a countdown timer is active (value > 0);
+        it is omitted when there is no active timer.
         When ``mode`` is ``ADVANCE``, the port is governed by a named Advance Automation program
         in the AC Infinity app.
 
@@ -1843,8 +1844,10 @@ async def get_port_status(device_id: str, port: int) -> str:
             "port_name": port_data.get("portName", f"Port {port}"),
             "power_level": port_data.get("speak", 0),
             "mode": mode_str,
-            "remain_time_seconds": port_data.get("remainTime") or 0,
         }
+        remain = port_data.get("remainTime") or 0
+        if remain > 0:
+            result["remain_time_seconds"] = remain
         if not port_data.get("loadState", 0) and not port_data.get("speak", 0):
             result["plug_status"] = "not powered"
         if _is_port_empty(port_data, port, device):
