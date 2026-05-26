@@ -3113,7 +3113,10 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
         (with ``mode``: ``"continuous"`` or ``"scheduled"`` per Quirk 21;
         ``begin_time``/``end_time`` as ``"HH:MM"`` or ``null``; optional
         ``schedule_note`` when scheduled mode has no time window configured),
-        port_groups (with human-readable device_type label per group),
+        port_groups (each entry has ``device_type`` listing the actual port names
+        governed by that group, resolved from the ``grouptDevType`` bitmask —
+        e.g. ``"Left Fan (Port 5), Right Fan (Port 6)"``, formatted as
+        ``"Name (Port N)"`` for each bit set; ``"Unknown"`` when bitmask is 0),
         governed_ports (list of ports this automation controls, decoded from
         the automation's port_group bitmasks), port_resolution status
         ("resolved" or "error"), and

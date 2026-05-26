@@ -2199,7 +2199,7 @@ Get full detail for a single Advance Automation.
     {
       "adv_id": 12345,
       "on_speed": 5,
-      "device_type": "Inline Fan"
+      "device_type": "Left Fan (Port 5), Right Fan (Port 6)"
     }
   ],
   "governed_ports": [
@@ -2240,7 +2240,7 @@ Get full detail for a single Advance Automation.
 - `schedule.mode` — `"scheduled"` when `onTimeSwitch=0` AND real `begin_time`/`end_time` values are present (the "Continuous 24H/7D" app toggle is OFF, so the time window applies); `"continuous"` when `onTimeSwitch=1` (toggle ON, runs 24/7) or when times are sentinel values (255). See Quirk 21.
 - `schedule.begin_time` / `schedule.end_time` — `null` for continuous mode; `"HH:MM"` for scheduled mode with a time window; `null` for scheduled mode with no window configured
 - `schedule.schedule_note` — present only in scheduled mode with no time window; value: `"scheduled mode selected but no time window is configured"`
-- `port_groups` — each group has its own speed settings; `device_type` is a human-readable label (e.g. `"Inline Fan"`, `"Clip Fan"`, `"Mixed Speed Group"`) derived from the `grouptDevType` integer
+- `port_groups` — each group has its own speed settings; `device_type` lists the actual port names governed by that group, resolved from the `grouptDevType` bitmask (e.g. `"Left Fan (Port 5), Right Fan (Port 6)"`). Each port is formatted as `"Name (Port N)"`. When the bitmask covers no ports, `"Unknown"` is returned. Port names are sourced from `deviceInfo.ports` via the same `port_name_map` used for `governed_ports`.
 - `governed_ports` — list of `{"port": N, "port_name": "Name (Port N)"}` objects identifying which ports this automation controls; decoded from the `grouptDevType` bitmask of each of the automation's port groups (Port N = bit N-1); port names sourced from `deviceInfo.ports` (Quirk 18)
 - `port_resolution` — one of:
   - `"resolved"` — `governed_ports` decoded successfully from bitmasks; accurate for this automation regardless of whether other automations are simultaneously active
