@@ -3961,6 +3961,27 @@ async def test_get_port_status_advance_automation_empty_list(mock_client):
     assert "automation_name" not in data
 
 
+async def test_get_port_status_advance_missing_dev_id(mock_client):
+    """ADVANCE port with devId absent → mode is Automation, no automation lookup attempted."""
+    mock_client.get_devices.return_value = [{
+        **MOCK_DEVICE_LEGACY,
+        "devId": None,
+        "deviceInfo": {
+            **MOCK_DEVICE_LEGACY["deviceInfo"],
+            "ports": [
+                {"port": 1, "portName": "Left Fan", "speak": 2, "portsLoad": 1,
+                 "loadState": 1, "curMode": 1, "remainTime": 0, "isOpenAutomation": 1},
+            ],
+        },
+    }]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_status("C58ZA", 1)
+    data = json.loads(result)
+    assert data["mode"] == "Automation"
+    assert "automation_name" not in data
+    mock_client.get_advance_automations.assert_not_called()
+
+
 async def test_get_port_status_curmode_not_in_mode_labels_secondary_call(mock_client):
     """curMode not in _MODE_LABELS (e.g. None) triggers secondary call to verify ADVANCE."""
     mock_client.get_devices.return_value = [{

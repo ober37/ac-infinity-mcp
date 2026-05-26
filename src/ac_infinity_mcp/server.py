@@ -1841,7 +1841,7 @@ async def get_port_status(device_id: str, port: int) -> str:
             mode_str = _decode_mode(cur_mode_int)
 
         automation_name: str | None = None
-        if mode_str == "ADVANCE":
+        if mode_str == "ADVANCE" and dev_id:
             try:
                 raw_adv = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
                 governing = _find_governing_automation(_group_automations(raw_adv), port)
@@ -1854,6 +1854,8 @@ async def get_port_status(device_id: str, port: int) -> str:
                     device_id,
                     type(exc).__name__,
                 )
+            mode_str = "Automation"
+        elif mode_str == "ADVANCE":
             mode_str = "Automation"
 
         result: dict = {
