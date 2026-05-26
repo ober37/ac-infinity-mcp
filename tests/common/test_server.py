@@ -2201,6 +2201,32 @@ async def test_get_port_activity_report_devtype18_custom_toggle_ghost_excluded(m
     )
 
 
+@pytest.mark.asyncio
+async def test_get_port_activity_report_devtype18_excluded_default_name_no_redundancy(mock_client):
+    """devType=18 excluded port with API-default name shows 'Port N', not 'Port N (Port N)'."""
+    device = _make_devtype18_device([
+        {"port": 1, "portName": "Port 1", "portsLoad": 0, "loadType": 0},
+    ])
+    mock_client.get_devices.return_value = [device]
+    readings = _make_devtype18_port_readings(1, "Port 1", speed=1, on_count=1, total=96)
+    mock_client.get_historical_data.return_value = [{}] * 96
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        val = readings[idx % len(readings)]
+        idx += 1
+        return val
+
+    mock_client.parse_history_record.side_effect = _side_effect
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 3)
+    data = json.loads(result)
+    assert data["ports_excluded_count"] == 1
+    assert "no activity detected" in data["human_summary"]
+    assert "Port 1 (Port 1)" not in data["human_summary"]
+
+
 async def test_get_port_activity_report_devtype18_custom_variable_speed_kept(mock_client):
     """#143: devType=18 custom-named port with avg_speed=5.0 (non-toggle) is kept by Rule G.
 
@@ -4367,6 +4393,37 @@ MOCK_HUMI_DRY = {
 }
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "call_fn,call_args,mock_return",
+    [
+        (set_port_off, ("C58ZA", 7), MOCK_SET_PORT_OFF_DRY),
+        (set_port_speed, ("C58ZA", 7, 3), MOCK_SET_PORT_MODE_DRY),
+        (set_port_mode, ("C58ZA", 7, "ON"), MOCK_SET_PORT_MODE_DRY),
+        (set_vpd_automation, ("C58ZA", 7, 1.4), MOCK_VPD_DRY),
+        (set_temperature_automation, ("C58ZA", 7, 20.0, 28.0), MOCK_TEMP_DRY),
+        (set_humidity_automation, ("C58ZA", 7, 50.0, 70.0), MOCK_HUMI_DRY),
+    ],
+    ids=["off", "speed", "mode", "vpd", "temp", "humi"],
+)
+async def test_write_tool_action_default_name_no_redundancy(
+    mock_client, call_fn, call_args, mock_return
+):
+    """All write tools omit '(Port N)' suffix when portName equals the API default 'Port N'."""
+    import copy
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device["deviceInfo"]["ports"].append(
+        {"port": 7, "portName": "Port 7", "speak": 0, "portsLoad": 0,
+         "loadState": 0, "curMode": 1, "remainTime": None}
+    )
+    mock_client.get_devices.return_value = [device]
+    mock_client.set_port_mode.return_value = mock_return
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await call_fn(*call_args)
+    data = json.loads(result)
+    assert "(Port 7)" not in data.get("action", "")
+
+
 async def test_set_humidity_automation_dry_run(mock_client):
     mock_client.set_port_mode.return_value = MOCK_HUMI_DRY
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
@@ -5642,6 +5699,31 @@ async def test_break_out_not_advance_port_default_name_no_redundancy(mock_client
     # Negative: no double-Port stuttering
     assert "Port Port" not in data["info"]
     assert "(Port" not in data["info"]
+
+
+@pytest.mark.asyncio
+async def test_break_out_co_port_sequence_default_name_no_redundancy(mock_client):
+    """break_out_of_automation sequence steps use 'Port N' for default-named co-ports."""
+    import copy
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    # Override port 2's portName to default "Port 2" (MOCK_DEVICE_LEGACY has "Exhaust Fan")
+    for p in device["deviceInfo"]["ports"]:
+        if p["port"] == 2:
+            p["portName"] = "Port 2"
+    mock_client.get_devices.return_value = [device]
+    mock_client.get_mode_settings.return_value = {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 5}
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await break_out_of_automation("C58ZA", port=1, dry_run=True)
+    data = json.loads(result)
+    assert data["dry_run"] is True
+    # Port 2 should appear as a co-port lock step
+    lock_steps = [s for s in data["sequence"] if "lock" in s["action"]]
+    assert len(lock_steps) >= 1
+    port2_step = next((s for s in lock_steps if "Port 2" in s["action"]), None)
+    assert port2_step is not None, "Expected a lock step for Port 2"
+    # Default name: no '(Port 2)' suffix in the action string
+    assert "(Port 2)" not in port2_step["action"]
 
 
 async def test_break_out_dry_run(mock_client):

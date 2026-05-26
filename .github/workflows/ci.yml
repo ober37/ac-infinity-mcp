@@ -48,11 +48,11 @@ jobs:
           AC_INFINITY_PASSWORD: ""
 
       - name: Security audit — pip-audit
-        # PYSEC-2025-183 is an upstream `mcp` package CVE that does not affect
-        # this server's stdio-only transport. Rationale + re-evaluation date
-        # documented in docs/SECURITY-RISKS.md. Do not blanket-add new CVEs
-        # here — file an issue and document the exposure first.
-        run: pip-audit --ignore-vuln PYSEC-2025-183
+        # PYSEC-2025-183: upstream `mcp` CVE, stdio-only transport unaffected.
+        # PYSEC-2026-161: starlette CVE (transitive via mcp), stdio-only transport
+        #   means affected request-handling paths are never reached.
+        # Rationale + re-evaluation dates in docs/SECURITY-RISKS.md.
+        run: pip-audit --ignore-vuln PYSEC-2025-183 --ignore-vuln PYSEC-2026-161
 
   docker:
     name: "Docker build"
