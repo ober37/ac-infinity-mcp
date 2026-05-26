@@ -4441,6 +4441,127 @@ async def test_get_port_settings_advance_mode_returns_early(mock_client):
     assert mock_client.get_advance_automations.call_count == 1
 
 
+async def test_get_port_settings_empty_port_stale_note(mock_client):
+    """Empty port with stale humidity settings: human_summary and note are staleness-aware."""
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device["deviceInfo"]["ports"].append(
+        {"port": 3, "portName": "Port 3", "speak": 0, "portsLoad": 0,
+         "loadState": 0, "curMode": 3, "remainTime": 0}
+    )
+    mock_client.get_devices.return_value = [device]
+    settings = {**MOCK_MODE_SETTINGS_BASIC, "activeLh": 1, "devLh": 60, "devHh": 100}
+    mock_client.get_mode_settings.return_value = settings
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_settings("C58ZA", 3)
+    data = json.loads(result)
+    assert "stale" in data["human_summary"]
+    assert "stale" in data["note"]
+    assert "Humidity automation" not in data["human_summary"]
+    assert data["humidity_range_pct"] == {"min_pct": 60, "max_pct": 100}  # raw data preserved
+
+
+async def test_get_port_settings_empty_port_cycle_stale_note(mock_client):
+    """Empty port with stale cycle settings: human_summary overridden, raw fields preserved."""
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device["deviceInfo"]["ports"].append(
+        {"port": 3, "portName": "Port 3", "speak": 0, "portsLoad": 0,
+         "loadState": 0, "curMode": 1, "remainTime": 0}
+    )
+    mock_client.get_devices.return_value = [device]
+    mock_client.get_mode_settings.return_value = MOCK_MODE_SETTINGS_BASIC  # has cycle_on=300
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_settings("C58ZA", 3)
+    data = json.loads(result)
+    assert "stale" in data["human_summary"]
+    assert "OFF mode" not in data["human_summary"]
+    assert data["cycle_on_seconds"] == 300  # raw data preserved
+
+
+async def test_get_port_settings_connected_port_no_stale_note(mock_client):
+    """Custom-named port is assumed connected — no staleness note or override."""
+    mock_client.get_mode_settings.return_value = MOCK_MODE_SETTINGS_BASIC
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_settings("C58ZA", 1)  # port 1 = "Intake Fan", portsLoad=1
+    data = json.loads(result)
+    assert "note" not in data
+    assert "stale" not in data.get("human_summary", "")
+
+
+async def test_get_port_settings_advance_empty_port_human_summary_unchanged(mock_client):
+    """ADVANCE mode + empty port: human_summary is NOT overridden with stale message."""
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device["deviceInfo"]["ports"].append(
+        {"port": 3, "portName": "Port 3", "speak": 0, "portsLoad": 0,
+         "loadState": 0, "curMode": 15, "remainTime": 0}
+    )
+    mock_client.get_devices.return_value = [device]
+    mock_client.get_mode_settings.return_value = {
+        **MOCK_MODE_SETTINGS_BASIC, "modeType": 15
+    }
+    mock_client.get_advance_automations.return_value = []
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_settings("C58ZA", 3)
+    data = json.loads(result)
+    assert data["mode"] == "ADVANCE"
+    # human_summary should still describe the automation state, not the stale message
+    assert "stale" not in data["human_summary"]
+    assert (
+        "automations are disabled" in data["human_summary"]
+        or "automation" in data["human_summary"].lower()
+    )
+    # note should contain the staleness advisory
+    assert "stale" in data["note"]
+
+
+async def test_get_port_settings_advance_governing_found_empty_port_human_summary_unchanged(
+    mock_client,
+):
+    """ADVANCE mode + governing automation found + empty port: human_summary preserved."""
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device["deviceInfo"]["ports"].append(
+        {"port": 4, "portName": "Port 4", "speak": 3, "portsLoad": 0,
+         "loadState": 0, "curMode": 15, "remainTime": 0}
+    )
+    mock_client.get_devices.return_value = [device]
+    mock_client.get_mode_settings.return_value = {
+        **MOCK_MODE_SETTINGS_BASIC, "modeType": 15
+    }
+    # MOCK_ADVANCE_AUTOMATIONS_LIST has grouptDevType=8 (port 4 bitmask)
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_settings("C58ZA", 4)
+    data = json.loads(result)
+    assert data["mode"] == "ADVANCE"
+    # human_summary preserved — should reference the governing automation
+    assert "stale" not in data["human_summary"]
+    assert data["automation_name"] is not None
+    # note should contain the staleness advisory
+    assert "stale" in data["note"]
+
+
+async def test_get_port_settings_advance_degraded_empty_port_note_concatenated(mock_client):
+    """ADVANCE mode + degraded secondary call + empty port: note concatenates both messages."""
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device["deviceInfo"]["ports"].append(
+        {"port": 3, "portName": "Port 3", "speak": 0, "portsLoad": 0,
+         "loadState": 0, "curMode": 15, "remainTime": 0}
+    )
+    mock_client.get_devices.return_value = [device]
+    mock_client.get_mode_settings.return_value = {
+        **MOCK_MODE_SETTINGS_BASIC, "modeType": 15
+    }
+    mock_client.get_advance_automations.side_effect = ACInfinityAPIError("fail")
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_settings("C58ZA", 3)
+    data = json.loads(result)
+    assert data["mode"] == "ADVANCE"
+    note = data["note"]
+    # Both degraded and stale messages must be present
+    assert "automation" in note.lower()  # from degraded: "Could not fetch automation details"
+    assert "stale" in note               # from empty-port stale advisory
+    # human_summary should NOT be overridden with stale message
+    assert "stale" not in data["human_summary"]
+
+
 # ============ _parse_schedule_time ============
 
 def test_parse_schedule_time_valid():
