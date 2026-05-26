@@ -1174,6 +1174,37 @@ and in the post-write response loop.
 
 ---
 
+### Quirk 26 — Empty-port detection: `portName == "Port N"` + `portsLoad == 0`
+
+**Background (issue #165):** When a user asks to control or inspect a port that has nothing
+plugged in, the server previously responded with a confident action (write) or settings read
+with no indication that the target was empty. This caused confusion when users misidentified a
+port number.
+
+**Detection signal:** A port is considered "empty" (nothing connected) when:
+1. The `portName` matches the API-default pattern `"Port N"` (i.e. the grower has not custom-named it), AND
+2. `portsLoad == 0` (no power draw detected), OR the device `devType` is in `{18, 22}` — see Quirk 24.
+
+**Custom-named ports are assumed connected.** If a grower named a port, something is plugged in.
+
+**devType=18 and devType=22 exception:** Because `portsLoad` is always `0` on these devices
+(Quirk 24), the detection relies solely on the default-name signal. A default-named port on a
+devType=18 (8T4TC) or devType=22 (Q0KT4) device is always flagged as possibly empty.
+
+**Affected tools:**
+- **Write tools** (7): `set_port_on`, `set_port_off`, `set_port_speed`, `set_port_mode`,
+  `set_vpd_automation`, `set_temperature_automation`, `set_humidity_automation` — add `warning` field
+- **Read tools** (2): `get_port_status`, `get_port_settings` — add `note` field
+- **Excluded:** `get_port_activity_report` already has its own ghost-port filter (Rules A–F)
+
+**Behaviour:** The warning/note is **advisory only** — it does not block writes (including
+`dry_run=False` live writes). The grower is shown the advisory and can confirm or redirect.
+
+**Code location:** `server._is_port_empty()` helper; called after the read-before-write fetch in
+each affected tool.
+
+---
+
 ## v2.0 API Endpoints Reference
 
 All endpoints below use the base URL `http://www.acinfinityserver.com/api` and require
@@ -1573,6 +1604,7 @@ Get the live operational status of a single port. Reads real-time fields from
 - `load_detected` — `true` when a device is physically plugged into the port (`loadState=1`)
 - `mode` — one of: `OFF`, `ON`, `AUTO`, `VPD`, `TIMER_TO_ON`, `TIMER_TO_OFF`, `CYCLE`, `SCHEDULE`
 - `remain_time_seconds` — countdown timer seconds from `remainTime` field; `0` when no active timer
+- `note` *(optional)* — present when the port appears to have nothing connected (see "Empty-port detection" below). Example: `"Port 7 doesn't appear to have anything connected. If you meant a different port, let me know which one."`
 
 ---
 
@@ -1694,6 +1726,7 @@ Get the full automation configuration for a port from `/api/dev/getdevModeSettin
 - `human_summary` — grower-readable description of the ADVANCE state; always present
 - `vpd_target_kpa`, `temp_range`, `humidity_range_pct`, `schedule_window`, cycle/timer fields — all `null` in ADVANCE mode
 - When the secondary automation lookup fails (API error), a `note` field is added: `"Could not fetch automation details. Use list_advance_automations to view active automations."`
+- When the port appears to have nothing connected (empty-port detection), a `note` field is also added with the empty-port advisory message. If both conditions apply, both messages are concatenated in the same `note` field.
 
 **Non-ADVANCE field notes:**
 - `vpd_target_kpa` — non-null only when VPD automation active; decoded as `targetVpd ÷ 10` (Quirk 4 analogue)
@@ -1752,6 +1785,12 @@ time of the call, the response includes an additional `warning` field:
 The speed is stored in the controller's settings but the port does not activate. Ask Claude
 to switch the port to ON mode to bring it up at the stored speed.
 
+**Empty-port warning:** All 7 write tools (`set_port_on`, `set_port_off`, `set_port_speed`,
+`set_port_mode`, `set_vpd_automation`, `set_temperature_automation`, `set_humidity_automation`)
+include a `warning` field when the target port appears to have nothing connected. When both the
+OFF-mode condition and the empty-port condition apply simultaneously (on `set_port_speed`),
+both warning messages are concatenated in the same `warning` field.
+
 **AI+ note:** `dry_run=True` is supported. `dry_run=False` returns an unsupported error — see Quirk 14.
 
 ---
@@ -1768,7 +1807,7 @@ Uses read-before-write.
 | `port` | `int` | 1-based port number |
 | `dry_run` | `bool` | Default `True` — returns payload without writing |
 
-**Response:** Same structure as `set_port_speed` without the `speed` field; `action` uses the port's name and number, e.g. `"turn Intake Fan (Port 1) on"` (or `"turn Port 1 on"` when no custom name is configured).
+**Response:** Same structure as `set_port_speed` without the `speed` field; `action` uses the port's name and number, e.g. `"turn Intake Fan (Port 1) on"` (or `"turn Port 1 on"` when no custom name is configured). Includes a `warning` field when the port appears to have nothing connected (Quirk 26).
 
 ---
 
@@ -1783,7 +1822,7 @@ Turn a port off (`onSpead=0`). Uses read-before-write.
 | `port` | `int` | 1-based port number |
 | `dry_run` | `bool` | Default `True` — returns payload without writing |
 
-**Response:** Same structure as `set_port_speed` without the `speed` field; `action` uses the port's name and number, e.g. `"turn Intake Fan (Port 1) off"` (or `"turn Port 1 off"` when no custom name is configured).
+**Response:** Same structure as `set_port_speed` without the `speed` field; `action` uses the port's name and number, e.g. `"turn Intake Fan (Port 1) off"` (or `"turn Port 1 off"` when no custom name is configured). Includes a `warning` field when the port appears to have nothing connected (Quirk 26).
 
 ---
 
