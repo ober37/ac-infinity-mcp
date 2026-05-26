@@ -1114,13 +1114,19 @@ alone: `transitions == 0` AND `uptime_pct == 100.0` AND all running speeds == 1.
 `loadType`-based confirmation is also skipped for devType=18 and devType=22 because
 `loadType` is similarly unreliable on these devices (Issue #126).
 
-**Note behavior (fixes #136):** A device-level Note about missing load data is emitted in
-`human_summary` whenever the result is non-empty and the device is devType=18 or devType=22
-— regardless of whether any port has the `api_constant_speed` caveat. The Note text reads:
-"ON/OFF state is the only reliable activity indicator — history-based runtime data is not
-available for this controller type." Previously the Note was suppressed when all ports had
-`api_constant_speed` quality; the guard is now `if dev_type in _ZERO_LOAD_DEV_TYPES:`
-(fires for any non-empty result on these devices).
+**Note behavior (fixes #136, updated #151):** A device-level Note about missing load data is
+emitted in `human_summary` whenever the result is non-empty and the device is **devType=22
+only** — regardless of whether any port has the `api_constant_speed` caveat. The Note text
+reads: "This controller does not report power draw for individual ports. ON/OFF state is the
+only reliable activity indicator — history-based runtime data is not available for this
+controller type."
+
+devType=18 (UIS 69 Pro+) no longer emits this Note. Active ports on devType=18 produce real
+runtime data in the historical records — `on_hours` and `uptime_pct` reflect genuine
+activity, making the Note misleading when shown alongside those figures. For devType=18,
+runtime data is reliable even though `portsLoad` is always 0 (the load field is simply not
+populated by that firmware). The implementation guard changed from
+`if dev_type in _ZERO_LOAD_DEV_TYPES:` to `if dev_type == 22:` for the Note emission path.
 
 **Detection:**
 
@@ -1532,7 +1538,7 @@ and the report is still returned.
 - `avg_speed_when_running` — average `onSpead` value (1–10) across on-readings with non-zero speed
 - `uptime_pct` — `on_hours / (on_hours + off_hours) * 100`, rounded to 1 decimal
 - `peak_hour_local` — device-local time string with peak date, always including the calendar date for disambiguation across multi-day windows (e.g. "4:00 PM CDT (peak on May 20)"); `null` when port never ran (always_off case). Uses `astimezone()` for full DST-aware conversion; sub-hour UTC offsets (UTC+5:30) are handled correctly. Falls back to UTC when `zoneId` is absent (Quirk 23). Computed via weighted median of hourly activity slots — prevents a single-reading nibble from inflating peak hour to an off-peak slot (fixes #112). Specifically: all on-readings are bucketed by `(date, hour)` UTC slot; the median slot (by reading count) is selected as peak, so high-frequency hours dominate over isolated blips.
-- `data_quality` — Internal classification field used to generate `human_summary` caveat lines; **not present in the JSON output** (stripped before serialization). Internally: `null` for ports with reliable history; `"api_constant_speed"` for toggle hardware (heaters, lights, humidifiers — loadType 4 or 128) where the AC Infinity API records constant speed=1 regardless of actual runtime; `"no_load_signal"` for ports on devType=18/22 devices where load data is absent. The effects of these classifications are visible only via `human_summary`: toggle-hardware ports produce `▎`-prefixed caveat lines grouped by current ON/OFF state, e.g. "▎ Currently ON: Heater (Port 2)." or "▎ Currently OFF: Humidifier (Port 3)." — all ON ports in one line, all OFF ports in another. No_load_signal ports produce a device-level Note: "ON/OFF state is the only reliable activity indicator — history-based runtime data is not available for this controller type." Do not quote `on_hours` or `uptime_pct` for ports with a `▎` caveat — relay the caveat text verbatim.
+- `data_quality` — Internal classification field used to generate `human_summary` caveat lines; **not present in the JSON output** (stripped before serialization). Internally: `null` for ports with reliable history; `"api_constant_speed"` for toggle hardware (heaters, lights, humidifiers — loadType 4 or 128) where the AC Infinity API records constant speed=1 regardless of actual runtime; `"no_load_signal"` for ports on devType=18/22 devices where load data is absent. The effects of these classifications are visible only via `human_summary`: toggle-hardware ports produce `▎`-prefixed caveat lines grouped by current ON/OFF state, e.g. "▎ Currently ON: Heater (Port 2)." or "▎ Currently OFF: Humidifier (Port 3)." — all ON ports in one line, all OFF ports in another. A device-level Note about missing power-draw data is emitted **only for devType=22** (Q0KT4 Genetics Lab) — devType=18 (UIS 69 Pro+) does not emit this Note because its active ports produce reliable runtime data in historical records even though `portsLoad` is always 0. Do not quote `on_hours` or `uptime_pct` for ports with a `▎` caveat — relay the caveat text verbatim.
 - `ports_excluded_count` — number of ports removed by the ghost-port filter (see Quirk 22). Capped at `devPortCount` when the device's physical port count is known (fixes over-counting on sub-8-port devices; Issue #129). On devices where `devPortCount` is absent or zero, no cap is applied and the count may reflect all 8 history slots. Do not repeat this count in prose when presenting `human_summary` to a grower.
 - `human_summary` — plain-English activity summary. The preamble varies by device type: on standard devices the preamble is "Analyzed N days (date range) of activity across M active port(s)."; on devType=18/22 zero-load devices the preamble is "Analyzed N days (date range) across M port(s)." (no "active" qualifier, since load data is absent). Includes an exclusion note when `ports_excluded_count > 0`: on zero-load devices the note includes port names, e.g. "N port(s) excluded (no activity detected): Name (Port N)."; on standard devices it says "N port(s) excluded (no activity detected)." or "N port(s) excluded (no power detected)." depending on whether port names are available. Includes `▎`-prefixed caveat lines for toggle-hardware ports grouped by ON/OFF state. When `ports` is empty and `ports_excluded_count > 0`, summarizes the no-activity result with the exclusion count (e.g., "No active port activity was detected over the past 7 day(s). 2 ports excluded (no power detected)."). When `ports` is empty and `ports_excluded_count == 0`, includes a troubleshooting explanation (devices off, unplugged, or no scheduled activity). Relay the caveat text for `data_quality = "api_constant_speed"` ports verbatim — do not estimate runtime from `on_hours`.
 
@@ -1716,7 +1722,7 @@ All 77 mode-setting fields are preserved; only `onSpead` is updated.
 **Response:**
 ```json
 {
-  "action": "set port 2 speed to 5",
+  "action": "set Exhaust Fan (Port 2) speed to 5",
   "device_id": "C58ZA",
   "port": 2,
   "speed": 5,
@@ -1732,19 +1738,19 @@ time of the call, the response includes an additional `warning` field:
 
 ```json
 {
-  "action": "set port 3 speed to 5",
+  "action": "set Left Fan (Port 3) speed to 5",
   "device_id": "8T4TC",
   "port": 3,
   "speed": 5,
   "dry_run": false,
   "controller_type": "legacy",
   "sent": true,
-  "warning": "Left Fan (Port 3) is currently in OFF mode — speed was stored but the port will not run until the mode is changed to ON. Call set_port_mode with mode='ON' to activate it."
+  "warning": "Left Fan (Port 3) is currently in OFF mode — speed was stored but the port will not run until the mode is changed to ON. To activate it, ask me to switch this port to ON mode."
 }
 ```
 
-The speed is stored in the controller's settings but the port does not activate. Call
-`set_port_mode(device_id, port, mode="ON")` to bring the port up at the stored speed.
+The speed is stored in the controller's settings but the port does not activate. Ask Claude
+to switch the port to ON mode to bring it up at the stored speed.
 
 **AI+ note:** `dry_run=True` is supported. `dry_run=False` returns an unsupported error — see Quirk 14.
 
@@ -1762,7 +1768,7 @@ Uses read-before-write.
 | `port` | `int` | 1-based port number |
 | `dry_run` | `bool` | Default `True` — returns payload without writing |
 
-**Response:** Same structure as `set_port_speed` without the `speed` field; `action` is `"turn port N on"`.
+**Response:** Same structure as `set_port_speed` without the `speed` field; `action` uses the port's name and number, e.g. `"turn Intake Fan (Port 1) on"` (or `"turn Port 1 on"` when no custom name is configured).
 
 ---
 
@@ -1777,7 +1783,7 @@ Turn a port off (`onSpead=0`). Uses read-before-write.
 | `port` | `int` | 1-based port number |
 | `dry_run` | `bool` | Default `True` — returns payload without writing |
 
-**Response:** Same structure as `set_port_speed` without the `speed` field; `action` is `"turn port N off"`.
+**Response:** Same structure as `set_port_speed` without the `speed` field; `action` uses the port's name and number, e.g. `"turn Intake Fan (Port 1) off"` (or `"turn Port 1 off"` when no custom name is configured).
 
 ---
 
@@ -1802,7 +1808,7 @@ Also sets `vpdSettingMode=1`, `targetVpdSwitch=1`, `atType=8`.
 **Response:**
 ```json
 {
-  "action": "set port 1 VPD automation to 1.4 kPa",
+  "action": "set Exhaust Fan (Port 1) VPD automation to 1.4 kPa",
   "device_id": "C58ZA",
   "port": 1,
   "target_vpd_kpa": 1.4,
@@ -1837,7 +1843,7 @@ Also sets `activeLt=1`, `activeHt=1`, `atType=3`. (Quirk 23)
 **Response:**
 ```json
 {
-  "action": "set port 1 temperature automation 20–26°C",
+  "action": "set Exhaust Fan (Port 1) temperature automation 20–26°C",
   "device_id": "C58ZA",
   "port": 1,
   "min_temp": 20.0,
@@ -1872,7 +1878,7 @@ Also sets `activeLh=1`, `activeHh=1`, `atType=3`.
 **Response:**
 ```json
 {
-  "action": "set port 1 humidity automation 40–60%",
+  "action": "set Exhaust Fan (Port 1) humidity automation 40–60%",
   "device_id": "C58ZA",
   "port": 1,
   "min_rh": 40.0,
@@ -1920,7 +1926,7 @@ supported. For setting automation targets alongside the mode, prefer the dedicat
 **Response:**
 ```json
 {
-  "action": "set port 1 mode to CYCLE",
+  "action": "set Exhaust Fan (Port 1) mode to CYCLE",
   "device_id": "C58ZA",
   "port": 1,
   "mode": "CYCLE",

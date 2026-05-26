@@ -900,8 +900,10 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         effects are visible only in human_summary: toggle hardware (heaters, lights,
         humidifiers — loadType 4 or 128 on standard devices, or pattern-detected on
         devType=18/22 where loadType is unreliable) produces a ▎-prefixed caveat line;
-        no_load_signal ports (devType=18 UIS 69 Pro+, devType=22 Q0KT4 Genetics Lab)
-        produce a device-level Note about missing power-draw data.
+        devType=22 (Q0KT4 Genetics Lab) produces a device-level Note about missing
+        power-draw data. devType=18 (UIS 69 Pro+) does NOT emit this Note — its active
+        ports produce reliable runtime data in historical records even though portsLoad
+        is always 0.
         ports_excluded_count is the number of ports removed by the ghost-port filter,
         capped at devPortCount when the device's physical port count is known (prevents
         over-counting on sub-8-port devices; unknown/zero devPortCount means no cap).
@@ -931,7 +933,7 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
 
         All ports listed under the main runtime sentences have reliable timing data
         and should be presented normally. When a device-level Note about missing load
-        data appears in human_summary (devType=18/22 devices), relay it once — do not
+        data appears in human_summary (devType=22 devices only), relay it once — do not
         add further caveats.
 
     Presentation guidance:
@@ -2008,14 +2010,14 @@ async def set_port_speed(
         sent, and payload (when dry_run=True).
 
         When the port is in OFF mode (atType=0 or atType=1) at call time, the
-        response also includes a ``warning`` field advising the grower to call
-        set_port_mode with mode='ON' to activate the port. The speed is stored
+        response also includes a ``warning`` field telling the grower to ask
+        Claude to switch the port to ON mode to activate it. The speed is stored
         on the controller but the port will not run until the mode is changed.
 
         Example (dry_run=True)::
 
             {
-              "action": "set port 2 speed to 5",
+              "action": "set Exhaust Fan (Port 2) speed to 5",
               "device_id": "C58ZA",
               "port": 2,
               "speed": 5,
