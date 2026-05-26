@@ -1586,7 +1586,7 @@ Get the live operational status of a single port. Reads real-time fields from
 | `device_id` | `str` | Device code from `discover_devices` (e.g. `"C58ZA"`) |
 | `port` | `int` | 1-based port number |
 
-**Response:**
+**Response (port off, unpowered):**
 ```json
 {
   "device_id": "C58ZA",
@@ -1594,16 +1594,38 @@ Get the live operational status of a single port. Reads real-time fields from
   "port_name": "Humidifier",
   "power_level": 0,
   "mode": "OFF",
-  "plug_status": "not powered",
-  "remain_time_seconds": 0
+  "plug_status": "not powered"
+}
+```
+
+**Response (port running — no plug_status, no remain_time_seconds):**
+```json
+{
+  "device_id": "C58ZA",
+  "port": 4,
+  "port_name": "Filter",
+  "power_level": 5,
+  "mode": "AUTO"
+}
+```
+
+**Response (port in timer countdown):**
+```json
+{
+  "device_id": "C58ZA",
+  "port": 2,
+  "port_name": "Intake Fan",
+  "power_level": 0,
+  "mode": "TIMER_TO_ON",
+  "remain_time_seconds": 3600
 }
 ```
 
 **Field notes:**
 - `power_level` — actual current power level 0–10 from `speak` API field
-- `plug_status` — `"not powered"` when no current is detected on the port (`loadState=0`); field is absent when the port is running
-- `mode` — one of: `OFF`, `ON`, `AUTO`, `VPD`, `TIMER_TO_ON`, `TIMER_TO_OFF`, `CYCLE`, `SCHEDULE`
-- `remain_time_seconds` — countdown timer seconds from `remainTime` field; `0` when no active timer
+- `plug_status` *(conditional)* — `"not powered"` when BOTH `loadState == 0` AND `speak == 0`; field is **omitted entirely** when the port is running. Indicates the port is not drawing power — either off by design or nothing connected.
+- `mode` — one of: `OFF`, `ON`, `AUTO`, `VPD`, `TIMER_TO_ON`, `TIMER_TO_OFF`, `CYCLE`, `SCHEDULE`, `ADVANCE`
+- `remain_time_seconds` *(conditional)* — countdown timer seconds remaining from `remainTime` API field; **omitted entirely** when no timer is active (value would be 0). Only present when a TIMER_TO_ON or TIMER_TO_OFF countdown is running.
 - `note` *(optional)* — present when the port appears to have nothing connected (see "Empty-port detection" below). Example: `"Port 7 doesn't appear to have anything connected. If you meant a different port, let me know which one."`
 
 ---
