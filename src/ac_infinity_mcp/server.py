@@ -1563,26 +1563,25 @@ async def _build_advance_conflict_response(
         # port group, so break_out_of_automation is not applicable.
         auto_name = None
         auto_id = None
+        _b_name = active_automations[0]["name"] if active_automations else "an active automation"
         summary = (
-            "An active Advance Automation is locking this controller from manual control."
+            f"The '{_b_name}' automation is locking this controller from manual control."
             " Your change requires resolving this conflict first."
         )
         human_summary = (
-            "An active ADVANCE automation is locking this controller."
+            f"The '{_b_name}' ADVANCE automation is locking this controller."
             " Manual control of all ports is blocked until the automation is paused."
         )
         suggested_reply = (
-            "An active automation has locked this controller, preventing manual port changes."
-            " I can disable the active automation to release the lock. Want me to do that?"
+            f"The '{_b_name}' automation has locked this controller, preventing manual port"
+            " changes. I can disable it to release the lock. Want me to do that?"
         )
         opt1 = {
             "description": "Disable the active automation to release this controller.",
             "tool": "disable_advance_automation",
             "instruction": (
-                f"Call list_advance_automations(device_id='{device_id}') to find the"
-                " active automation_id, then call"
-                f" disable_advance_automation(device_id='{device_id}',"
-                " automation_id='<id>', dry_run=True) to preview."
+                f"Ask me to list your automations for this controller to identify '{_b_name}',"
+                " then ask me to disable it to release the controller lock."
             ),
             "available": True,
         }
@@ -3143,7 +3142,7 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
         port_groups (with human-readable device_type label per group),
         governed_ports (list of ports this automation controls, decoded from
         the automation's port_group bitmasks), port_resolution status
-        ("bitmask_decoded" or "error"), and
+        ("resolved" or "error"), and
         human_summary (adapts to continuous/scheduled/no-window variants).
         On failure returns ``{"error": "..."}``.
     """
@@ -3194,7 +3193,7 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
         # explicitly claims it, rather than using the isOpenAutomation flag which becomes
         # ambiguous when more than one automation is active (#149, #150, #152).
         governed_ports: list[dict] = []
-        port_resolution: str = "bitmask_decoded"
+        port_resolution: str = "resolved"
         try:
             ports = device.get("deviceInfo", {}).get("ports", [])
             # Build a lookup from port number → port name from deviceInfo.

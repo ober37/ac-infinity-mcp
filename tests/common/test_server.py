@@ -6523,13 +6523,13 @@ async def test_get_advance_automation_no_advance_ports(mock_client):
       - grouptDevType=48 → bits 4,5 → Ports 5 and 6
       - grouptDevType=8  → bit 3  → Port 4
     MOCK_DEVICE_LEGACY only has ports 1 and 2, so ports 4/5/6 fall back to
-    'Port N' labels.  port_resolution is 'bitmask_decoded'.
+    'Port N' labels.  port_resolution is 'resolved'.
     """
     mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_advance_automation("C58ZA", "1342758")
     data = json.loads(result)
-    assert data["port_resolution"] == "bitmask_decoded"
+    assert data["port_resolution"] == "resolved"
     port_nums = [gp["port"] for gp in data["governed_ports"]]
     assert sorted(port_nums) == [4, 5, 6]
 
@@ -6539,13 +6539,13 @@ async def test_get_advance_automation_port_resolution_single_automation(mock_cli
 
     MOCK_ADVANCE_AUTOMATIONS_SINGLE has grouptDevType=4 (bit 2 = Port 3).
     MOCK_DEVICE_LEGACY has no port 3, so the label falls back to 'Port 3 (Port 3)'.
-    port_resolution is 'bitmask_decoded'.
+    port_resolution is 'resolved'.
     """
     mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_SINGLE
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_advance_automation("C58ZA", "999001")
     data = json.loads(result)
-    assert data["port_resolution"] == "bitmask_decoded"
+    assert data["port_resolution"] == "resolved"
     assert len(data["governed_ports"]) == 1
     assert data["governed_ports"][0]["port"] == 3
     assert data["governed_ports"][0]["port_name"] == "Port 3 (Port 3)"
@@ -6568,7 +6568,7 @@ async def test_get_advance_automation_governed_ports_missing_port_name(mock_clie
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_advance_automation("C58ZA", "1342758")
     data = json.loads(result)
-    assert data["port_resolution"] == "bitmask_decoded"
+    assert data["port_resolution"] == "resolved"
     port_nums = [gp["port"] for gp in data["governed_ports"]]
     assert 4 in port_nums
     # Port 4 has no portName → label is 'Port 4 (Port 4)'
@@ -6581,7 +6581,7 @@ async def test_get_advance_automation_port_resolution_multiple_automations_bitma
 
     Auto A (advId=1) has grouptDevType=4 (Port 3); Auto B (advId=2) has grouptDevType=8
     (Port 4).  Each automation correctly reports only its own port.
-    port_resolution='bitmask_decoded' in both cases.
+    port_resolution='resolved' in both cases.
     """
     two_active = [
         {
@@ -6597,14 +6597,14 @@ async def test_get_advance_automation_port_resolution_multiple_automations_bitma
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result_a = await get_advance_automation("C58ZA", "1")
     data_a = json.loads(result_a)
-    assert data_a["port_resolution"] == "bitmask_decoded"
+    assert data_a["port_resolution"] == "resolved"
     assert len(data_a["governed_ports"]) == 1
     assert data_a["governed_ports"][0]["port"] == 3
 
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result_b = await get_advance_automation("C58ZA", "2")
     data_b = json.loads(result_b)
-    assert data_b["port_resolution"] == "bitmask_decoded"
+    assert data_b["port_resolution"] == "resolved"
     assert len(data_b["governed_ports"]) == 1
     assert data_b["governed_ports"][0]["port"] == 4
 
@@ -6767,7 +6767,9 @@ async def test_conflict_response_sub_path_b_controller_wide_lock(mock_client):
     data = json.loads(result)
     assert data.get("conflict") == "ADVANCE_AUTOMATION"
     assert "1_break_out" not in data["options"]
+    assert "1_disable_automation" in data["options"]
     assert "controller" in data["human_summary"].lower()
+    assert "Moderate Airflow" in data["human_summary"]
     # active_automations is still populated even in Sub-path B
     assert isinstance(data["active_automations"], list)
     assert len(data["active_automations"]) > 0
@@ -6777,13 +6779,13 @@ async def test_get_advance_automation_bitmask_multi_automation(mock_client):
     """Multi-automation scenario: governed_ports decoded from bitmasks, not isOpenAutomation.
 
     MOCK_ADVANCE_AUTOMATIONS_LIST "Moderate Airflow" covers ports 4, 5, 6.
-    port_resolution must be 'bitmask_decoded'.
+    port_resolution must be 'resolved'.
     """
     mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_advance_automation("C58ZA", "1342758")
     data = json.loads(result)
-    assert data["port_resolution"] == "bitmask_decoded"
+    assert data["port_resolution"] == "resolved"
     port_nums = sorted(gp["port"] for gp in data["governed_ports"])
     assert port_nums == [4, 5, 6]
 
@@ -6796,7 +6798,7 @@ async def test_get_advance_automation_bitmask_decode_fallback_port_name(mock_cli
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_advance_automation("C58ZA", "1342758")
     data = json.loads(result)
-    assert data["port_resolution"] == "bitmask_decoded"
+    assert data["port_resolution"] == "resolved"
     for gp in data["governed_ports"]:
         pnum = gp["port"]
         assert gp["port_name"] == f"Port {pnum} (Port {pnum})"
