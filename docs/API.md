@@ -1328,7 +1328,7 @@ Get current sensor readings (temp, humidity, VPD) and port states for one device
   "vpd": 1.31,
   "ports": [
     {"port": 1, "name": "Inline Fan", "speed": 5},
-    {"port": 2, "name": "Humidifier", "speed": 0, "plug_status": "not powered"}
+    {"port": 2, "name": "Port 2", "speed": 0, "plug_status": "not powered"}
   ],
   "external_sensors": []
 }
@@ -1340,7 +1340,7 @@ Get current sensor readings (temp, humidity, VPD) and port states for one device
 - `timestamp` — ISO 8601 in device local time with UTC offset (from `zoneId`); falls back to UTC `"Z"` suffix when `zoneId` is absent (Quirk 23)
 - `vpd` — decoded from `vpdnums ÷ 100` (Quirk 4, Quirk 10)
 - `ports[].speed` — current port speed 0–10 from `speak` field
-- `ports[].plug_status` *(conditional)* — `"not powered"` when BOTH `loadState == 0` AND `speak == 0`; **omitted entirely** when the port is running. Matches the identical signal in `get_port_status`. Indicates the port is not drawing power — either off by design or nothing connected.
+- `ports[].plug_status` *(conditional)* — `"not powered"` when `loadState == 0` AND `speak == 0` AND the port still has its **default name** (`"Port N"`). Custom-named ports are excluded — a user-assigned name implies a device was intentionally connected, and `loadState=0` alone cannot distinguish "nothing plugged in" from "device is off" for on/off devices (see Quirk 26). **Omitted entirely** otherwise. Matches the identical signal in `get_port_status`.
 - `external_sensors` — list of UIS sensor readings when sensors are attached; phantom entries (API-reported but no hardware connected) are filtered out (Quirk 20); empty `[]` for built-in-only devices
 
 ---
@@ -1371,7 +1371,7 @@ Get current sensor readings for all devices at once.
 
 **Field notes:**
 - Each entry has the same shape as `get_device_reading` (including `temperature` / `unit` in device-preferred units)
-- `ports[].plug_status` — present on not-powered port entries (same `loadState == 0` AND `speak == 0` condition as `get_device_reading`); omitted when port is running
+- `ports[].plug_status` — present on not-powered, default-named (`"Port N"`) port entries (same `loadState == 0` AND `speak == 0` AND default-name condition as `get_device_reading`); omitted for custom-named ports or running ports
 - Devices that fail to parse individually include `"error"` instead of sensor fields
 - Useful for a dashboard view across multiple tents/controllers
 - `external_sensors` — phantom sensor entries (sensors present in the API response but with no hardware connected) are filtered out; see Quirk 20

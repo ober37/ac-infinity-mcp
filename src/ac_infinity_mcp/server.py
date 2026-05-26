@@ -311,7 +311,7 @@ async def get_device_reading(device_id: str) -> str:
               "timestamp": "2026-05-20T09:32:00 CDT",
               "ports": [
                 {"port": 1, "name": "Inline Fan", "speed": 5},
-                {"port": 2, "name": "Humidifier", "speed": 0, "plug_status": "not powered"}
+                {"port": 2, "name": "Port 2", "speed": 0, "plug_status": "not powered"}
               ],
               "external_sensors": []
             }
@@ -321,10 +321,12 @@ async def get_device_reading(device_id: str) -> str:
         without a configured timezone fall back to UTC.
         ``external_sensors`` excludes phantom entries (API-reported sensor slots
         with no physical hardware connected — see API Quirk 20).
-        ``plug_status`` is only present on a port entry when no current is detected
-        and the port is not running (speed 0 and no load). A port that is connected
-        but idle has no ``plug_status`` field. This matches the signal used in
-        ``get_port_status``.
+        ``plug_status`` is only present on a port entry when no current is detected,
+        the port is not running (speed 0 and no load), **and the port still has its
+        default name** (``"Port N"``). Custom-named ports are assumed to have a device
+        intentionally connected — ``loadState=0`` alone cannot distinguish "nothing
+        plugged in" from "device is off" for on/off devices. This matches the signal
+        used in ``get_port_status``.
         On failure returns ``{"error": "...", "detail": "..."}``.
     """
     try:
@@ -688,8 +690,8 @@ async def get_all_device_readings() -> str:
         ``get_device_reading``. Devices that fail to parse individually include
         an ``"error"`` key instead of sensor fields.
         ``ports[].plug_status`` is present on not-powered port entries (same
-        ``loadState == 0`` AND ``speak == 0`` condition as ``get_device_reading``);
-        omitted when the port is running.
+        ``loadState == 0`` AND ``speak == 0`` condition as ``get_device_reading``,
+        and only on default-named ``"Port N"`` ports); omitted otherwise.
         ``external_sensors`` excludes phantom entries (API-reported sensor slots
         with no physical hardware connected — see API Quirk 20).
         On auth/API failure returns ``{"error": "...", "detail": "..."}``.
