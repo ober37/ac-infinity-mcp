@@ -1387,6 +1387,62 @@ def _get_port_name_from_device(device: dict | None, port: int) -> str:
     return _sanitize_api_string(raw_name, 64) if raw_name else f"Port {port}"
 
 
+def _is_port_empty(port_data: dict | None, port: int, device: dict | None) -> bool:
+    """Return True when a port appears to have nothing connected.
+
+    Detection signal (from issue #165):
+    - Port name matches the API default pattern ``"Port N"`` (i.e. not custom-named), AND
+    - ``portsLoad == 0``, OR the device ``devType`` is in ``_ZERO_LOAD_DEV_TYPES`` (18, 22).
+
+    devType 18 (8T4TC / UIS 69 Pro+) always has ``portsLoad=0`` for all ports regardless
+    of whether anything is actually connected, so we rely on the default-name-only signal
+    for those devices. devType 22 (Q0KT4) also has unreliable portsLoad.
+
+    Custom-named ports are assumed connected — if the grower named a port, something is
+    plugged in. Returns False when ``port_data`` is None (port not found) or when the
+    device dict is not available.
+    """
+    if port_data is None or device is None:
+        return False
+
+    port_name = port_data.get("portName")
+    # Custom-named = not default "Port N" — assume connected.
+    if port_name and port_name != f"Port {port}":
+        return False
+
+    # Port name is default or absent — check load signal.
+    ports_load = port_data.get("portsLoad", 0) or 0
+    dev_type = device.get("devType")
+    if ports_load == 0 or dev_type in _ZERO_LOAD_DEV_TYPES:
+        return True
+
+    return False
+
+
+def _empty_port_warning(port: int, port_label: str) -> str:
+    """Return the grower-friendly advisory warning text for an empty port.
+
+    Used by write tools (``warning`` field). The message is advisory — it does not
+    block the action. ``port_label`` is the formatted label, e.g. ``"Port 7"`` or
+    ``"Inline Fan (Port 3)"``.
+    """
+    return (
+        f"{port_label} doesn't appear to have anything connected. "
+        "If you meant a different port, let me know which one."
+    )
+
+
+def _empty_port_note(port: int, port_label: str) -> str:
+    """Return the grower-friendly note text for an empty port.
+
+    Used by read tools (``note`` field).
+    """
+    return (
+        f"{port_label} doesn't appear to have anything connected. "
+        "If you meant a different port, let me know which one."
+    )
+
+
 def _find_governing_automation(automations: list[dict], port: int) -> dict | None:
     """Return the first enabled/running automation whose bitmask covers ``port``, or None.
 
@@ -1735,7 +1791,13 @@ async def get_port_status(device_id: str, port: int) -> str:
         ``mode`` is one of: OFF, ON, AUTO, TIMER_TO_ON, TIMER_TO_OFF, CYCLE, SCHEDULE, VPD,
         ADVANCE. ``load_detected`` is true when a device is physically plugged into the port.
         When ``mode`` is ``ADVANCE``, the port is governed by a named Advance Automation program
-        in the AC Infinity app. On failure returns ``{"error": "...", "detail": "..."}``.
+        in the AC Infinity app.
+
+        When the port appears to have nothing connected (default-named ``"Port N"`` with zero load,
+        or a devType=18/22 controller), the response also includes a ``note`` field alerting the
+        grower (e.g. ``"Port 7 doesn't appear to have anything connected."``).
+
+        On failure returns ``{"error": "...", "detail": "..."}``.
 
         Note on ADVANCE detection: ``isOpenAutomation==1`` in devInfoListAll is the primary
         signal. For AI+ devices (no curMode field) and older firmware without isOpenAutomation,
@@ -1774,7 +1836,7 @@ async def get_port_status(device_id: str, port: int) -> str:
         else:
             mode_str = _decode_mode(cur_mode_int)
 
-        return json.dumps({
+        result: dict = {
             "device_id": device_id,
             "port": port,
             "port_name": port_data.get("portName", f"Port {port}"),
@@ -1782,7 +1844,11 @@ async def get_port_status(device_id: str, port: int) -> str:
             "load_detected": bool(port_data.get("loadState", 0)),
             "mode": mode_str,
             "remain_time_seconds": port_data.get("remainTime") or 0,
-        }, indent=2)
+        }
+        if _is_port_empty(port_data, port, device):
+            _port_label_s = port_data.get("portName", f"Port {port}")
+            result["note"] = _empty_port_note(port, _port_label_s)
+        return json.dumps(result, indent=2)
 
     except ACInfinityAuthError as e:
         logger.warning("Auth error in get_port_status: %s", e)
@@ -1859,7 +1925,11 @@ async def get_port_settings(device_id: str, port: int) -> str:
         ``vpd_target_kpa`` is non-null only when VPD automation is active.
         ``temp_range_c`` / ``humidity_range_pct`` are non-null only when those
         thresholds are enabled. ``schedule_window`` times are in device local time
-        (not UTC). On failure returns ``{"error": "...", "detail": "..."}``.
+        (not UTC).
+
+        When the port appears to have nothing connected (default-named ``"Port N"`` with zero load,
+        or a devType=18/22 controller), the response also includes a ``note`` field alerting the
+        grower. On failure returns ``{"error": "...", "detail": "..."}``.
     """
     try:
         if port < 1:
@@ -1962,6 +2032,15 @@ async def get_port_settings(device_id: str, port: int) -> str:
                     "Could not fetch automation details."
                     " Use list_advance_automations to view active automations."
                 )
+            if _is_port_empty(port_data, port, device):
+                _ps_port_label = (
+                    port_data.get("portName", f"Port {port}") if port_data else f"Port {port}"
+                )
+                empty_note = _empty_port_note(port, _ps_port_label)
+                if "note" in resp:
+                    resp["note"] = resp["note"] + " " + empty_note
+                else:
+                    resp["note"] = empty_note
             return json.dumps(resp, indent=2)
 
         vpd_target = None
@@ -2036,7 +2115,7 @@ async def get_port_settings(device_id: str, port: int) -> str:
         else:
             human_summary = f"Port is in {mode_str} mode."
 
-        return json.dumps({
+        non_adv_resp: dict = {
             "device_id": device_id,
             "port": port,
             "mode": mode_str,
@@ -2050,7 +2129,13 @@ async def get_port_settings(device_id: str, port: int) -> str:
             "timer_on_seconds": settings.get("acitveTimerOn", 0),
             "timer_off_seconds": settings.get("acitveTimerOff", 0),
             "human_summary": human_summary,
-        }, indent=2)
+        }
+        if _is_port_empty(port_data, port, device):
+            _gps_port_label = (
+                port_data.get("portName", f"Port {port}") if port_data else f"Port {port}"
+            )
+            non_adv_resp["note"] = _empty_port_note(port, _gps_port_label)
+        return json.dumps(non_adv_resp, indent=2)
 
     except ACInfinityAuthError as e:
         logger.warning("Auth error in get_port_settings: %s", e)
@@ -2164,6 +2249,13 @@ async def set_port_speed(
                 "To activate it, ask me to switch this port to ON mode."
             )
 
+        if _is_port_empty(port_data, port, device):
+            empty_warn = _empty_port_warning(port, port_label)
+            if "warning" in response:
+                response["warning"] = response["warning"] + " " + empty_warn
+            else:
+                response["warning"] = empty_warn
+
         return json.dumps(response, indent=2)
 
     except ACInfinityAuthError as e:
@@ -2211,7 +2303,13 @@ async def set_port_on(
 
     Returns:
         JSON with action, device_id, port, dry_run, controller_type, sent,
-        and payload (when dry_run=True). On failure returns ``{"error": "..."}``.
+        and payload (when dry_run=True).
+
+        When the port appears to have nothing connected (default-named ``"Port N"``
+        with zero load, or a devType=18/22 device), the response also includes a
+        ``warning`` field alerting the grower.
+
+        On failure returns ``{"error": "..."}``.
     """
     try:
         if port < 1:
@@ -2249,6 +2347,9 @@ async def set_port_on(
         }
         if write_result["dry_run"]:
             response["payload"] = write_result["payload"]
+
+        if _is_port_empty(port_data, port, device):
+            response["warning"] = _empty_port_warning(port, port_label)
 
         return json.dumps(response, indent=2)
 
@@ -2301,7 +2402,13 @@ async def set_port_off(
 
     Returns:
         JSON with action, device_id, port, dry_run, controller_type, sent,
-        and payload (when dry_run=True). On failure returns ``{"error": "..."}``.
+        and payload (when dry_run=True).
+
+        When the port appears to have nothing connected (default-named ``"Port N"``
+        with zero load, or a devType=18/22 device), the response also includes a
+        ``warning`` field alerting the grower.
+
+        On failure returns ``{"error": "..."}``.
     """
     try:
         if port < 1:
@@ -2339,6 +2446,9 @@ async def set_port_off(
         }
         if write_result["dry_run"]:
             response["payload"] = write_result["payload"]
+
+        if _is_port_empty(port_data, port, device):
+            response["warning"] = _empty_port_warning(port, port_label)
 
         return json.dumps(response, indent=2)
 
@@ -2457,6 +2567,8 @@ async def set_vpd_automation(
         }
         if write_result["dry_run"]:
             response["payload"] = write_result["payload"]
+        if _is_port_empty(port_data, port, device):
+            response["warning"] = _empty_port_warning(port, port_label)
         return json.dumps(response, indent=2)
 
     except ACInfinityAuthError as e:
@@ -2609,6 +2721,8 @@ async def set_temperature_automation(
         }
         if write_result["dry_run"]:
             response["payload"] = write_result["payload"]
+        if _is_port_empty(port_data, port, device):
+            response["warning"] = _empty_port_warning(port, port_label)
         return json.dumps(response, indent=2)
 
     except ACInfinityAuthError as e:
@@ -2724,6 +2838,8 @@ async def set_humidity_automation(
         }
         if write_result["dry_run"]:
             response["payload"] = write_result["payload"]
+        if _is_port_empty(port_data, port, device):
+            response["warning"] = _empty_port_warning(port, port_label)
         return json.dumps(response, indent=2)
 
     except ACInfinityAuthError as e:
@@ -2893,6 +3009,8 @@ async def set_port_mode(
         }
         if write_result["dry_run"]:
             response["payload"] = write_result["payload"]
+        if _is_port_empty(port_data, port, device):
+            response["warning"] = _empty_port_warning(port, port_label)
         return json.dumps(response, indent=2)
 
     except ACInfinityAuthError as e:
