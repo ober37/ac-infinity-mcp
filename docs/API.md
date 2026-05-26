@@ -1265,7 +1265,7 @@ List all AC Infinity devices on the account with their metadata.
 
 **Parameters:** None.
 
-**Response:**
+**Response (1 device):**
 ```json
 {
   "devices": [
@@ -1278,7 +1278,16 @@ List all AC Infinity devices on the account with their metadata.
       "firmware_version": "3.2.56",
       "hardware_version": "1.1"
     }
-  ]
+  ],
+  "human_summary": "1 device found: Towlie Tent (C58ZA, online)."
+}
+```
+
+**Response (3+ devices — markdown table):**
+```json
+{
+  "devices": [...],
+  "human_summary": "| Device | ID | Status |\n|---|---|---|\n| Towlie Tent | C58ZA | online |\n| Veg Tent | D91XB | online |\n| Clone Chamber | F03KR | online |"
 }
 ```
 
@@ -1286,6 +1295,7 @@ List all AC Infinity devices on the account with their metadata.
 - `device_id` — the `devCode` value; used as `device_id` in all other tools (Quirk 7)
 - `status` — `"online"` or `"offline"` from the `online` bitmask field
 - `device_type` — `11` = legacy 69 Pro / 69 Pro+, `22` = AI+ 89 AI+
+- `human_summary` — one-line prose for 1–2 devices; markdown table for 3+ devices; `"No devices found."` when the account is empty
 - Empty account: `{"devices": [], "message": "No devices found"}`
 
 ---
@@ -1312,7 +1322,8 @@ Get current sensor readings (temp, humidity, VPD) and port states for one device
   "ports": [
     {"port": 1, "name": "Inline Fan", "speed": 5}
   ],
-  "external_sensors": []
+  "external_sensors": [],
+  "human_summary": "Towlie Tent: 24.3°C, 58.2% RH, VPD 1.31 kPa. Reading from 2026-05-20T09:32:00-05:00."
 }
 ```
 
@@ -1330,7 +1341,8 @@ Get current sensor readings (temp, humidity, VPD) and port states for one device
     {"port": 1, "name": "Inline Fan", "speed": 5},
     {"port": 2, "name": "Port 2", "speed": 0, "plug_status": "not powered"}
   ],
-  "external_sensors": []
+  "external_sensors": [],
+  "human_summary": "Towlie Tent: 24.3°C, 58.2% RH, VPD 1.31 kPa. Reading from 2026-05-20T09:32:00-05:00."
 }
 ```
 
@@ -1342,6 +1354,7 @@ Get current sensor readings (temp, humidity, VPD) and port states for one device
 - `ports[].speed` — current port speed 0–10 from `speak` field
 - `ports[].plug_status` *(conditional)* — `"not powered"` when `loadState == 0` AND `speak == 0` AND the port still has its **default name** (`"Port N"`). Custom-named ports are excluded — a user-assigned name implies a device was intentionally connected, and `loadState=0` alone cannot distinguish "nothing plugged in" from "device is off" for on/off devices (see Quirk 26). **Omitted entirely** otherwise. Matches the identical signal in `get_port_status`.
 - `external_sensors` — list of UIS sensor readings when sensors are attached; phantom entries (API-reported but no hardware connected) are filtered out (Quirk 20); empty `[]` for built-in-only devices
+- `human_summary` — one-line natural language summary: `"DeviceName: N°U, N% RH, VPD N kPa. Reading from <timestamp>."` Always present.
 
 ---
 
@@ -1375,6 +1388,7 @@ Get current sensor readings for all devices at once.
 - Devices that fail to parse individually include `"error"` instead of sensor fields
 - Useful for a dashboard view across multiple tents/controllers
 - `external_sensors` — phantom sensor entries (sensors present in the API response but with no hardware connected) are filtered out; see Quirk 20
+- `human_summary` — one-line prose for 1–2 parseable devices; markdown table (`| Device | Temp | Humidity | VPD |`) for 3+ parseable devices; `"No readings available."` when all fail. Always present at the top level.
 
 ---
 
@@ -1446,7 +1460,8 @@ Check whether current VPD is within the target range for a named grow stage.
   "stage": "veg",
   "status": "HIGH",
   "deviation": 0.08,
-  "alert": "VPD 1.58 exceeds target 1.00–1.50. Raise humidity or lower temperature."
+  "alert": "VPD 1.58 exceeds target 1.00–1.50. Raise humidity or lower temperature.",
+  "human_summary": "VPD 1.58 exceeds target 1.00–1.50. Raise humidity or lower temperature."
 }
 ```
 
@@ -1454,6 +1469,7 @@ Check whether current VPD is within the target range for a named grow stage.
 - `status` — `"OK"`, `"LOW"`, or `"HIGH"`
 - `deviation` — `0` when OK; positive kPa when HIGH (above upper bound); negative when LOW
 - `alert` — `null` when status is `"OK"`
+- `human_summary` — mirrors `alert` when status is not OK; `"VPD is on target at N kPa (target L–H kPa for stage)."` when OK. Always present.
 
 ---
 
@@ -1522,7 +1538,8 @@ Detect linear trends in temperature, humidity, and VPD with a 7-day projection.
       "projection_7d": 25.1,
       "alert": false
     }
-  ]
+  ],
+  "human_summary": "| Metric | Direction | Slope | 7-Day Projection |\n|---|---|---|---|\n| Temperature | ↑ Rising | +0.0300 °C/hr | 25.1 °C |\n| Humidity | → Stable | +0.0001 /hr | 58.3  |\n| Vpd | → Stable | +0.0000 /hr | 1.31  |"
 }
 ```
 
@@ -1531,6 +1548,7 @@ Detect linear trends in temperature, humidity, and VPD with a 7-day projection.
 - `direction` — `"rising"`, `"falling"`, or `"stable"`
 - `projection_7d` — projected value 7 days from the last reading at the current slope
 - `alert` — `true` when the projection would leave the target range for the given stage
+- `human_summary` — always a markdown table (`| Metric | Direction | Slope | 7-Day Projection |`) with one row per metric; alert lines appended below the table when any `alert` is `true` (e.g. `"⚠ Temperature is trending rising — 7-day projection: 25.1 °C."`)
 
 ---
 
@@ -1616,7 +1634,8 @@ resolve the governing automation name (graceful degradation if the secondary cal
   "port_name": "Humidifier",
   "power_level": 0,
   "mode": "OFF",
-  "plug_status": "not powered"
+  "plug_status": "not powered",
+  "human_summary": "Humidifier (Port 1) is OFF (speed 0)."
 }
 ```
 
@@ -1627,7 +1646,8 @@ resolve the governing automation name (graceful degradation if the secondary cal
   "port": 4,
   "port_name": "Filter",
   "power_level": 5,
-  "mode": "AUTO"
+  "mode": "AUTO",
+  "human_summary": "Filter (Port 4) is AUTO at speed 5."
 }
 ```
 
@@ -1639,7 +1659,8 @@ resolve the governing automation name (graceful degradation if the secondary cal
   "port_name": "Intake Fan",
   "power_level": 0,
   "mode": "TIMER_TO_ON",
-  "remain_time_seconds": 3600
+  "remain_time_seconds": 3600,
+  "human_summary": "Intake Fan (Port 2) is TIMER_TO_ON (speed 0)."
 }
 ```
 
@@ -1651,7 +1672,8 @@ resolve the governing automation name (graceful degradation if the secondary cal
   "port_name": "Filter",
   "power_level": 5,
   "mode": "Automation",
-  "automation_name": "Moderate Airflow"
+  "automation_name": "Moderate Airflow",
+  "human_summary": "Filter (Port 4) is running under 'Moderate Airflow' automation at speed 5."
 }
 ```
 
@@ -1662,7 +1684,8 @@ resolve the governing automation name (graceful degradation if the secondary cal
   "port": 4,
   "port_name": "Filter",
   "power_level": 5,
-  "mode": "Automation"
+  "mode": "Automation",
+  "human_summary": "Filter (Port 4) is Automation at speed 5."
 }
 ```
 
@@ -1673,6 +1696,7 @@ resolve the governing automation name (graceful degradation if the secondary cal
 - `automation_name` *(optional)* — present only when `mode == "Automation"` AND the governing automation was successfully identified via the secondary `getGroups` call. Absent when the secondary call fails, the port is not covered by any automation's port-group bitmask, or `devId` is absent from the device record.
 - `remain_time_seconds` *(conditional)* — countdown timer seconds remaining from `remainTime` API field; **omitted entirely** when no timer is active (value would be 0). Only present when a TIMER_TO_ON or TIMER_TO_OFF countdown is running.
 - `note` *(optional)* — present when the port appears to have nothing connected (see "Empty-port detection" below). Example: `"Port 7 doesn't appear to have anything connected. If you meant a different port, let me know which one."`
+- `human_summary` — natural language port status: `"Name (Port N) is running under 'AutomationName' automation at speed N."` (Automation mode with name resolved); `"Name (Port N) is Mode at speed N."` (running); `"Name (Port N) is Mode (speed 0)."` (stopped). Always present.
 
 ---
 
@@ -1696,13 +1720,11 @@ Get the full automation configuration for a port from `/api/dev/getdevModeSettin
   "vpd_target_kpa": 1.4,
   "temp_range": null,
   "humidity_range_pct": null,
-  "schedule_window": null,
-  "cycle_on_seconds": 0,
-  "cycle_off_seconds": 0,
-  "timer_on_seconds": 0,
-  "timer_off_seconds": 0
+  "schedule_window": null
 }
 ```
+
+**Note:** `cycle_on_seconds`, `cycle_off_seconds`, `timer_on_seconds`, and `timer_off_seconds` are **omitted entirely when their value is 0**. They only appear in the response when the port has a non-zero cycle or timer duration configured.
 
 **Response (ADVANCE mode port — governing automation found):**
 ```json
@@ -2087,13 +2109,13 @@ lookup finds:
     },
     "1_break_out": {
       "description": "Release Inline Fan (Port 1) from 'Moderate Airflow' to regain manual control.",
-      "tool": "break_out_of_automation",
+      "_tool": "break_out_of_automation",
       "instruction": "Ask me to release Inline Fan (Port 1) from the 'Moderate Airflow' automation so you can control it manually.",
       "available": true
     },
     "2_disable_automation": {
       "description": "Disable 'Moderate Airflow' entirely — releases all ports on this automation.",
-      "tool": "disable_advance_automation",
+      "_tool": "disable_advance_automation",
       "instruction": "Ask me to disable the 'Moderate Airflow' automation — this will release all ports it currently controls.",
       "available": true
     },
@@ -2125,7 +2147,7 @@ Same structure as above but **without** the `"0_update_speed"` key and with `sug
   "options": {
     "1_re_disable_to_clear": {
       "description": "Force-release this port by re-applying the disable command.",
-      "tool": "disable_advance_automation",
+      "_tool": "disable_advance_automation",
       "instruction": "Ask me to list your automations so we can identify which one is blocking this port, then ask me to force-release it.",
       "available": true
     },
@@ -2157,7 +2179,7 @@ Same structure as above but **without** the `"0_update_speed"` key and with `sug
   "options": {
     "1_find_and_disable": {
       "description": "Find and disable the active automation, then apply your manual change.",
-      "tool": "list_advance_automations",
+      "_tool": "list_advance_automations",
       "instruction": "Ask me to list your automations so we can identify which one is blocking this port, then ask me to disable it and force-release the port.",
       "available": true
     },
@@ -2184,9 +2206,9 @@ Same structure as above but **without** the `"0_update_speed"` key and with `sug
   - Degraded path: offers to list automations to identify the blocking one (no tool names exposed to the grower)
 - `options.0_update_speed` — present in normal path only when called from `set_port_speed` (i.e. `requested_speed` is not None). Not present for `set_port_on` / `set_port_off` (no speed target applies). Not present in all-disabled or degraded paths.
 - Option key naming by path:
-  - Normal path: `"0_update_speed"` (when speed provided), `"1_break_out"` (tool: `break_out_of_automation`), `"2_disable_automation"` (tool: `disable_advance_automation`)
-  - All-disabled path: `"1_re_disable_to_clear"` (tool: `disable_advance_automation`), `"2_disable_automation"` (available: false)
-  - Degraded path: `"1_find_and_disable"` (tool: `list_advance_automations`), `"2_disable_automation"` (available: false)
+  - Normal path: `"0_update_speed"` (when speed provided), `"1_break_out"` (`_tool`: `break_out_of_automation`), `"2_disable_automation"` (`_tool`: `disable_advance_automation`)
+  - All-disabled path: `"1_re_disable_to_clear"` (`_tool`: `disable_advance_automation`), `"2_disable_automation"` (available: false)
+  - Degraded path: `"1_find_and_disable"` (`_tool`: `list_advance_automations`), `"2_disable_automation"` (available: false)
 - `options.1_break_out.available` — set to `governing.get("enabled", False) or governing.get("run_state", False)`; `true` when the automation is enabled OR actively running (handles mid-toggle transient state where `isOn=0` but `runState=1`)
 - The `isOpenAutomation` guard condition is documented in Quirk 19; the pre-write guard from devInfoListAll is documented in Quirk 25
 - **User-facing text rules:** All `instruction`, `description`, `suggested_reply`, and `switching_guidance` fields must use natural-language prose (no Python function call syntax, no `dry_run`, no `device_id=`, no raw numeric IDs). See `CLAUDE.md` § "User-facing text rules".
@@ -2377,7 +2399,6 @@ Enable a previously disabled Advance Automation. No-ops if already enabled.
   "action": "enable",
   "automation_name": "Moderate Airflow",
   "automation_id": 12345,
-  "adv_ids_to_toggle": [12345, 12346],
   "dry_run": true,
   "sent": false
 }
@@ -2415,7 +2436,7 @@ Disable a currently enabled Advance Automation. No-ops if already disabled.
     {"port": 3, "port_name": "Intake Fan (Port 3)"},
     {"port": 5, "port_name": "Exhaust Fan (Port 5)"}
   ],
-  "revert_behavior_confirmed": false,
+  "human_summary": "Disabling 'Moderate Airflow' will take Intake Fan (Port 3), Exhaust Fan (Port 5) off automation control. Re-enabling it restores automation control immediately — no wait for the next trigger.",
   "dry_run": true,
   "sent": false,
   "to_restore": "Ask me to re-enable 'Moderate Airflow'."
@@ -2432,7 +2453,7 @@ Disable a currently enabled Advance Automation. No-ops if already disabled.
     {"port": 3, "port_name": "Intake Fan (Port 3)"},
     {"port": 5, "port_name": "Exhaust Fan (Port 5)"}
   ],
-  "revert_behavior_confirmed": false,
+  "human_summary": "'Moderate Airflow' has been disabled. Re-enabling it will restore automation control immediately.",
   "dry_run": false,
   "sent": true,
   "to_restore": "Ask me to re-enable 'Moderate Airflow'."
@@ -2441,7 +2462,7 @@ Disable a currently enabled Advance Automation. No-ops if already disabled.
 
 **Field notes:**
 - `governed_ports` — list of `{"port": N, "port_name": "Name (Port N)"}` dicts for every port the automation controls, decoded from the `grouptDevType` bitmask across all port groups (Port N = bit N−1 set). Port names are sourced from `deviceInfo.ports` via `_sanitize_api_string`; fallback is `"Port N"` (bare, no redundant suffix) when `portName` is absent or matches the API default (e.g. `"Port 1"`).
-- `revert_behavior_confirmed` — whether port revert-on-disable behavior has been confirmed via live test
+- `human_summary` — dry_run: describes what will happen when confirmed. Live: confirms the automation was disabled. Replaces the former `revert_behavior_confirmed` boolean. Always present.
 - `to_restore` — natural-language hint for re-enabling the automation by name; intentionally avoids Python function-call syntax so the MCP caller can relay it to the user verbatim
 
 ---
