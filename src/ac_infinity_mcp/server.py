@@ -2116,10 +2116,11 @@ async def get_port_settings(device_id: str, port: int) -> str:
 
         When the port appears to have nothing connected (default-named ``"Port N"`` with zero load,
         or a devType=18/22 controller), the response includes a staleness-aware ``note`` field.
-        On the non-ADVANCE path, ``human_summary`` is also overridden with the same staleness
-        message so it doesn't contradict itself (e.g. "Humidity automation: 60–100%") for a port
-        with nothing connected. On the ADVANCE path, ``human_summary`` is preserved (it already
-        describes the automation state) and only ``note`` is set.
+        On the non-ADVANCE path, ``human_summary`` is overridden with a staleness statement
+        and ``note`` is set to a redirect hint, so the response doesn't contradict itself
+        (e.g. "Humidity automation: 60–100%") for a port with nothing connected.
+        On the ADVANCE path, ``human_summary`` is preserved (it already describes the
+        automation state) and only ``note`` is appended.
         On failure returns ``{"error": "...", "detail": "..."}``.
     """
     try:
