@@ -311,7 +311,7 @@ async def get_device_reading(device_id: str) -> str:
               "timestamp": "2026-05-20T09:32:00 CDT",
               "ports": [
                 {"port": 1, "name": "Inline Fan", "speed": 5},
-                ...
+                {"port": 2, "name": "Humidifier", "speed": 0, "plug_status": "not powered"}
               ],
               "external_sensors": []
             }
@@ -321,6 +321,10 @@ async def get_device_reading(device_id: str) -> str:
         without a configured timezone fall back to UTC.
         ``external_sensors`` excludes phantom entries (API-reported sensor slots
         with no physical hardware connected — see API Quirk 20).
+        ``plug_status`` is only present on a port entry when no current is detected
+        and the port is not running (speed 0 and no load). A port that is connected
+        but idle has no ``plug_status`` field. This matches the signal used in
+        ``get_port_status``.
         On failure returns ``{"error": "...", "detail": "..."}``.
     """
     try:

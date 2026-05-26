@@ -504,6 +504,24 @@ async def test_get_device_reading_no_load_field_in_ports(mock_client):
     assert "load" not in data["ports"][0]
 
 
+async def test_get_device_reading_plug_status_propagates(mock_client):
+    """plug_status passes through get_device_reading unchanged when parser emits it."""
+    mock_client.parse_device_data.return_value = {
+        "device_name": "Test", "temperature_c": 23.5, "temperature_f": 74.3,
+        "humidity": 60.0, "vpd": 1.24, "timestamp": None, "zone_id": None,
+        "temp_unit_raw": None, "external_sensors": [],
+        "ports": [
+            {"port": 1, "name": "Inline Fan", "speed": 5},
+            {"port": 2, "name": "Humidifier", "speed": 0, "plug_status": "not powered"},
+        ],
+    }
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_device_reading("C58ZA")
+    data = json.loads(result)
+    assert "plug_status" not in data["ports"][0]
+    assert data["ports"][1]["plug_status"] == "not powered"
+
+
 async def test_get_device_reading_device_not_found(mock_client):
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_device_reading("NOTEXIST")

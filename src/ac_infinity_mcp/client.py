@@ -925,14 +925,16 @@ class ACInfinityClient:
             vpd = round(info.get("vpdnums", 0) / 100.0, 2)
 
             raw_ports = info.get("ports", [])
-            ports = [
-                {
+            ports = []
+            for p in raw_ports:
+                port_entry: dict = {
                     "port": p.get("port"),
                     "name": p.get("portName", f"Port {p.get('port')}"),
                     "speed": p.get("speak", 0),  # 0-10 scale from API
                 }
-                for p in raw_ports
-            ]
+                if not p.get("loadState", 0) and not p.get("speak", 0):
+                    port_entry["plug_status"] = "not powered"
+                ports.append(port_entry)
 
             sensors = info.get("sensors")
             external = []
