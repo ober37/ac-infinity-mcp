@@ -1310,7 +1310,7 @@ Get current sensor readings (temp, humidity, VPD) and port states for one device
   "humidity": 58.2,
   "vpd": 1.31,
   "ports": [
-    {"port": 1, "name": "Inline Fan", "speed": 5, "load": 0}
+    {"port": 1, "name": "Inline Fan", "speed": 5}
   ],
   "external_sensors": []
 }
@@ -1591,17 +1591,17 @@ Get the live operational status of a single port. Reads real-time fields from
 {
   "device_id": "C58ZA",
   "port": 1,
-  "port_name": "Intake Fan",
-  "power_level": 5,
-  "load_detected": true,
-  "mode": "AUTO",
+  "port_name": "Humidifier",
+  "power_level": 0,
+  "mode": "OFF",
+  "plug_status": "not powered",
   "remain_time_seconds": 0
 }
 ```
 
 **Field notes:**
 - `power_level` — actual current power level 0–10 from `speak` API field
-- `load_detected` — `true` when a device is physically plugged into the port (`loadState=1`)
+- `plug_status` — `"not powered"` when no current is detected on the port (`loadState=0`); field is absent when the port is running
 - `mode` — one of: `OFF`, `ON`, `AUTO`, `VPD`, `TIMER_TO_ON`, `TIMER_TO_OFF`, `CYCLE`, `SCHEDULE`
 - `remain_time_seconds` — countdown timer seconds from `remainTime` field; `0` when no active timer
 - `note` *(optional)* — present when the port appears to have nothing connected (see "Empty-port detection" below). Example: `"Port 7 doesn't appear to have anything connected. If you meant a different port, let me know which one."`

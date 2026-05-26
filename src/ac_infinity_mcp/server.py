@@ -310,7 +310,7 @@ async def get_device_reading(device_id: str) -> str:
               "vpd": 1.31,
               "timestamp": "2026-05-20T09:32:00 CDT",
               "ports": [
-                {"port": 1, "name": "Inline Fan", "speed": 5, "load": 0},
+                {"port": 1, "name": "Inline Fan", "speed": 5},
                 ...
               ],
               "external_sensors": []
@@ -1776,20 +1776,21 @@ async def get_port_status(device_id: str, port: int) -> str:
         port: 1-based port number
 
     Returns:
-        JSON example::
+        JSON example (port not powered)::
 
             {
               "device_id": "C58ZA",
               "port": 1,
-              "port_name": "Intake Fan",
-              "power_level": 5,
-              "load_detected": true,
-              "mode": "AUTO",
+              "port_name": "Humidifier",
+              "power_level": 0,
+              "mode": "OFF",
+              "plug_status": "not powered",
               "remain_time_seconds": 0
             }
 
         ``mode`` is one of: OFF, ON, AUTO, TIMER_TO_ON, TIMER_TO_OFF, CYCLE, SCHEDULE, VPD,
-        ADVANCE. ``load_detected`` is true when a device is physically plugged into the port.
+        ADVANCE. ``plug_status`` is only present when no current is detected on the port (the
+        port is not powered or nothing is connected). It is omitted when the port is running.
         When ``mode`` is ``ADVANCE``, the port is governed by a named Advance Automation program
         in the AC Infinity app.
 
@@ -1841,10 +1842,11 @@ async def get_port_status(device_id: str, port: int) -> str:
             "port": port,
             "port_name": port_data.get("portName", f"Port {port}"),
             "power_level": port_data.get("speak", 0),
-            "load_detected": bool(port_data.get("loadState", 0)),
             "mode": mode_str,
             "remain_time_seconds": port_data.get("remainTime") or 0,
         }
+        if not port_data.get("loadState", 0):
+            result["plug_status"] = "not powered"
         if _is_port_empty(port_data, port, device):
             _port_label_s = port_data.get("portName", f"Port {port}")
             result["note"] = _empty_port_note(port, _port_label_s)

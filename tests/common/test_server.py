@@ -3582,7 +3582,7 @@ async def test_get_port_status_success(mock_client):
     assert data["port"] == 1
     assert data["port_name"] == "Intake Fan"
     assert data["power_level"] == 5
-    assert data["load_detected"] is True
+    assert "plug_status" not in data
     assert data["mode"] == "AUTO"        # curMode=3
     assert data["remain_time_seconds"] == 0
 
@@ -3614,7 +3614,7 @@ async def test_get_port_status_remain_time_none_defaults_to_zero(mock_client):
 
 
 async def test_get_port_status_load_not_detected(mock_client):
-    """loadState=0 → load_detected=False."""
+    """loadState=0 → plug_status='not powered'."""
     mock_client.get_devices.return_value = [{
         **MOCK_DEVICE_LEGACY,
         "deviceInfo": {
@@ -3628,8 +3628,50 @@ async def test_get_port_status_load_not_detected(mock_client):
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_port_status("C58ZA", 1)
     data = json.loads(result)
-    assert data["load_detected"] is False
+    assert data["plug_status"] == "not powered"
     assert data["mode"] == "OFF"
+
+
+@pytest.mark.parametrize("load_state,expect_plug_status", [
+    (1, False),    # loadState=1 (powered) → plug_status absent
+    (0, True),     # loadState=0 (not powered) → plug_status present
+    (None, True),  # loadState absent → defaults to 0 → plug_status present
+])
+async def test_get_port_status_plug_status_conditional(mock_client, load_state, expect_plug_status):
+    """plug_status appears only when loadState is falsy."""
+    port_data: dict = {"port": 1, "portName": "Fan", "speak": 0,
+                       "portsLoad": 0, "curMode": 1, "remainTime": 0}
+    if load_state is not None:
+        port_data["loadState"] = load_state
+    mock_client.get_devices.return_value = [{
+        **MOCK_DEVICE_LEGACY,
+        "deviceInfo": {**MOCK_DEVICE_LEGACY["deviceInfo"], "ports": [port_data]},
+    }]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_status("C58ZA", 1)
+    data = json.loads(result)
+    assert ("plug_status" in data) == expect_plug_status
+    if expect_plug_status:
+        assert data["plug_status"] == "not powered"
+
+
+async def test_get_port_status_loadstate1_speak0_no_plug_status(mock_client):
+    """loadState=1 (current flowing) suppresses plug_status even when speed=0."""
+    mock_client.get_devices.return_value = [{
+        **MOCK_DEVICE_LEGACY,
+        "deviceInfo": {
+            **MOCK_DEVICE_LEGACY["deviceInfo"],
+            "ports": [
+                {"port": 1, "portName": "Fan", "speak": 0,
+                 "portsLoad": 1, "loadState": 1, "curMode": 1, "remainTime": 0},
+            ],
+        },
+    }]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_status("C58ZA", 1)
+    data = json.loads(result)
+    assert "plug_status" not in data
+    assert data["power_level"] == 0
 
 
 async def test_get_port_status_device_not_found(mock_client):

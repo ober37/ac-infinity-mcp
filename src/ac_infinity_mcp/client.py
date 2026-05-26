@@ -930,7 +930,6 @@ class ACInfinityClient:
                     "port": p.get("port"),
                     "name": p.get("portName", f"Port {p.get('port')}"),
                     "speed": p.get("speak", 0),  # 0-10 scale from API
-                    "load": p.get("portsLoad", 0),
                 }
                 for p in raw_ports
             ]
