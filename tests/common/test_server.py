@@ -4118,8 +4118,9 @@ async def test_get_port_settings_success_basic(mock_client):
     assert data["schedule_window"] is None
     assert data["cycle_on_seconds"] == 300
     assert data["cycle_off_seconds"] == 60
-    assert data["timer_on_seconds"] == 0
-    assert data["timer_off_seconds"] == 0
+    # timer fields are omitted when 0 (not configured)
+    assert "timer_on_seconds" not in data
+    assert "timer_off_seconds" not in data
 
 
 async def test_get_port_settings_vpd_target_active(mock_client):
@@ -5694,7 +5695,7 @@ async def test_enable_advance_automation_invalid_id(mock_client):
 # ============ disable_advance_automation ============
 
 async def test_disable_advance_automation_dry_run(mock_client):
-    """dry_run=True returns governed_ports, revert_behavior_confirmed, and to_restore."""
+    """dry_run=True returns governed_ports, human_summary, and to_restore."""
     mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await disable_advance_automation("C58ZA", "1342758", dry_run=True)
@@ -5702,8 +5703,9 @@ async def test_disable_advance_automation_dry_run(mock_client):
     assert data["dry_run"] is True
     assert data["sent"] is False
     assert data["action"] == "disable"
-    assert "revert_behavior_confirmed" in data
-    assert data["revert_behavior_confirmed"] is True
+    assert "revert_behavior_confirmed" not in data
+    assert "human_summary" in data
+    assert "restores automation control immediately" in data["human_summary"]
     assert "to_restore" in data
     assert data["to_restore"] == "Ask me to re-enable 'Moderate Airflow'."
     assert "adv_ids_to_toggle" not in data
@@ -5998,14 +6000,16 @@ async def test_break_out_dry_run(mock_client):
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await break_out_of_automation("C58ZA", port=1, dry_run=True)
     data = json.loads(result)
-    assert data["action"] == "break_out"
+    assert "release" in data["action"]
     assert data["dry_run"] is True
     assert "sequence" in data
     assert "automation_name" in data
     assert "estimated_duration_seconds" in data
     assert isinstance(data["estimated_duration_seconds"], (int, float))
     assert data["estimated_duration_seconds"] > 0
-    assert "revert_behavior_confirmed" in data
+    assert "revert_behavior_confirmed" not in data
+    assert "human_summary" in data
+    assert "restores all ports immediately" in data["human_summary"]
     assert "co_ports_to_lock" in data
     assert isinstance(data["co_ports_to_lock"], list)
     # No writes on dry run
@@ -6058,7 +6062,7 @@ async def test_break_out_confirm_name_case_insensitive(mock_client):
             confirm_automation_name="MODERATE AIRFLOW"  # uppercase should match
         )
     data = json.loads(result)
-    assert data.get("action") == "break_out"
+    assert "release" in (data.get("action") or "")
     assert data.get("sent") is True
     # Disable called exactly once (single toggle — not once per adv_id)
     assert mock_client.disable_advance_automation.call_count == 1
@@ -6663,7 +6667,7 @@ async def test_break_out_selects_run_state_only_automation(mock_client):
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await break_out_of_automation("C58ZA", port=1, dry_run=True)
     data = json.loads(result)
-    assert data.get("action") == "break_out"
+    assert "release" in (data.get("action") or "")
     assert "sequence" in data
     assert data.get("automation_name") == "Moderate Airflow"
 

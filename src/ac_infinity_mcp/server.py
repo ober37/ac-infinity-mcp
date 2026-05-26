@@ -23,7 +23,6 @@ from ac_infinity_mcp.analytics import (
 from ac_infinity_mcp.client import ACInfinityClient
 from ac_infinity_mcp.schema import (
     _ADVANCE_MODE_TYPE,
-    ADVANCE_REVERT_BEHAVIOR_CONFIRMED,
     ACInfinityAdvanceConflictError,
     ACInfinityAPIError,
     ACInfinityAuthError,
@@ -270,7 +269,31 @@ async def discover_devices() -> str:
             for d in devices
         ]
 
-        return json.dumps({"devices": result}, indent=2)
+        if len(result) >= 3:
+            _rows = "\n".join(
+                f"| {_sanitize_api_string(d['device_name'], 64) or 'Unknown'} "
+                f"| {d['device_id']} | {d['status']} |"
+                for d in result
+            )
+            _human_summary = f"| Device | ID | Status |\n|---|---|---|\n{_rows}"
+        elif len(result) == 2:
+            _parts = [
+                f"{_sanitize_api_string(d['device_name'], 64) or 'Unknown'}"
+                f" ({d['device_id']}, {d['status']})"
+                for d in result
+            ]
+            _human_summary = f"2 devices found: {', '.join(_parts)}."
+        elif len(result) == 1:
+            _d = result[0]
+            _human_summary = (
+                f"1 device found: "
+                f"{_sanitize_api_string(_d['device_name'], 64) or 'Unknown'}"
+                f" ({_d['device_id']}, {_d['status']})."
+            )
+        else:
+            _human_summary = "No devices found."
+
+        return json.dumps({"devices": result, "human_summary": _human_summary}, indent=2)
 
     except ACInfinityAuthError as e:
         logger.warning("Auth error in discover_devices: %s", e)
@@ -340,16 +363,26 @@ async def get_device_reading(device_id: str) -> str:
         tz = _effective_tz(parsed.get("zone_id"))
         unit = _effective_unit(parsed.get("temp_unit_raw"))
 
+        _temp_val = _to_preferred_temp(parsed.get("temperature_c", 0.0), unit)
+        _unit_lbl = _unit_label(unit)
+        _humid = parsed.get("humidity")
+        _vpd = parsed.get("vpd")
+        _ts = _utc_iso_to_local(parsed.get("timestamp"), tz)
+        _safe_name = _sanitize_api_string(parsed.get("device_name"), 64) or "Device"
         output = {
             "device_id": device_id,
             "device_name": parsed.get("device_name"),
-            "temperature": _to_preferred_temp(parsed.get("temperature_c", 0.0), unit),
-            "unit": _unit_label(unit),
-            "humidity": parsed.get("humidity"),
-            "vpd": parsed.get("vpd"),
-            "timestamp": _utc_iso_to_local(parsed.get("timestamp"), tz),
+            "temperature": _temp_val,
+            "unit": _unit_lbl,
+            "humidity": _humid,
+            "vpd": _vpd,
+            "timestamp": _ts,
             "ports": parsed.get("ports", []),
             "external_sensors": parsed.get("external_sensors", []),
+            "human_summary": (
+                f"{_safe_name}: {_temp_val}{_unit_lbl}, {_humid}% RH, VPD {_vpd} kPa. "
+                f"Reading from {_ts}."
+            ),
         }
 
         return json.dumps(output, indent=2)
@@ -651,6 +684,14 @@ async def check_vpd_drift(device_id: str, stage: str = "veg") -> str:
                 "Raise humidity or lower temperature to reduce VPD."
             )
 
+        if status == "OK":
+            _vpd_summary = (
+                f"VPD is on target at {current_vpd:.2f} kPa "
+                f"(target {target_range[0]:.2f}–{target_range[1]:.2f} kPa for {stage})."
+            )
+        else:
+            _vpd_summary = alert or ""  # alert is always set when status != OK
+
         return json.dumps({
             "device_id": device_id,
             "current_vpd": current_vpd,
@@ -659,6 +700,7 @@ async def check_vpd_drift(device_id: str, stage: str = "veg") -> str:
             "status": status,
             "deviation": deviation,
             "alert": alert,
+            "human_summary": _vpd_summary,
         }, indent=2)
 
     except ACInfinityAuthError as e:
@@ -724,7 +766,28 @@ async def get_all_device_readings() -> str:
                     "error": str(e),
                 })
 
-        return json.dumps({"readings": readings}, indent=2)
+        _ok = [r for r in readings if "error" not in r]
+        if len(_ok) >= 3:
+            _rows = "\n".join(
+                f"| {_sanitize_api_string(r.get('device_name'), 64) or 'Unknown'} "
+                f"| {r.get('temperature')}{r.get('unit')} "
+                f"| {r.get('humidity')}% "
+                f"| {r.get('vpd')} kPa |"
+                for r in _ok
+            )
+            _all_summary = f"| Device | Temp | Humidity | VPD |\n|---|---|---|---|\n{_rows}"
+        elif _ok:
+            _all_parts = [
+                f"{_sanitize_api_string(r.get('device_name'), 64) or 'Unknown'}: "
+                f"{r.get('temperature')}{r.get('unit')}, {r.get('humidity')}% RH, "
+                f"VPD {r.get('vpd')} kPa"
+                for r in _ok
+            ]
+            _all_summary = ". ".join(_all_parts) + "."
+        else:
+            _all_summary = "No readings available."
+
+        return json.dumps({"readings": readings, "human_summary": _all_summary}, indent=2)
 
     except ACInfinityAuthError as e:
         logger.warning("Auth error in get_all_device_readings: %s", e)
@@ -864,11 +927,40 @@ async def detect_environment_trends(device_id: str, days: int = 7) -> str:
                 d["projection_unit"] = _unit_label(unit)
             trend_output.append(d)
 
+        _arrows = {"flat": "→", "rising": "↑", "falling": "↓"}
+        _trend_rows = []
+        _alert_lines = []
+        for _t in trend_output:
+            _metric_label = _t["metric"].replace("_", " ").capitalize()
+            _arrow = _arrows.get(_t["direction"], "")
+            _dir_str = f"{_arrow} {_t['direction'].capitalize()}"
+            _slope_unit = _t.get("slope_unit", "/hr")
+            _slope_str = f"{_t['slope']:+.4f} {_slope_unit}"
+            _proj = _t.get("seven_day_projection")
+            _proj_unit = _t.get("projection_unit", "")
+            _proj_str = f"{_proj} {_proj_unit}".strip() if _proj is not None else "N/A"
+            _trend_rows.append(
+                f"| {_metric_label} | {_dir_str} | {_slope_str} | {_proj_str} |"
+            )
+            if _t.get("alert"):
+                _alert_lines.append(
+                    f"⚠ {_metric_label} is trending {_t['direction']} — "
+                    f"7-day projection: {_proj_str}."
+                )
+        _table = (
+            "| Metric | Direction | Slope | 7-Day Projection |\n"
+            "|---|---|---|---|\n"
+            + "\n".join(_trend_rows)
+        )
+        if _alert_lines:
+            _table += "\n\n" + "\n".join(_alert_lines)
+
         return json.dumps({
             "device_id": device_id,
             "days_analyzed": days,
             "readings_used": len(readings),
             "trends": trend_output,
+            "human_summary": _table,
         }, indent=2)
 
     except ACInfinityAuthError as e:
@@ -1867,11 +1959,26 @@ async def get_port_status(device_id: str, port: int) -> str:
         elif mode_str == "ADVANCE":
             mode_str = "Automation"
 
+        _ps_raw_name = port_data.get("portName", f"Port {port}")
+        _ps_label = (
+            f"{_ps_raw_name} (Port {port})" if _ps_raw_name != f"Port {port}" else f"Port {port}"
+        )
+        _ps_power = port_data.get("speak", 0)
+        if mode_str == "Automation" and automation_name:
+            _ps_summary = (
+                f"{_ps_label} is running under '{automation_name}' automation "
+                f"at speed {_ps_power}."
+            )
+        elif _ps_power == 0:
+            _ps_summary = f"{_ps_label} is {mode_str} (speed 0)."
+        else:
+            _ps_summary = f"{_ps_label} is {mode_str} at speed {_ps_power}."
+
         result: dict = {
             "device_id": device_id,
             "port": port,
-            "port_name": port_data.get("portName", f"Port {port}"),
-            "power_level": port_data.get("speak", 0),
+            "port_name": _ps_raw_name,
+            "power_level": _ps_power,
             "mode": mode_str,
         }
         if automation_name is not None:
@@ -1879,11 +1986,12 @@ async def get_port_status(device_id: str, port: int) -> str:
         remain = port_data.get("remainTime") or 0
         if remain > 0:
             result["remain_time_seconds"] = remain
-        if not port_data.get("loadState", 0) and not port_data.get("speak", 0):
+        if not port_data.get("loadState", 0) and not _ps_power:
             result["plug_status"] = "not powered"
         if _is_port_empty(port_data, port, device):
-            _port_label_s = port_data.get("portName", f"Port {port}")
+            _port_label_s = _ps_raw_name
             result["note"] = _empty_port_note(port, _port_label_s)
+        result["human_summary"] = _ps_summary
         return json.dumps(result, indent=2)
 
     except ACInfinityAuthError as e:
@@ -1925,13 +2033,11 @@ async def get_port_settings(device_id: str, port: int) -> str:
               "mode": "AUTO",
               "speed_target": 5,
               "vpd_target_kpa": null,
-              "temp_range_c": null,
+              "temp_range": null,
               "humidity_range_pct": null,
               "schedule_window": null,
               "cycle_on_seconds": 300,
-              "cycle_off_seconds": 60,
-              "timer_on_seconds": 0,
-              "timer_off_seconds": 0
+              "cycle_off_seconds": 60
             }
 
         When ``mode`` is ``"ADVANCE"``, ``speed_target`` is null (an automation governs
@@ -1959,7 +2065,7 @@ async def get_port_settings(device_id: str, port: int) -> str:
         automation whose ``grouptDevType`` bitmask covers this port (bitmask-matched);
         null when no governing automation, no matching port group, or degraded.
         ``vpd_target_kpa`` is non-null only when VPD automation is active.
-        ``temp_range_c`` / ``humidity_range_pct`` are non-null only when those
+        ``temp_range`` / ``humidity_range_pct`` are non-null only when those
         thresholds are enabled. ``schedule_window`` times are in device local time
         (not UTC).
 
@@ -2066,7 +2172,7 @@ async def get_port_settings(device_id: str, port: int) -> str:
             if degraded:
                 resp["note"] = (
                     "Could not fetch automation details."
-                    " Use list_advance_automations to view active automations."
+                    " Ask me to list your automations for details."
                 )
             if _is_port_empty(port_data, port, device):
                 _ps_port_label = (
@@ -2151,6 +2257,10 @@ async def get_port_settings(device_id: str, port: int) -> str:
         else:
             human_summary = f"Port is in {mode_str} mode."
 
+        _cycle_on = settings.get("activeCycleOn") or 0
+        _cycle_off = settings.get("activeCycleOff") or 0
+        _timer_on = settings.get("acitveTimerOn") or 0
+        _timer_off = settings.get("acitveTimerOff") or 0
         non_adv_resp: dict = {
             "device_id": device_id,
             "port": port,
@@ -2160,12 +2270,14 @@ async def get_port_settings(device_id: str, port: int) -> str:
             "temp_range": temp_range,
             "humidity_range_pct": humi_range,
             "schedule_window": schedule_window,
-            "cycle_on_seconds": settings.get("activeCycleOn", 0),
-            "cycle_off_seconds": settings.get("activeCycleOff", 0),
-            "timer_on_seconds": settings.get("acitveTimerOn", 0),
-            "timer_off_seconds": settings.get("acitveTimerOff", 0),
             "human_summary": human_summary,
         }
+        if _cycle_on or _cycle_off:
+            non_adv_resp["cycle_on_seconds"] = _cycle_on
+            non_adv_resp["cycle_off_seconds"] = _cycle_off
+        if _timer_on or _timer_off:
+            non_adv_resp["timer_on_seconds"] = _timer_on
+            non_adv_resp["timer_off_seconds"] = _timer_off
         if _is_port_empty(port_data, port, device):
             _gps_port_label = (
                 port_data.get("portName", f"Port {port}") if port_data else f"Port {port}"
@@ -3546,7 +3658,6 @@ async def enable_advance_automation(
                 "action": "enable",
                 "automation_name": name,
                 "automation_id": found["automation_id"],
-                "adv_ids_to_toggle": found["adv_ids"],
                 "dry_run": True,
                 "sent": False,
             })
@@ -3590,9 +3701,10 @@ async def disable_advance_automation(
     Reads current state before toggling — no-ops if already disabled.
     Defaults to dry_run=True — set dry_run=False to execute.
 
-    WARNING: Whether disabling reverts ports to a previous state is not yet
-    confirmed (revert_behavior_confirmed=False). Use break_out_of_automation
-    for a controlled handoff that locks co-governed ports to safe manual speeds.
+    Live-tested (2026-05-22): disabling sets governed ports to OFF; re-enabling
+    immediately restores ADVANCE mode at automation-defined speeds — no next-trigger
+    wait. Use break_out_of_automation for a controlled handoff that also locks
+    co-governed ports to safe manual speeds.
 
     Args:
         device_id: The AC Infinity device code (from discover_devices).
@@ -3602,7 +3714,7 @@ async def disable_advance_automation(
     Returns:
         JSON with action, automation_name, automation_id, governed_ports (list of
         ``{port, port_name}`` dicts decoded from the automation's grouptDevType bitmasks),
-        revert_behavior_confirmed, dry_run, sent, and to_restore (natural-language hint
+        human_summary, dry_run, sent, and to_restore (natural-language hint
         for re-enabling). On failure returns ``{"error": "..."}``.
     """
     try:
@@ -3658,13 +3770,21 @@ async def disable_advance_automation(
                         governed_ports.append({"port": _pnum, "port_name": _label})
         governed_ports.sort(key=lambda x: x["port"])
 
+        _governed_labels = [p["port_name"] for p in governed_ports]
+        _governed_str = (
+            ", ".join(_governed_labels) if _governed_labels else "its governed ports"
+        )
         if dry_run:
             return json.dumps({
                 "action": "disable",
                 "automation_name": name,
                 "automation_id": found["automation_id"],
                 "governed_ports": governed_ports,
-                "revert_behavior_confirmed": ADVANCE_REVERT_BEHAVIOR_CONFIRMED,
+                "human_summary": (
+                    f"Disabling '{name}' will take {_governed_str} off automation control. "
+                    "Re-enabling it restores automation control immediately — "
+                    "no wait for the next trigger."
+                ),
                 "dry_run": True,
                 "sent": False,
                 "to_restore": to_restore,
@@ -3682,7 +3802,10 @@ async def disable_advance_automation(
             "automation_name": name,
             "automation_id": found["automation_id"],
             "governed_ports": governed_ports,
-            "revert_behavior_confirmed": ADVANCE_REVERT_BEHAVIOR_CONFIRMED,
+            "human_summary": (
+                f"'{name}' has been disabled. "
+                "Re-enabling it will restore automation control immediately."
+            ),
             "dry_run": False,
             "sent": True,
             "to_restore": to_restore,
@@ -4203,16 +4326,33 @@ async def break_out_of_automation(
             "action": "target port freed from automation — apply your change manually",
         })
 
+        _target_label = (
+            f"{port_name} (Port {port})" if port_name != f"Port {port}" else f"Port {port}"
+        )
+        _co_label_parts = [
+            f"{cp['port_name']} (Port {cp['port']})"
+            if cp["port_name"] != f"Port {cp['port']}"
+            else f"Port {cp['port']}"
+            for cp in co_ports
+        ]
+        _co_str = ", ".join(_co_label_parts) if _co_label_parts else ""
+        _human_co = f" {_co_str} will be locked to current speeds." if _co_str else ""
+        _bo_human_summary = (
+            f"This will disable the '{auto_name}' automation and free {_target_label} for "
+            f"manual control.{_human_co} Re-enabling the automation later restores all ports "
+            "immediately — no wait for the next trigger."
+        )
+
         if dry_run:
             return json.dumps({
-                "action": "break_out",
+                "action": f"release {_target_label} from '{auto_name}' automation",
                 "dry_run": True,
                 "automation_name": auto_name,
                 "automation_id": auto_id,
                 "target_port": port,
                 "target_port_name": port_name,
                 "estimated_duration_seconds": estimated_duration,
-                "revert_behavior_confirmed": ADVANCE_REVERT_BEHAVIOR_CONFIRMED,
+                "human_summary": _bo_human_summary,
                 "sequence": sequence,
                 "co_ports_to_lock": [
                     {
@@ -4229,9 +4369,9 @@ async def break_out_of_automation(
         if confirm_automation_name is None:
             return json.dumps({
                 "error": (
-                    "confirm_automation_name is required when dry_run=False. "
-                    f"Pass confirm_automation_name='{auto_name}' to confirm "
-                    f"you intend to disable automation '{auto_name}'."
+                    "confirm_automation_name is required to proceed. "
+                    f"Provide the automation name '{auto_name}' to confirm "
+                    "you intend to disable it."
                 ),
             })
 
@@ -4326,18 +4466,22 @@ async def break_out_of_automation(
                     "rollback_succeeded": rollback_succeeded,
                     "recovery_steps": [
                         f"Manually re-enable automation '{auto_name}' via the AC Infinity app.",
-                        "Or call enable_advance_automation to restore automation control.",
+                        "To restore automation control, ask me to re-enable the automation.",
                     ],
                 })
 
         return json.dumps({
-            "action": "break_out",
+            "action": f"release {_target_label} from '{auto_name}' automation",
             "dry_run": False,
             "automation_name": auto_name,
             "automation_id": auto_id,
             "co_ports_locked": co_ports_locked,
             "target_port": port,
             "target_port_freed": True,
+            "human_summary": (
+                f"Released {_target_label} from the '{auto_name}' automation. "
+                "You can now control it manually."
+            ),
             "sent": True,
         }, indent=2)
 
