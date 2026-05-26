@@ -3782,8 +3782,8 @@ async def disable_advance_automation(
                 "governed_ports": governed_ports,
                 "human_summary": (
                     f"Disabling '{name}' will take {_governed_str} off automation control. "
-                    "Re-enabling it restores automation control immediately — "
-                    "no wait for the next trigger."
+                    "You can re-enable it at any time and all ports will return to automated "
+                    "control right away."
                 ),
                 "dry_run": True,
                 "sent": False,
@@ -4339,8 +4339,8 @@ async def break_out_of_automation(
         _human_co = f" {_co_str} will be locked to current speeds." if _co_str else ""
         _bo_human_summary = (
             f"This will disable the '{auto_name}' automation and free {_target_label} for "
-            f"manual control.{_human_co} Re-enabling the automation later restores all ports "
-            "immediately — no wait for the next trigger."
+            f"manual control.{_human_co} You can re-enable the automation at any time — "
+            "all ports will return to automated control right away."
         )
 
         if dry_run:

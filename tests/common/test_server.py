@@ -5851,7 +5851,7 @@ async def test_disable_advance_automation_dry_run(mock_client):
     assert data["action"] == "disable"
     assert "revert_behavior_confirmed" not in data
     assert "human_summary" in data
-    assert "restores automation control immediately" in data["human_summary"]
+    assert "return to automated control right away" in data["human_summary"]
     assert "to_restore" in data
     assert data["to_restore"] == "Ask me to re-enable 'Moderate Airflow'."
     assert "adv_ids_to_toggle" not in data
@@ -6155,7 +6155,7 @@ async def test_break_out_dry_run(mock_client):
     assert data["estimated_duration_seconds"] > 0
     assert "revert_behavior_confirmed" not in data
     assert "human_summary" in data
-    assert "restores all ports immediately" in data["human_summary"]
+    assert "return to automated control right away" in data["human_summary"]
     assert "co_ports_to_lock" in data
     assert isinstance(data["co_ports_to_lock"], list)
     # No writes on dry run
