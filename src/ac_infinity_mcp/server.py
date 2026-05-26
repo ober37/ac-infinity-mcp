@@ -1520,6 +1520,23 @@ def _is_port_empty(port_data: dict | None, port: int, device: dict | None) -> bo
     return False
 
 
+def _is_port_not_powered(port_data: dict | None, device: dict | None) -> bool:
+    """Return True when a port is not currently drawing power on a legacy device.
+
+    Fires for both custom-named and default-named ports.  Unlike ``_is_port_empty``,
+    this helper does NOT skip custom-named ports — a named port can still be off.
+
+    Returns False for devTypes 18 and 22 (``_ZERO_LOAD_DEV_TYPES``) because those
+    controllers always report ``portsLoad=0`` regardless of actual state; the signal
+    is meaningless there.  Returns False when either arg is None.
+    """
+    if port_data is None or device is None:
+        return False
+    if device.get("devType") in _ZERO_LOAD_DEV_TYPES:
+        return False
+    return (port_data.get("portsLoad") or 0) == 0
+
+
 def _empty_port_warning(port: int, port_label: str) -> str:
     """Return the grower-friendly advisory warning text for an empty port.
 
@@ -1577,7 +1594,7 @@ def _find_governing_port_group(automation: dict, port: int) -> dict | None:
 
 async def _build_advance_conflict_response(
     device_id: str, dev_id: object, port: int, port_name: str,
-    requested_speed: int | None = None,
+    *, device: dict | None = None, requested_speed: int | None = None,
 ) -> str:
     """Build a structured ADVANCE_AUTOMATION conflict response for write tools.
 
@@ -1606,6 +1623,10 @@ async def _build_advance_conflict_response(
         dev_id: Numeric device ID for the automation lookup API call.
         port: 1-based port number.
         port_name: Human-readable port name (e.g. ``"Filter"``).
+        device: The full device dict from the device-lookup call in the caller.
+            When provided and the port is not drawing power (``portsLoad == 0``),
+            a "not currently powered" note is appended to ``suggested_reply`` and
+            ``human_summary`` in Sub-path A only.  Ignored for all other sub-paths.
         requested_speed: The speed the caller tried to set (from set_port_speed).
             When not None, adds a ``"0_update_speed"`` option in the normal path.
             Pass ``None`` from set_port_on / set_port_off (no speed option applies).
@@ -1722,6 +1743,30 @@ async def _build_advance_conflict_response(
             "available": False,
             "status": "not_yet_implemented",
         }
+
+        # Append "not powered" note when the port is not drawing power (Sub-path A only).
+        ports_list = (device or {}).get("deviceInfo", {}).get("ports", [])
+        port_data_local = next((p for p in ports_list if p.get("port") == port), None)
+        if _is_port_not_powered(port_data_local, device):
+            power_note_speed = (
+                f" Note: {port_display} is not currently drawing power"
+                " — verify it is plugged in and switched on before making speed changes."
+            )
+            power_note_nospeed = (
+                f" Note: {port_display} is not currently drawing power"
+                " — verify it is plugged in and switched on before proceeding."
+            )
+            human_summary += f" Note: {port_display} is not currently powered."
+            if requested_speed is not None:
+                suggested_reply = (
+                    suggested_reply.removesuffix(" What would you prefer?")
+                    + power_note_speed
+                    + " What would you prefer?"
+                )
+            else:
+                suggested_reply = suggested_reply.replace(
+                    " Alternatively,", power_note_nospeed + " Alternatively,", 1
+                )
 
     elif not api_call_failed and has_active:
         # SUB-PATH B — active automations exist, but none has a bitmask covering this port.
@@ -2419,7 +2464,7 @@ async def set_port_speed(
         port_name = _get_port_name_from_device(device, port)
         dev_id = device.get("devId") if device else None
         return await _build_advance_conflict_response(
-            device_id, dev_id, port, port_name, requested_speed=speed
+            device_id, dev_id, port, port_name, device=device, requested_speed=speed
         )
     except ACInfinityDeviceError as e:
         logger.warning("Device error in set_port_speed (device=%s port=%s): %s", device_id, port, e)
@@ -2513,7 +2558,9 @@ async def set_port_on(
     except ACInfinityAdvanceConflictError:
         port_name = _get_port_name_from_device(device, port)
         dev_id = device.get("devId") if device else None
-        return await _build_advance_conflict_response(device_id, dev_id, port, port_name)
+        return await _build_advance_conflict_response(
+            device_id, dev_id, port, port_name, device=device
+        )
     except ACInfinityDeviceError as e:
         logger.warning("Device error in set_port_on (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({"error": str(e)})
@@ -2612,7 +2659,9 @@ async def set_port_off(
     except ACInfinityAdvanceConflictError:
         port_name = _get_port_name_from_device(device, port)
         dev_id = device.get("devId") if device else None
-        return await _build_advance_conflict_response(device_id, dev_id, port, port_name)
+        return await _build_advance_conflict_response(
+            device_id, dev_id, port, port_name, device=device
+        )
     except ACInfinityDeviceError as e:
         logger.warning("Device error in set_port_off (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({"error": str(e)})
@@ -2737,7 +2786,9 @@ async def set_vpd_automation(
     except ACInfinityAdvanceConflictError:
         port_name = _get_port_name_from_device(device, port)
         dev_id = device.get("devId") if device else None
-        return await _build_advance_conflict_response(device_id, dev_id, port, port_name)
+        return await _build_advance_conflict_response(
+            device_id, dev_id, port, port_name, device=device
+        )
     except ACInfinityDeviceError as e:
         logger.warning(
             "Device error in set_vpd_automation (device=%s port=%s): %s",
@@ -2891,7 +2942,9 @@ async def set_temperature_automation(
     except ACInfinityAdvanceConflictError:
         port_name = _get_port_name_from_device(device, port)
         dev_id = device.get("devId") if device else None
-        return await _build_advance_conflict_response(device_id, dev_id, port, port_name)
+        return await _build_advance_conflict_response(
+            device_id, dev_id, port, port_name, device=device
+        )
     except ACInfinityDeviceError as e:
         logger.warning(
             "Device error in set_temperature_automation (device=%s port=%s): %s",
@@ -3008,7 +3061,9 @@ async def set_humidity_automation(
     except ACInfinityAdvanceConflictError:
         port_name = _get_port_name_from_device(device, port)
         dev_id = device.get("devId") if device else None
-        return await _build_advance_conflict_response(device_id, dev_id, port, port_name)
+        return await _build_advance_conflict_response(
+            device_id, dev_id, port, port_name, device=device
+        )
     except ACInfinityDeviceError as e:
         logger.warning(
             "Device error in set_humidity_automation (device=%s port=%s): %s",
@@ -3173,7 +3228,9 @@ async def set_port_mode(
     except ACInfinityAdvanceConflictError:
         port_name = _get_port_name_from_device(device, port)
         dev_id = device.get("devId") if device else None
-        return await _build_advance_conflict_response(device_id, dev_id, port, port_name)
+        return await _build_advance_conflict_response(
+            device_id, dev_id, port, port_name, device=device
+        )
     except ACInfinityDeviceError as e:
         logger.warning("Device error in set_port_mode (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({"error": str(e)})
@@ -3311,7 +3368,9 @@ async def apply_grow_stage_template(
     except ACInfinityAdvanceConflictError:
         port_name = _get_port_name_from_device(device, port)
         dev_id = device.get("devId") if device else None
-        return await _build_advance_conflict_response(device_id, dev_id, port, port_name)
+        return await _build_advance_conflict_response(
+            device_id, dev_id, port, port_name, device=device
+        )
     except ACInfinityDeviceError as e:
         logger.warning(
             "Device error in apply_grow_stage_template (device=%s port=%s stage=%s): %s",

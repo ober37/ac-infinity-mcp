@@ -28,6 +28,7 @@ from ac_infinity_mcp.server import (
     _format_window_dt,
     _group_automations,
     _is_port_empty,
+    _is_port_not_powered,
     _parse_duration_seconds,
     _parse_schedule_time,
     _sanitize_api_string,
@@ -8680,3 +8681,139 @@ async def test_set_port_on_devtype18_custom_name_no_warning(mock_client):
     assert "warning" not in data
 
 
+# ============ _is_port_not_powered helper (issue #178) ============
+
+
+def test_is_port_not_powered_none_port_data():
+    """None port_data → False (safe default)."""
+    device = _make_device(dev_type=11)
+    assert _is_port_not_powered(None, device) is False
+
+
+def test_is_port_not_powered_none_device():
+    """None device → False (safe default)."""
+    port_data = _make_port_data(1, name="Humidifier", ports_load=0)
+    assert _is_port_not_powered(port_data, None) is False
+
+
+def test_is_port_not_powered_devtype18_skipped():
+    """devType=18 always reports portsLoad=0 → helper returns False (signal unreliable)."""
+    port_data = _make_port_data(4, name="Filter", ports_load=0)
+    device = _make_device(dev_type=18)
+    assert _is_port_not_powered(port_data, device) is False
+
+
+def test_is_port_not_powered_devtype22_skipped():
+    """devType=22 always reports portsLoad=0 → helper returns False (signal unreliable)."""
+    port_data = _make_port_data(3, name="Port 3", ports_load=0)
+    device = _make_device(dev_type=22)
+    assert _is_port_not_powered(port_data, device) is False
+
+
+def test_is_port_not_powered_zero_load_default_name():
+    """Standard device, default-named port, portsLoad=0 → True."""
+    port_data = _make_port_data(7, name="Port 7", ports_load=0)
+    device = _make_device(dev_type=11)
+    assert _is_port_not_powered(port_data, device) is True
+
+
+def test_is_port_not_powered_zero_load_custom_name():
+    """Standard device, custom-named port, portsLoad=0 → True.
+
+    Unlike _is_port_empty, custom names do NOT skip the check — a named port
+    can still be off (the issue #178 use case: 'Humidifier' with portsLoad=0).
+    """
+    port_data = _make_port_data(1, name="Humidifier", ports_load=0)
+    device = _make_device(dev_type=11)
+    assert _is_port_not_powered(port_data, device) is True
+
+
+def test_is_port_not_powered_nonzero_load():
+    """Standard device, portsLoad=5 → False (port is drawing power)."""
+    port_data = _make_port_data(2, name="Exhaust", ports_load=5)
+    device = _make_device(dev_type=11)
+    assert _is_port_not_powered(port_data, device) is False
+
+
+def test_is_port_not_powered_missing_ports_load_key():
+    """Missing portsLoad key coalesces to 0 → True (treat absent as not powered)."""
+    port_data = {"port": 3}  # no portsLoad key
+    device = _make_device(dev_type=11)
+    assert _is_port_not_powered(port_data, device) is True
+
+
+# ============ _build_advance_conflict_response not-powered note (issue #178) ============
+
+
+async def test_advance_conflict_not_powered_note_nospeed_path(mock_client):
+    """Sub-path A, no speed, portsLoad=0 → 'not currently drawing power' note in
+    suggested_reply and human_summary.
+
+    Port 4 is in MOCK_ADVANCE_AUTOMATIONS_LIST (grouptDevType=8, bit 3 = Port 4),
+    so the bitmask lookup yields Sub-path A ('Moderate Airflow').
+    Port 4 is given portsLoad=0 and a custom name 'Filter' to trigger the note.
+    """
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
+    mock_client.get_advance_automations.return_value = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST)
+    dev = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    dev["deviceInfo"]["ports"].append(
+        {"port": 4, "portName": "Filter", "speak": 0, "portsLoad": 0,
+         "loadState": 0, "curMode": 15, "remainTime": 0}
+    )
+    mock_client.get_devices.return_value = [dev]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_off("C58ZA", port=4, dry_run=False)
+    data = json.loads(result)
+    assert data.get("conflict") == "ADVANCE_AUTOMATION"
+    assert "not currently drawing power" in data["suggested_reply"]
+    assert "not currently powered" in data["human_summary"]
+    # The note must appear before the closing prompt
+    assert data["suggested_reply"].endswith("What would you prefer?") is False or \
+        "not currently drawing power" in data["suggested_reply"]
+
+
+async def test_advance_conflict_not_powered_note_speed_path(mock_client):
+    """Sub-path A, requested_speed provided, portsLoad=0 → note injected before
+    'What would you prefer?' and suggested_reply still ends with that phrase.
+
+    Port 4 in MOCK_ADVANCE_AUTOMATIONS_LIST (grouptDevType=8).
+    """
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
+    mock_client.get_advance_automations.return_value = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST)
+    dev = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    dev["deviceInfo"]["ports"].append(
+        {"port": 4, "portName": "Filter", "speak": 0, "portsLoad": 0,
+         "loadState": 0, "curMode": 15, "remainTime": 0}
+    )
+    mock_client.get_devices.return_value = [dev]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_speed("C58ZA", port=4, speed=5, dry_run=False)
+    data = json.loads(result)
+    assert data.get("conflict") == "ADVANCE_AUTOMATION"
+    assert "not currently drawing power" in data["suggested_reply"]
+    assert data["suggested_reply"].endswith("What would you prefer?")
+    assert "not currently powered" in data["human_summary"]
+
+
+async def test_advance_conflict_not_powered_note_absent_on_subpath_b(mock_client):
+    """Sub-path B regression: portsLoad=0 on a port not covered by any bitmask
+    must NOT inject the 'not powered' note.
+
+    Port 1 has no coverage in MOCK_ADVANCE_AUTOMATIONS_LIST (port bitmasks are
+    grouptDevType=48 and grouptDevType=8 and grouptDevType=4 — none covers port 1),
+    so the response follows Sub-path B (controller-wide lock).  The note is only
+    valid when we know WHICH automation governs the port; on Sub-path B we don't.
+    """
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
+    mock_client.get_advance_automations.return_value = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST)
+    dev = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    # Mutate port 1 to portsLoad=0 to confirm the note is NOT injected on Sub-path B.
+    dev["deviceInfo"]["ports"][0]["portsLoad"] = 0
+    mock_client.get_devices.return_value = [dev]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_off("C58ZA", port=1, dry_run=False)
+    data = json.loads(result)
+    assert data.get("conflict") == "ADVANCE_AUTOMATION"
+    assert "1_break_out" not in data["options"]  # confirms Sub-path B
+    assert "not currently drawing power" not in data["suggested_reply"]
+    assert "not currently powered" not in data["human_summary"]
