@@ -1788,12 +1788,14 @@ async def get_port_status(device_id: str, port: int) -> str:
             }
 
         ``mode`` is one of: OFF, ON, AUTO, TIMER_TO_ON, TIMER_TO_OFF, CYCLE, SCHEDULE, VPD,
-        ADVANCE. ``plug_status`` is only present when no current is detected on the port (the
+        Automation. ``plug_status`` is only present when no current is detected on the port (the
         port is not powered or nothing is connected). It is omitted when the port is running.
         ``remain_time_seconds`` is only present when a countdown timer is active (value > 0);
         it is omitted when there is no active timer.
-        When ``mode`` is ``ADVANCE``, the port is governed by a named Advance Automation program
-        in the AC Infinity app.
+        When ``mode`` is ``Automation``, the port is governed by a named Advance Automation
+        program in the AC Infinity app. ``automation_name`` is present only when the port is
+        under automation control and the governing automation name was successfully resolved;
+        absent otherwise.
 
         When the port appears to have nothing connected (default-named ``"Port N"`` with zero load,
         or a devType=18/22 controller), the response also includes a ``note`` field alerting the
@@ -1838,6 +1840,22 @@ async def get_port_status(device_id: str, port: int) -> str:
         else:
             mode_str = _decode_mode(cur_mode_int)
 
+        automation_name: str | None = None
+        if mode_str == "ADVANCE":
+            try:
+                raw_adv = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
+                governing = _find_governing_automation(_group_automations(raw_adv), port)
+                automation_name = governing["name"] if governing else None
+            except ACInfinityAuthError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Could not fetch advance automations in get_port_status (device=%s): %s",
+                    device_id,
+                    type(exc).__name__,
+                )
+            mode_str = "Automation"
+
         result: dict = {
             "device_id": device_id,
             "port": port,
@@ -1845,6 +1863,8 @@ async def get_port_status(device_id: str, port: int) -> str:
             "power_level": port_data.get("speak", 0),
             "mode": mode_str,
         }
+        if automation_name is not None:
+            result["automation_name"] = automation_name
         remain = port_data.get("remainTime") or 0
         if remain > 0:
             result["remain_time_seconds"] = remain
