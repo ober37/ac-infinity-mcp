@@ -687,6 +687,9 @@ async def get_all_device_readings() -> str:
         JSON with ``"readings"`` list — one entry per device, same shape as
         ``get_device_reading``. Devices that fail to parse individually include
         an ``"error"`` key instead of sensor fields.
+        ``ports[].plug_status`` is present on not-powered port entries (same
+        ``loadState == 0`` AND ``speak == 0`` condition as ``get_device_reading``);
+        omitted when the port is running.
         ``external_sensors`` excludes phantom entries (API-reported sensor slots
         with no physical hardware connected — see API Quirk 20).
         On auth/API failure returns ``{"error": "...", "detail": "..."}``.
