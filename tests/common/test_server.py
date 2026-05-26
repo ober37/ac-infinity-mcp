@@ -4455,7 +4455,7 @@ async def test_get_port_settings_empty_port_stale_note(mock_client):
         result = await get_port_settings("C58ZA", 3)
     data = json.loads(result)
     assert "stale" in data["human_summary"]
-    assert "stale" in data["note"]
+    assert "different port" in data["note"]
     assert "Humidity automation" not in data["human_summary"]
     assert data["humidity_range_pct"] == {"min_pct": 60, "max_pct": 100}  # raw data preserved
 
@@ -8736,8 +8736,9 @@ async def test_get_port_settings_empty_port_note(mock_client):
         result = await get_port_settings("C58ZA", 7)
     data = json.loads(result)
     assert "note" in data
-    assert "Port 7" in data["note"]
-    assert "connected" in data["note"]
+    assert "different port" in data["note"]
+    assert "Port 7" in data["human_summary"]
+    assert "connected" in data["human_summary"]
 
 
 async def test_get_port_settings_connected_port_no_note(mock_client):

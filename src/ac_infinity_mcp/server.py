@@ -2228,8 +2228,8 @@ async def get_port_settings(device_id: str, port: int) -> str:
                     port_data.get("portName", f"Port {port}") if port_data else f"Port {port}"
                 )
                 _adv_stale_note = (
-                    f"{_ps_port_label} doesn't appear to have anything connected — "
-                    "any settings shown may be stale from a previous configuration. "
+                    f"{_ps_port_label} doesn't appear to have anything connected. "
+                    "Any settings shown may be stale from a previous configuration. "
                     "If you meant a different port, let me know which one."
                 )
                 if "note" in resp:
@@ -2335,13 +2335,11 @@ async def get_port_settings(device_id: str, port: int) -> str:
             _gps_port_label = (
                 port_data.get("portName", f"Port {port}") if port_data else f"Port {port}"
             )
-            _stale_msg = (
-                f"{_gps_port_label} doesn't appear to have anything connected — "
-                "any settings shown may be stale from a previous configuration. "
-                "If you meant a different port, let me know which one."
+            non_adv_resp["human_summary"] = (
+                f"{_gps_port_label} doesn't appear to have anything connected. "
+                "Any settings shown may be stale from a previous configuration."
             )
-            non_adv_resp["note"] = _stale_msg
-            non_adv_resp["human_summary"] = _stale_msg
+            non_adv_resp["note"] = "If you meant a different port, let me know which one."
         return json.dumps(non_adv_resp, indent=2)
 
     except ACInfinityAuthError as e:
