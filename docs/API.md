@@ -1578,7 +1578,9 @@ and the report is still returned.
 ### `get_port_status(device_id, port)`
 
 Get the live operational status of a single port. Reads real-time fields from
-`/api/user/devInfoListAll` that are not exposed by `get_device_reading`.
+`/api/user/devInfoListAll` that are not exposed by `get_device_reading`. When the port is
+in Advance Automation mode, makes a secondary call to `/api/version=2.0/dev/getGroups` to
+resolve the governing automation name (graceful degradation if the secondary call fails).
 
 **Parameters:**
 | Parameter | Type | Description |
@@ -1621,10 +1623,34 @@ Get the live operational status of a single port. Reads real-time fields from
 }
 ```
 
+**Response (Advance Automation port — governing automation found):**
+```json
+{
+  "device_id": "C58ZA",
+  "port": 4,
+  "port_name": "Filter",
+  "power_level": 5,
+  "mode": "Automation",
+  "automation_name": "Moderate Airflow"
+}
+```
+
+**Response (Advance Automation port — name lookup failed or automation not found):**
+```json
+{
+  "device_id": "C58ZA",
+  "port": 4,
+  "port_name": "Filter",
+  "power_level": 5,
+  "mode": "Automation"
+}
+```
+
 **Field notes:**
 - `power_level` — actual current power level 0–10 from `speak` API field
 - `plug_status` *(conditional)* — `"not powered"` when BOTH `loadState == 0` AND `speak == 0`; field is **omitted entirely** when the port is running. Indicates the port is not drawing power — either off by design or nothing connected.
-- `mode` — one of: `OFF`, `ON`, `AUTO`, `VPD`, `TIMER_TO_ON`, `TIMER_TO_OFF`, `CYCLE`, `SCHEDULE`, `ADVANCE`
+- `mode` — one of: `OFF`, `ON`, `AUTO`, `VPD`, `TIMER_TO_ON`, `TIMER_TO_OFF`, `CYCLE`, `SCHEDULE`, `Automation`. `Automation` replaces the raw internal label `ADVANCE` and means the port is governed by a named Advance Automation program. The `Automation` value is returned any time `isOpenAutomation==1` in the device list (Quirk 17/19), regardless of whether the secondary automation-name lookup succeeds.
+- `automation_name` *(optional)* — present only when `mode == "Automation"` AND the governing automation was successfully identified via the secondary `getGroups` call. Absent when the secondary call fails, the port is not covered by any automation's port-group bitmask, or `devId` is absent from the device record.
 - `remain_time_seconds` *(conditional)* — countdown timer seconds remaining from `remainTime` API field; **omitted entirely** when no timer is active (value would be 0). Only present when a TIMER_TO_ON or TIMER_TO_OFF countdown is running.
 - `note` *(optional)* — present when the port appears to have nothing connected (see "Empty-port detection" below). Example: `"Port 7 doesn't appear to have anything connected. If you meant a different port, let me know which one."`
 
