@@ -1046,11 +1046,18 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         day_word = "day" if days == 1 else "days"
         if result:
             port_lines = "; ".join(
-                f"{p['name']} (Port {p['port']}) ran {p['uptime_pct']}% uptime "
-                f"({p['on_hours']}h total)"
-                + (
-                    f", typically active around {p['peak_hour_local']}"
-                    if p["peak_hour_local"] else ""
+                (
+                    (
+                        f"{p['name']} (Port {p['port']})"
+                        if p['name'] != f"Port {p['port']}"
+                        else p['name']
+                    )
+                    + f" ran {p['uptime_pct']}% uptime "
+                    + f"({p['on_hours']}h total)"
+                    + (
+                        f", typically active around {p['peak_hour_local']}"
+                        if p["peak_hour_local"] else ""
+                    )
                 )
                 for p in reliable_dicts
             )
@@ -1058,7 +1065,10 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
             caveat_off = [r for r in caveat_results if not port_speaks.get(r.port, False)]
 
             def _fmt_port_list(reps: list[ActivityReport]) -> str:
-                return ", ".join(f"{r.name} (Port {r.port})" for r in reps)
+                return ", ".join(
+                    f"{r.name} (Port {r.port})" if r.name != f"Port {r.port}" else r.name
+                    for r in reps
+                )
 
             caveat_parts: list[str] = []
             if caveat_on:
@@ -1075,7 +1085,9 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
                         pn = p.get("port")
                         if pn is not None and pn not in result_port_nums:
                             pname = port_names.get(pn, f"Port {pn}")
-                            excl_name_parts.append(f"{pname} (Port {pn})")
+                            excl_name_parts.append(
+                                f"{pname} (Port {pn})" if pname != f"Port {pn}" else pname
+                            )
                     excluded_port_names = ", ".join(excl_name_parts)
                     if excluded_port_names:
                         excl = (
@@ -1129,7 +1141,9 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
                         pn = p.get("port")
                         if pn is not None:
                             pname = port_names.get(pn, f"Port {pn}")
-                            excl_empty_parts.append(f"{pname} (Port {pn})")
+                            excl_empty_parts.append(
+                                f"{pname} (Port {pn})" if pname != f"Port {pn}" else pname
+                            )
                     excl_empty_names = ", ".join(excl_empty_parts)
                     excl_detail = f": {excl_empty_names}" if excl_empty_names else ""
                     human_summary = (
@@ -1469,6 +1483,8 @@ async def _build_advance_conflict_response(
 
     has_active = any(a.get("enabled") or a.get("run_state") for a in automations)
 
+    port_display = f"{port_name} (Port {port})" if port_name != f"Port {port}" else port_name
+
     if governing is not None:
         # SUB-PATH A — an enabled/running automation whose bitmask covers this port
         auto_name = governing["name"]
@@ -1490,7 +1506,7 @@ async def _build_advance_conflict_response(
                 f" (target speed: {current_auto_speed})."
                 f" The easiest fix is to update the automation to run at speed {requested_speed}"
                 " instead — the automation stays active, just at the new speed."
-                f" Alternatively, I can release {port_name} (Port {port}) from the automation"
+                f" Alternatively, I can release {port_display} from the automation"
                 f" so you can control it manually — but that will also release all other ports"
                 f" currently on '{auto_name}'."
                 " What would you prefer?"
@@ -1505,11 +1521,11 @@ async def _build_advance_conflict_response(
             )
         opt1: dict = {
             "description": (
-                f"Release {port_name} (Port {port}) from '{auto_name}' to regain manual control."
+                f"Release {port_display} from '{auto_name}' to regain manual control."
             ),
             "tool": "break_out_of_automation",
             "instruction": (
-                f"Ask me to release {port_name} (Port {port}) from the '{auto_name}'"
+                f"Ask me to release {port_display} from the '{auto_name}'"
                 " automation so you can control it manually."
             ),
             "available": governing.get("enabled", False) or governing.get("run_state", False),
@@ -1677,7 +1693,7 @@ async def _build_advance_conflict_response(
         "summary": summary,
         "human_summary": human_summary,
         "suggested_reply": suggested_reply,
-        "target_port": f"{port_name} (Port {port})",
+        "target_port": port_display,
         "automation_name": auto_name,
         "automation_id": auto_id,
         "active_automations": active_automations,
@@ -2120,7 +2136,11 @@ async def set_port_speed(
 
         ports_list = device.get("deviceInfo", {}).get("ports", [])
         port_data = next((p for p in ports_list if p.get("port") == port), None)
-        has_custom_name = bool(port_data and port_data.get("portName"))
+        has_custom_name = bool(
+            port_data
+            and port_data.get("portName")
+            and port_data.get("portName") != f"Port {port}"
+        )
         port_name = _get_port_name_from_device(device, port)
         port_label = f"{port_name} (Port {port})" if has_custom_name else port_name
 
@@ -2211,7 +2231,11 @@ async def set_port_on(
 
         ports_list = device.get("deviceInfo", {}).get("ports", [])
         port_data = next((p for p in ports_list if p.get("port") == port), None)
-        has_custom_name = bool(port_data and port_data.get("portName"))
+        has_custom_name = bool(
+            port_data
+            and port_data.get("portName")
+            and port_data.get("portName") != f"Port {port}"
+        )
         port_name = _get_port_name_from_device(device, port)
         port_label = f"{port_name} (Port {port})" if has_custom_name else port_name
 
@@ -2297,7 +2321,11 @@ async def set_port_off(
 
         ports_list = device.get("deviceInfo", {}).get("ports", [])
         port_data = next((p for p in ports_list if p.get("port") == port), None)
-        has_custom_name = bool(port_data and port_data.get("portName"))
+        has_custom_name = bool(
+            port_data
+            and port_data.get("portName")
+            and port_data.get("portName") != f"Port {port}"
+        )
         port_name = _get_port_name_from_device(device, port)
         port_label = f"{port_name} (Port {port})" if has_custom_name else port_name
 
@@ -2410,7 +2438,11 @@ async def set_vpd_automation(
 
         ports_list = device.get("deviceInfo", {}).get("ports", [])
         port_data = next((p for p in ports_list if p.get("port") == port), None)
-        has_custom_name = bool(port_data and port_data.get("portName"))
+        has_custom_name = bool(
+            port_data
+            and port_data.get("portName")
+            and port_data.get("portName") != f"Port {port}"
+        )
         port_name = _get_port_name_from_device(device, port)
         port_label = f"{port_name} (Port {port})" if has_custom_name else port_name
 
@@ -2556,7 +2588,11 @@ async def set_temperature_automation(
 
         ports_list = device.get("deviceInfo", {}).get("ports", [])
         port_data = next((p for p in ports_list if p.get("port") == port), None)
-        has_custom_name = bool(port_data and port_data.get("portName"))
+        has_custom_name = bool(
+            port_data
+            and port_data.get("portName")
+            and port_data.get("portName") != f"Port {port}"
+        )
         port_name = _get_port_name_from_device(device, port)
         port_label = f"{port_name} (Port {port})" if has_custom_name else port_name
 
@@ -2668,7 +2704,11 @@ async def set_humidity_automation(
 
         ports_list = device.get("deviceInfo", {}).get("ports", [])
         port_data = next((p for p in ports_list if p.get("port") == port), None)
-        has_custom_name = bool(port_data and port_data.get("portName"))
+        has_custom_name = bool(
+            port_data
+            and port_data.get("portName")
+            and port_data.get("portName") != f"Port {port}"
+        )
         port_name = _get_port_name_from_device(device, port)
         port_label = f"{port_name} (Port {port})" if has_custom_name else port_name
 
@@ -2834,7 +2874,11 @@ async def set_port_mode(
 
         ports_list = device.get("deviceInfo", {}).get("ports", [])
         port_data = next((p for p in ports_list if p.get("port") == port), None)
-        has_custom_name = bool(port_data and port_data.get("portName"))
+        has_custom_name = bool(
+            port_data
+            and port_data.get("portName")
+            and port_data.get("portName") != f"Port {port}"
+        )
         port_name = _get_port_name_from_device(device, port)
         port_label = f"{port_name} (Port {port})" if has_custom_name else port_name
 
@@ -3196,10 +3240,13 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
                         governed_port_nums.add(bit + 1)
 
             for pnum in sorted(governed_port_nums):
-                _name = port_name_map.get(pnum, f"Port {pnum}")
+                raw_label = port_name_map.get(pnum, f"Port {pnum}")
+                port_name_display = (
+                    f"{raw_label} (Port {pnum})" if raw_label != f"Port {pnum}" else raw_label
+                )
                 governed_ports.append({
                     "port": pnum,
-                    "port_name": f"{_name} (Port {pnum})",
+                    "port_name": port_name_display,
                 })
         except (KeyError, TypeError, AttributeError, ValueError):
             governed_ports = []
@@ -3451,10 +3498,9 @@ async def disable_advance_automation(
                         _seen.add(_pnum)
                         _p = _port_map.get(_pnum)
                         _raw_nm = _p.get("portName") if _p else None
-                        _label = (
-                            (_sanitize_api_string(_raw_nm, 64) if _raw_nm else f"Port {_pnum}")
-                            + f" (Port {_pnum})"
-                        )
+                        _label = _sanitize_api_string(_raw_nm, 64) if _raw_nm else f"Port {_pnum}"
+                        if _label != f"Port {_pnum}":
+                            _label = f"{_label} (Port {_pnum})"
                         governed_ports.append({"port": _pnum, "port_name": _label})
         governed_ports.sort(key=lambda x: x["port"])
 
@@ -3923,9 +3969,12 @@ async def break_out_of_automation(
         port_name = _sanitize_api_string(raw_port_name, 64) if raw_port_name else f"Port {port}"
 
         if mode_type != _ADVANCE_MODE_TYPE:
+            _port_display = (
+                f"{port_name} (Port {port})" if port_name != f"Port {port}" else port_name
+            )
             return json.dumps({
                 "info": (
-                    f"Port {port_name} (Port {port}) is not currently under automation control. "
+                    f"{_port_display} is not currently under automation control. "
                     "No action taken."
                 ),
             })
@@ -3983,10 +4032,15 @@ async def break_out_of_automation(
         ]
         for i, cp in enumerate(co_ports, start=2):
             lock_mode = "ON" if cp["current_speed"] > 0 else "OFF"
+            _cp_display = (
+                f"{cp['port_name']} (Port {cp['port']})"
+                if cp['port_name'] != f"Port {cp['port']}"
+                else cp['port_name']
+            )
             sequence.append({
                 "step": i,
                 "action": (
-                    f"lock {cp['port_name']} (Port {cp['port']}) to "
+                    f"lock {_cp_display} to "
                     f"current speed {cp['current_speed']} (manual {lock_mode})"
                 ),
             })
