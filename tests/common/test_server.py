@@ -8766,10 +8766,7 @@ async def test_advance_conflict_not_powered_note_nospeed_path(mock_client):
     data = json.loads(result)
     assert data.get("conflict") == "ADVANCE_AUTOMATION"
     assert "not currently drawing power" in data["suggested_reply"]
-    assert "not currently powered" in data["human_summary"]
-    # The note must appear before the closing prompt
-    assert data["suggested_reply"].endswith("What would you prefer?") is False or \
-        "not currently drawing power" in data["suggested_reply"]
+    assert "not currently drawing power" in data["human_summary"]
 
 
 async def test_advance_conflict_not_powered_note_speed_path(mock_client):
@@ -8792,7 +8789,7 @@ async def test_advance_conflict_not_powered_note_speed_path(mock_client):
     assert data.get("conflict") == "ADVANCE_AUTOMATION"
     assert "not currently drawing power" in data["suggested_reply"]
     assert data["suggested_reply"].endswith("What would you prefer?")
-    assert "not currently powered" in data["human_summary"]
+    assert "not currently drawing power" in data["human_summary"]
 
 
 async def test_advance_conflict_not_powered_note_absent_on_subpath_b(mock_client):
@@ -8816,4 +8813,4 @@ async def test_advance_conflict_not_powered_note_absent_on_subpath_b(mock_client
     assert data.get("conflict") == "ADVANCE_AUTOMATION"
     assert "1_break_out" not in data["options"]  # confirms Sub-path B
     assert "not currently drawing power" not in data["suggested_reply"]
-    assert "not currently powered" not in data["human_summary"]
+    assert "not currently drawing power" not in data["human_summary"]

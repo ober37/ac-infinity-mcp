@@ -1756,7 +1756,7 @@ async def _build_advance_conflict_response(
                 f" Note: {port_display} is not currently drawing power"
                 " — verify it is plugged in and switched on before proceeding."
             )
-            human_summary += f" Note: {port_display} is not currently powered."
+            human_summary += f" Note: {port_display} is not currently drawing power."
             if requested_speed is not None:
                 suggested_reply = (
                     suggested_reply.removesuffix(" What would you prefer?")
