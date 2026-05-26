@@ -1516,8 +1516,8 @@ async def _build_advance_conflict_response(
             ),
             "tool": "break_out_of_automation",
             "instruction": (
-                f"Ask me to release {port_name} from the '{auto_name}' automation"
-                " so you can control it manually."
+                f"Ask me to release {port_name} (Port {port}) from the '{auto_name}'"
+                " automation so you can control it manually."
             ),
             "available": governing.get("enabled", False) or governing.get("run_state", False),
         }
@@ -1588,7 +1588,7 @@ async def _build_advance_conflict_response(
         opt2 = {
             "available": False,
             "status": (
-                "This port is not in any automation's port group — use option 1 to"
+                "This port is not directly governed by any active automation — use option 1 to"
                 " disable the automation locking the controller."
             ),
         }
@@ -3264,7 +3264,7 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
             port_list_str = (
                 ", ".join(gp["port_name"] for gp in governed_ports)
                 if governed_ports
-                else "multiple ports"
+                else "ports (port details unavailable)"
             )
             schedule_suffix = (
                 f" from {begin_str} to {end_str}{_tz_suffix}"
