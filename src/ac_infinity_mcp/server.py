@@ -1769,7 +1769,7 @@ async def get_port_status(device_id: str, port: int) -> str:
     Get the live operational status of a single port.
 
     Reads real-time fields from the device info response: actual current power
-    level, load detection, active automation mode, and remaining timer seconds.
+    level, active automation mode, and remaining timer seconds.
 
     Args:
         device_id: The AC Infinity device code (from discover_devices)

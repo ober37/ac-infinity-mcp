@@ -489,6 +489,21 @@ async def test_get_device_reading_success(mock_client):
     assert "vpd" in data
 
 
+
+async def test_get_device_reading_no_load_field_in_ports(mock_client):
+    """Regression guard: 'load' key must be absent from ports in get_device_reading output."""
+    mock_client.parse_device_data.return_value = {
+        "device_name": "Test", "temperature_c": 23.5, "temperature_f": 74.3,
+        "humidity": 60.0, "vpd": 1.24, "timestamp": None, "zone_id": None,
+        "temp_unit_raw": None, "external_sensors": [],
+        "ports": [{"port": 1, "name": "Intake Fan", "speed": 5}],
+    }
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_device_reading("C58ZA")
+    data = json.loads(result)
+    assert "load" not in data["ports"][0]
+
+
 async def test_get_device_reading_device_not_found(mock_client):
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_device_reading("NOTEXIST")

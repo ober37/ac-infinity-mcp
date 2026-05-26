@@ -103,6 +103,7 @@ def test_parse_device_data_ports(client):
     assert result["ports"][1]["name"] == "Exhaust Fan"
     assert result["ports"][1]["speed"] == 7
     assert "load" not in result["ports"][0]
+    assert "load" not in result["ports"][1]
 
 
 def test_parse_device_data_no_sensors(client):
