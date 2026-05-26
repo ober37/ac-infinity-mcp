@@ -1775,7 +1775,7 @@ async def test_get_port_activity_report_devtype18_no_load_signal_in_human_summar
 
     assert "Left Fan (Port 3)" in summary, "Port uptime line must appear in human_summary"
     assert "uptime" in summary, "Runtime data must appear in human_summary"
-    assert "does not report power draw" in summary, "Device-level note must appear for devType=18"
+    assert "does not report power draw" not in summary  # note must not appear for devType=18
 
 
 async def test_get_port_activity_report_devtype18_toggle_still_api_constant_speed(mock_client):
@@ -1804,8 +1804,33 @@ async def test_get_port_activity_report_devtype18_toggle_still_api_constant_spee
     assert "data_quality" not in heater
     assert "▎" in data["human_summary"]
     assert "Currently OFF: Heater (Port 2)" in data["human_summary"]
-    # Note appears for all devType=18/22 devices when result is non-empty (#136)
-    assert "does not report power draw" in data["human_summary"]
+    # Note only appears for devType=22 after #151 — devType=18 suppressed
+    assert "does not report power draw" not in data["human_summary"]
+
+
+async def test_get_port_activity_report_devtype18_note_absent_with_active_ports(mock_client):
+    """devType=18 with active ports: 'does not report power draw' note must not appear (#151)."""
+    device = _make_devtype18_device([
+        {"port": 3, "portName": "Left Fan", "portsLoad": 0, "loadType": 0},
+    ])
+    mock_client.get_devices.return_value = [device]
+    readings = _make_devtype18_port_readings(3, "Left Fan", speed=5, on_count=12, total=288)
+    mock_client.get_historical_data.return_value = [{}] * 288
+    idx = 0
+
+    def _side_effect(r, port_names=None):
+        nonlocal idx
+        val = readings[idx % len(readings)]
+        idx += 1
+        return val
+
+    mock_client.parse_history_record.side_effect = _side_effect
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_activity_report("C58ZA", 3)
+    data = json.loads(result)
+
+    assert "does not report power draw" not in data["human_summary"]
+    assert len(data["ports"]) > 0  # vacuity guard
 
 
 async def test_get_port_activity_report_devtype11_rule_e_still_filters(mock_client):
@@ -2043,7 +2068,7 @@ async def test_note_mentions_on_off_reliable_devtype22(mock_client):
 
 
 async def test_note_mentions_on_off_reliable_devtype18(mock_client):
-    """#142/#143: devType=18 Note mentions ON/OFF state as the only reliable indicator."""
+    """#151: devType=18 Note is suppressed after fix — only devType=22 emits the Note."""
     device = _make_devtype18_device([
         {"port": 3, "portName": "Left Fan", "portsLoad": 0, "loadType": 0},
     ])
@@ -2062,8 +2087,8 @@ async def test_note_mentions_on_off_reliable_devtype18(mock_client):
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_port_activity_report("C58ZA", 3)
     data = json.loads(result)
-    assert "ON/OFF state is the only reliable activity indicator" in data["human_summary"], (
-        "#143: devType=18 Note must mention ON/OFF reliability"
+    assert "ON/OFF state is the only reliable activity indicator" not in data["human_summary"], (
+        "#151: devType=18 Note must not appear — only devType=22 emits the Note"
     )
 
 
@@ -2655,7 +2680,9 @@ async def test_set_port_speed_off_mode_warning_modeType_0(mock_client):
     data = json.loads(result)
     assert "warning" in data
     assert "OFF mode" in data["warning"]
-    assert "set_port_mode" in data["warning"]
+    assert "set_port_mode" not in data["warning"]
+    assert "Call" not in data["warning"]
+    assert "ON mode" in data["warning"]
 
 
 async def test_set_port_speed_off_mode_warning_modeType_1(mock_client):
@@ -2667,7 +2694,9 @@ async def test_set_port_speed_off_mode_warning_modeType_1(mock_client):
     data = json.loads(result)
     assert "warning" in data
     assert "OFF mode" in data["warning"]
-    assert "set_port_mode" in data["warning"]
+    assert "set_port_mode" not in data["warning"]
+    assert "Call" not in data["warning"]
+    assert "ON mode" in data["warning"]
 
 
 async def test_set_port_speed_no_warning_when_on_mode(mock_client):
@@ -2677,6 +2706,86 @@ async def test_set_port_speed_no_warning_when_on_mode(mock_client):
         result = await set_port_speed("C58ZA", 2, 5, dry_run=True)
     data = json.loads(result)
     assert "warning" not in data
+
+
+@pytest.mark.asyncio
+async def test_set_port_speed_action_uses_port_name(mock_client):
+    """action field uses port name + number for a named port."""
+    mock_client.set_port_mode.return_value = MOCK_SET_PORT_MODE_DRY
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_speed("C58ZA", 2, 5)
+    data = json.loads(result)
+    assert data["action"] == "set Exhaust Fan (Port 2) speed to 5"
+
+
+@pytest.mark.asyncio
+async def test_set_port_speed_action_unnamed_port_fallback(mock_client):
+    """action field falls back to 'Port N' when port has no custom name."""
+    mock_client.set_port_mode.return_value = MOCK_SET_PORT_MODE_DRY
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_speed("C58ZA", 3, 5)
+    data = json.loads(result)
+    assert data["action"] == "set Port 3 speed to 5"
+
+
+@pytest.mark.asyncio
+async def test_set_port_on_action_uses_port_name(mock_client):
+    """set_port_on action field uses port name + number for a named port."""
+    mock_client.set_port_mode.return_value = MOCK_SET_PORT_ON_DRY
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_on("C58ZA", 1)
+    data = json.loads(result)
+    assert data["action"] == "turn Intake Fan (Port 1) on"
+
+
+@pytest.mark.asyncio
+async def test_set_port_off_action_uses_port_name(mock_client):
+    """set_port_off action field uses port name + number for a named port."""
+    mock_client.set_port_mode.return_value = MOCK_SET_PORT_OFF_DRY
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_off("C58ZA", 2)
+    data = json.loads(result)
+    assert data["action"] == "turn Exhaust Fan (Port 2) off"
+
+
+@pytest.mark.asyncio
+async def test_set_port_mode_action_uses_port_name(mock_client):
+    """set_port_mode action field uses port name + number for a named port."""
+    mock_client.set_port_mode.return_value = MOCK_SET_PORT_MODE_DRY
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_mode("C58ZA", 1, "ON")
+    data = json.loads(result)
+    assert data["action"] == "set Intake Fan (Port 1) mode to ON"
+
+
+@pytest.mark.asyncio
+async def test_set_vpd_automation_action_uses_port_name(mock_client):
+    """set_vpd_automation action field includes port name + number."""
+    mock_client.set_port_mode.return_value = MOCK_VPD_DRY
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_vpd_automation("C58ZA", 1, 1.4)
+    data = json.loads(result)
+    assert "Intake Fan (Port 1)" in data["action"]
+
+
+@pytest.mark.asyncio
+async def test_set_temperature_automation_action_uses_port_name(mock_client):
+    """set_temperature_automation action field includes port name + number."""
+    mock_client.set_port_mode.return_value = MOCK_TEMP_DRY
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_temperature_automation("C58ZA", 1, 20.0, 28.0)
+    data = json.loads(result)
+    assert "Intake Fan (Port 1)" in data["action"]
+
+
+@pytest.mark.asyncio
+async def test_set_humidity_automation_action_uses_port_name(mock_client):
+    """set_humidity_automation action field includes port name + number."""
+    mock_client.set_port_mode.return_value = MOCK_HUMI_DRY
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_humidity_automation("C58ZA", 1, 50.0, 70.0)
+    data = json.loads(result)
+    assert "Intake Fan (Port 1)" in data["action"]
 
 
 # ============ set_port_on ============
