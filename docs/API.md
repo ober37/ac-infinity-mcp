@@ -1686,7 +1686,7 @@ Get the full automation configuration for a port from `/api/dev/getdevModeSettin
 **ADVANCE mode field notes:**
 - `mode` — `"ADVANCE"` when `modeType=15` and `isOpenAutomation != 0` in `getdevModeSettingList` (Quirk 19)
 - `automation_name` / `automation_id` — populated from the governing automation; `null` when all automations are disabled or the secondary lookup degrades
-- `automation_on_speed` — the `on_speed` configured in the first port group of the governing automation; `null` when no governing automation or on degraded path
+- `automation_on_speed` — the `on_speed` configured in the port group of the governing automation whose `grouptDevType` bitmask covers the requested port (bitmask-matched); `null` when no governing automation, no matching port group, or on degraded path
 - `current_speed` — live fan speed from `devInfoListAll` `speak` field (reflects what the port is currently doing)
 - `speed_target` — always `null` in ADVANCE mode (the automation governs speed, not a static target)
 - `automation_running` — `true` if the governing automation has `run_state=True`; `false` if an automation was found but not running (all disabled); `null` when the secondary API call failed (degraded)
@@ -2241,17 +2241,15 @@ Get full detail for a single Advance Automation.
 - `schedule.begin_time` / `schedule.end_time` — `null` for continuous mode; `"HH:MM"` for scheduled mode with a time window; `null` for scheduled mode with no window configured
 - `schedule.schedule_note` — present only in scheduled mode with no time window; value: `"scheduled mode selected but no time window is configured"`
 - `port_groups` — each group has its own speed settings; `device_type` is a human-readable label (e.g. `"Inline Fan"`, `"Clip Fan"`, `"Mixed Speed Group"`) derived from the `grouptDevType` integer
-- `governed_ports` — list of `{"port": N, "port_name": "Name (Port N)"}` objects identifying which ports this automation controls; derived from `devInfoListAll` `isOpenAutomation` flags (Quirk 19)
+- `governed_ports` — list of `{"port": N, "port_name": "Name (Port N)"}` objects identifying which ports this automation controls; decoded from the `grouptDevType` bitmask of each of the automation's port groups (Port N = bit N-1); port names sourced from `deviceInfo.ports` (Quirk 18)
 - `port_resolution` — one of:
-  - `"resolved"` — single automation active; `governed_ports` is accurate
-  - `"multiple_automations_ambiguous"` — multiple automations are simultaneously active; `governed_ports` is empty because port ownership cannot be determined
-  - `"error"` — an exception occurred while resolving ports; `governed_ports` is empty
+  - `"resolved"` — `governed_ports` decoded successfully from bitmasks; accurate for this automation regardless of whether other automations are simultaneously active
+  - `"error"` — an exception occurred while decoding bitmasks; `governed_ports` is empty
 - `human_summary` — natural-language description; adapts to mode and group configuration:
   - Continuous, single group: `"'Name' runs continuously at speed N, currently enabled."`
   - Scheduled with times, single group: `"'Name' runs at speed N from HH:MM to HH:MM, currently enabled."`
   - Scheduled, no time window, single group: `"'Name' runs at speed N on a schedule (no time window set), currently enabled."`
-  - Multi-group / ambiguous: `"'Name' is configured across multiple ports at varying speeds. Port assignment couldn't be determined — multiple automations are active..."`
-  - Multi-group unambiguous: `"'Name' controls Port N Name, Port M Name at varying speeds. Currently enabled."`
+  - Multi-group: `"'Name' controls Port N Name, Port M Name at varying speeds. Currently enabled."`
 
 ---
 

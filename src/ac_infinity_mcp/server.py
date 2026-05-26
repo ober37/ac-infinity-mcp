@@ -1834,9 +1834,12 @@ async def get_port_settings(device_id: str, port: int) -> str:
             could not be retrieved."``
 
         ``current_speed`` reflects the live fan speed from the device.
-        ``automation_name``/``automation_id``/``automation_on_speed`` are populated
-        from the governing automation (or null if none active or secondary lookup
-        degrades). ``vpd_target_kpa`` is non-null only when VPD automation is active.
+        ``automation_name``/``automation_id`` are populated from the governing
+        automation (or null if none active or secondary lookup degrades).
+        ``automation_on_speed`` is read from the port group of the governing
+        automation whose ``grouptDevType`` bitmask covers this port (bitmask-matched);
+        null when no governing automation, no matching port group, or degraded.
+        ``vpd_target_kpa`` is non-null only when VPD automation is active.
         ``temp_range_c`` / ``humidity_range_pct`` are non-null only when those
         thresholds are enabled. ``schedule_window`` times are in device local time
         (not UTC). On failure returns ``{"error": "...", "detail": "..."}``.
