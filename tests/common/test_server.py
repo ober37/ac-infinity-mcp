@@ -22,7 +22,6 @@ from ac_infinity_mcp.server import (
     _filter_readings_by_time,
     _find_governing_automation,
     _find_governing_port_group,
-    _format_peak_local,
     _format_schedule_time,
     _format_window_dt,
     _group_automations,
@@ -5930,11 +5929,14 @@ async def test_conflict_normal_path_instructions_contain_natural_language(mock_c
     Verified format: "Ask me to release <port> from the '<automation>' automation ..."
     and "Ask me to disable the '<automation>' automation — ..."
     No Python function call syntax; no dry_run; no internal parameter names.
+
+    Port 4 is used because MOCK_ADVANCE_AUTOMATIONS_LIST has grouptDevType=8 (bit 3 = Port 4),
+    so the bitmask lookup yields Sub-path A and 1_break_out is offered.
     """
     mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
     mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        result = await set_port_off("C58ZA", port=1, dry_run=False)
+        result = await set_port_off("C58ZA", port=4, dry_run=False)
     data = json.loads(result)
     opt1 = data["options"]["1_break_out"]
     opt2 = data["options"]["2_disable_automation"]
@@ -5968,11 +5970,15 @@ async def test_conflict_switching_guidance_no_function_names(mock_client):
 
 @pytest.mark.asyncio
 async def test_set_port_speed_conflict_includes_option_0_update_speed(mock_client):
-    """set_port_speed conflict response includes option '0_update_speed' in normal path."""
+    """set_port_speed conflict response includes option '0_update_speed' in normal path.
+
+    Port 4 is used because MOCK_ADVANCE_AUTOMATIONS_LIST has grouptDevType=8 (bit 3 = Port 4),
+    so the bitmask lookup yields Sub-path A where 0_update_speed is offered.
+    """
     mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("advance")
     mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        result = await set_port_speed("C58ZA", 1, 7)
+        result = await set_port_speed("C58ZA", 4, 7)
     data = json.loads(result)
     assert data["conflict"] == "ADVANCE_AUTOMATION"
     # Option 0 must be present when called from set_port_speed (requested_speed=7)
@@ -5981,9 +5987,10 @@ async def test_set_port_speed_conflict_includes_option_0_update_speed(mock_clien
     assert opt0["available"] is True
     # Must mention the requested speed (7) in description
     assert "7" in opt0["description"]
-    # Must mention the current auto speed
+    # Must mention the current auto speed — port 4 is governed by entry index 1
+    # (grouptDevType=8 = bit 3 = Port 4, onSpeed=1).
     current_speed = str(
-        MOCK_ADVANCE_AUTOMATIONS_LIST[0]["onSpeed"]  # from fixture
+        MOCK_ADVANCE_AUTOMATIONS_LIST[1]["onSpeed"]  # entry with grouptDevType=8 (Port 4)
     )
     assert current_speed in opt0["description"] or "?" in opt0["description"]
     # instruction must be natural language
@@ -6057,17 +6064,20 @@ async def test_set_port_speed_conflict_fires_before_get_mode_settings_on_advance
 
     The conflict comes from isOpenAutomation=1 in device_data BEFORE get_mode_settings
     is called — tests that the server's _build_advance_conflict_response is still reached.
+
+    Port 4 is used because MOCK_ADVANCE_AUTOMATIONS_LIST has grouptDevType=8 (bit 3 = Port 4),
+    so the bitmask lookup yields Sub-path A where 0_update_speed is offered.
     """
     mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError(
-        "Port 1 on device 12345 is in smart automation mode (isOpenAutomation=1 in devInfoListAll)"
+        "Port 4 on device 12345 is in smart automation mode (isOpenAutomation=1 in devInfoListAll)"
     )
     mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        result = await set_port_speed("C58ZA", 1, 5)
+        result = await set_port_speed("C58ZA", 4, 5)
     data = json.loads(result)
     assert data["conflict"] == "ADVANCE_AUTOMATION"
     assert "0_update_speed" in data["options"]  # speed=5 was passed
-    assert data["target_port"] == "Intake Fan (Port 1)"
+    assert data["target_port"] == "Port 4 (Port 4)"
 
 
 @pytest.mark.asyncio
@@ -6076,14 +6086,17 @@ async def test_set_port_speed_conflict_999999_defense_in_depth(mock_client):
 
     Covers the defense-in-depth path where the pre-write guard misses the conflict
     and the write API returns code 999999 (ADVANCE conflict sentinel).
+
+    Port 4 is used because MOCK_ADVANCE_AUTOMATIONS_LIST has grouptDevType=8 (bit 3 = Port 4),
+    so the bitmask lookup yields Sub-path A where 0_update_speed is offered.
     """
     mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError(
-        "Port 1 on device 12345 rejected write with code 999999 — port is under Advance "
+        "Port 4 on device 12345 rejected write with code 999999 — port is under Advance "
         "Automation control."
     )
     mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        result = await set_port_speed("C58ZA", 1, 3)
+        result = await set_port_speed("C58ZA", 4, 3)
     data = json.loads(result)
     assert data["conflict"] == "ADVANCE_AUTOMATION"
     # speed=3 was the requested speed — option 0 should appear

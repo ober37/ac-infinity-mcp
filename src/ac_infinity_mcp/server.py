@@ -1593,6 +1593,14 @@ async def _build_advance_conflict_response(
             ),
         }
         opt1_key = "1_disable_automation"
+        options_dict = {
+            opt1_key: opt1,
+            "2_disable_automation": opt2,
+            "3_fork_automation": {
+                "available": False,
+                "status": "not_yet_implemented",
+            },
+        }
     elif not api_call_failed and len(automations) > 0:
         # ALL-DISABLED PATH — API succeeded but all automations have enabled=False / run_state=False
         auto_name = None
