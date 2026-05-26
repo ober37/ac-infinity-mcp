@@ -2333,7 +2333,7 @@ Disable a currently enabled Advance Automation. No-ops if already disabled.
 ```
 
 **Field notes:**
-- `governed_ports` — list of `{"port": N, "port_name": "Name (Port N)"}` dicts for every port the automation controls, decoded from the `grouptDevType` bitmask across all port groups (Port N = bit N−1 set). Port names are sourced from `deviceInfo.ports` via `_sanitize_api_string`; fallback is `"Port N (Port N)"` when `portName` is absent or empty.
+- `governed_ports` — list of `{"port": N, "port_name": "Name (Port N)"}` dicts for every port the automation controls, decoded from the `grouptDevType` bitmask across all port groups (Port N = bit N−1 set). Port names are sourced from `deviceInfo.ports` via `_sanitize_api_string`; fallback is `"Port N"` (bare, no redundant suffix) when `portName` is absent or matches the API default (e.g. `"Port 1"`).
 - `revert_behavior_confirmed` — whether port revert-on-disable behavior has been confirmed via live test
 - `to_restore` — natural-language hint for re-enabling the automation by name; intentionally avoids Python function-call syntax so the MCP caller can relay it to the user verbatim
 
