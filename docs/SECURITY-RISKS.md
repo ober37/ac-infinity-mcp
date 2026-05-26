@@ -89,6 +89,19 @@ network capture (Phase 17, 2026-05-22) to include all confirmed v2.0 endpoints.
 
 ---
 
+## PYSEC-2026-161 — `starlette`
+
+- **Package:** `starlette` (transitive via `mcp` SDK)
+- **First observed:** 2026-05-26 (Issue #162 Gate 4 audit)
+- **Why this server is not exploitable:** `starlette` is pulled in transitively by
+  the `mcp` SDK's HTTP/SSE transport path. This server runs **stdio transport only**
+  (see `server.py:main()`) — the affected starlette request-handling code paths are
+  never reached at runtime.
+- **Mitigation:** monitor upstream `mcp` releases. When a release pins `starlette ≥ 1.0.1`,
+  bump the `mcp` version in `pyproject.toml` and remove the ignore from
+  `.github/workflows/ci.yml`.
+- **Re-evaluation due:** 2026-08-26 — check upstream advisories quarterly until resolved.
+
 ---
 
 ## Pre-existing Transitive / Dev-tool CVEs (documented 2026-05-22)
@@ -150,15 +163,6 @@ becomes available in the dependency tree.
   it is not imported at runtime.
 - **Mitigation:** Upgrade in the build environment: `pip install --upgrade setuptools`.
 - **Re-evaluation:** 2026-08-22.
-
-### starlette — PYSEC-2026-161
-
-- **Package:** `starlette` (transitive via `mcp` SDK)
-- **CVE:** PYSEC-2026-161 (fix: 1.0.1)
-- **Exposure:** Transitive via `mcp` SDK's HTTP/SSE transport path. This server
-  uses **stdio transport only** — the affected starlette request-handling code
-  paths are never reached.
-- **Re-evaluation:** 2026-08-22 — upgrade when `mcp` bumps its starlette pin.
 
 ---
 
