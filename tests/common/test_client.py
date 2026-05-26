@@ -109,9 +109,9 @@ def test_parse_device_data_ports(client):
     assert "plug_status" not in result["ports"][1]
 
 
-def _port_device(load_state, speak=0):
+def _port_device(load_state, speak=0, port_name="Port 1"):
     """Build a minimal device dict with one port for plug_status edge-case tests."""
-    port: dict = {"port": 1, "portName": "Test Port", "speak": speak, "portsLoad": 0}
+    port: dict = {"port": 1, "portName": port_name, "speak": speak, "portsLoad": 0}
     if load_state is not None:
         port["loadState"] = load_state
     return {
@@ -125,16 +125,18 @@ def _port_device(load_state, speak=0):
     }
 
 
-@pytest.mark.parametrize("load_state,speak,expect_plug_status", [
-    (0, 0, True),    # no load, not running → plug_status present
-    (1, 0, False),   # connected but idle → no plug_status
-    (0, 5, False),   # loadState=0 but running → no plug_status (ADVANCE mode edge case)
-    (1, 5, False),   # connected and running → no plug_status
-    (None, 0, True), # None loadState treated as 0 → plug_status present
-    (2, 0, False),   # any nonzero loadState → connected → no plug_status
+@pytest.mark.parametrize("load_state,speak,port_name,expect_plug_status", [
+    (0, 0, "Port 1", True),        # default-named, no load, not running → plug_status
+    (1, 0, "Port 1", False),       # default-named, connected but idle → no plug_status
+    (0, 5, "Port 1", False),       # default-named, loadState=0 but running → no plug_status
+    (1, 5, "Port 1", False),       # default-named, connected and running → no plug_status
+    (None, 0, "Port 1", True),     # default-named, None loadState treated as 0 → plug_status
+    (2, 0, "Port 1", False),       # default-named, any nonzero loadState → no plug_status
+    (0, 0, "Humidifier", False),   # custom-named, no load → no plug_status (named = intentional)
+    (None, 0, "Heater", False),    # custom-named, None loadState → no plug_status
 ])
-def test_parse_device_data_port_plug_status(client, load_state, speak, expect_plug_status):
-    device = _port_device(load_state, speak)
+def test_parse_device_data_port_plug_status(client, load_state, speak, port_name, expect_plug_status):  # noqa: E501
+    device = _port_device(load_state, speak, port_name)
     result = client.parse_device_data(device)
     if expect_plug_status:
         assert result["ports"][0].get("plug_status") == "not powered"

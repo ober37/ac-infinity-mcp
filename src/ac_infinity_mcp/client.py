@@ -927,12 +927,21 @@ class ACInfinityClient:
             raw_ports = info.get("ports", [])
             ports = []
             for p in raw_ports:
+                port_num = p.get("port")
+                port_name = p.get("portName") or f"Port {port_num}"
                 port_entry: dict = {
-                    "port": p.get("port"),
-                    "name": p.get("portName", f"Port {p.get('port')}"),
+                    "port": port_num,
+                    "name": port_name,
                     "speed": p.get("speak", 0),  # 0-10 scale from API
                 }
-                if not p.get("loadState", 0) and not p.get("speak", 0):
+                # Only flag default-named ports as "not powered" — a user-renamed port
+                # implies a device was intentionally connected, and loadState=0 alone
+                # can't distinguish "nothing plugged in" from "device is off".
+                if (
+                    not p.get("loadState", 0)
+                    and not p.get("speak", 0)
+                    and port_name == f"Port {port_num}"
+                ):
                     port_entry["plug_status"] = "not powered"
                 ports.append(port_entry)
 
