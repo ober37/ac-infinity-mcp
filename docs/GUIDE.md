@@ -149,7 +149,7 @@ Ask for environmental history over any date range. You can get raw readings, or 
 
 ## 5. Analytics & Health
 
-All analytics tools work with up to 30 days of history.
+Two of these tools check your current live readings against stage targets. The other two analyze history over up to 30 days.
 
 ### VPD drift check
 
@@ -363,7 +363,7 @@ One-click setup for a named grow stage. Available stages: **clones**, **seedling
 > **Claude:** Here's the mid-flower template for Filter (Port 4) — previewing before making changes:
 >
 > - Mode: VPD (this will be active immediately)
-> - VPD target: 1.4 kPa
+> - VPD target: 1.6 kPa
 > - Temperature range saved: 64–77°F (stored for AUTO mode — not active yet)
 > - Humidity range saved: 45–55% RH (stored for AUTO mode — not active yet)
 >
@@ -373,7 +373,7 @@ One-click setup for a named grow stage. Available stages: **clones**, **seedling
 >
 > **User:** Yes.
 >
-> **Claude:** Done — Filter (Port 4) on Willie's Tent is now running in VPD mode targeting 1.4 kPa for mid-flower.
+> **Claude:** Done — Filter (Port 4) on Willie's Tent is now running in VPD mode targeting 1.6 kPa for mid-flower.
 
 **Important:** When you apply a grow stage template, the port is set to VPD mode using the stage's target — that's what runs immediately. The temperature and humidity thresholds for that stage are also saved on your controller, but they won't be active until you switch the port to AUTO mode. Only VPD is running right away.
 
@@ -427,7 +427,7 @@ Advance Automations are named programs that can control multiple ports on a sche
 
 ### Creating a new automation
 
-Automations are created in preview mode — Claude shows you exactly what will be created before sending anything to your controller. A new automation is created as disabled by default so you can review it before it starts controlling your ports.
+Automations are created in preview mode — Claude shows you exactly what will be created before sending anything to your controller. A new automation is created as enabled — it will start controlling the ports you specify as soon as it is created.
 
 > **User:** Create a new automation called "Flower Push" that runs the Filter at speed 8 and both fans at speed 6, all week long.
 >
@@ -438,7 +438,7 @@ Automations are created in preview mode — Claude shows you exactly what will b
 > - Left Fan (Port 5): speed 6
 > - Right Fan (Port 6): speed 6
 > - Schedule: all 7 days
-> - Status: disabled (you'll enable it separately when ready)
+> - Status: enabled (this will start controlling these ports once created)
 >
 > Ready to create this?
 >
@@ -446,7 +446,7 @@ Automations are created in preview mode — Claude shows you exactly what will b
 >
 > **User:** Yes.
 >
-> **Claude:** Done — "Flower Push" has been created and is currently disabled. Ask me to enable it whenever you're ready to run it.
+> **Claude:** Done — "Flower Push" is now active on Willie's Tent. Filter (Port 4), Left Fan (Port 5), and Right Fan (Port 6) are now under its control.
 
 ### Releasing a port from automation control
 
@@ -512,6 +512,20 @@ Three options appear:
 >
 > **Claude:** Done — Left Fan (Port 5) is now in manual mode at its current speed.
 
+**Follow-through for Option 3 — disable the automation:**
+
+> **User:** Disable "Night Cycle."
+>
+> **Claude:** Previewing: disable "Night Cycle" on Willie's Tent.
+>
+> Ready to apply?
+>
+> ---
+>
+> **User:** Yes.
+>
+> **Claude:** Done — "Night Cycle" is disabled. Left Fan (Port 5) and any other ports it controlled are no longer under automation.
+
 ---
 
 **Scenario B — You asked to turn a port on or off (no specific speed)**
@@ -557,7 +571,7 @@ The server comes with three built-in prompts — guides that Claude follows when
 
 When Claude follows a prompt, it responds in plain language. You won't see any code or technical terms in what Claude says to you.
 
-**Note:** These prompts contain internal instructions that Claude reads and acts on. If you ever see Claude mention any technical-looking language while following a prompt (rather than responding naturally), that's a known limitation being addressed in a future update.
+**Tip:** If anything in Claude's response looks out of place while following a prompt, just say "continue in plain language" and it will carry on naturally.
 
 ---
 
