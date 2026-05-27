@@ -502,7 +502,7 @@ devId=REDACTED_DEV_ID&externalPort=1&onSpead=5&modeType=2&offSpead=0&...
 
 ---
 
-## All 25 Known API Quirks
+## All 27 Known API Quirks
 
 ### Quirk 1 — Auth typo: `appPasswordl`
 
@@ -1174,34 +1174,73 @@ and in the post-write response loop.
 
 ---
 
-### Quirk 26 — Empty-port detection: `portName == "Port N"` + `portsLoad == 0`
+### Quirk 26 — Empty-port detection: `portResistance == 65535` (primary) + name/load heuristic (fallback)
 
-**Background (issue #165):** When a user asks to control or inspect a port that has nothing
+**Background (issues #165, #183):** When a user asks to control or inspect a port that has nothing
 plugged in, the server previously responded with a confident action (write) or settings read
 with no indication that the target was empty. This caused confusion when users misidentified a
 port number.
 
-**Detection signal:** A port is considered "empty" (nothing connected) when:
+**Primary signal (Quirk 27 — firmware that supplies `portResistance`):**
+`portResistance == 65535` (0xFFFF) in `devInfoListAll.deviceInfo.ports`. The controller measures
+electrical resistance across each port; 65535 is the uint16 open-circuit sentinel meaning nothing
+is connected. Connected devices — even in OFF mode — present real values (e.g. 400 Ω light,
+7500 Ω fan, 15800 Ω heater). When `portResistance` is present and is **not** 65535, the port is
+treated as connected regardless of port name or `portsLoad`.
+
+**Known tradeoff (user-approved 2026-05-26):** LED grow lights with their own inline power
+switches may read `portResistance=65535` when that switch is off but the device is still
+physically plugged in. Passive loads (heaters, fans with AC motors) are not affected — their
+resistance is measurable regardless of a device-level switch.
+
+**Fallback signal (old firmware that omits `portResistance`):**
+When `portResistance` is absent from the API response, the legacy dual-signal heuristic applies:
 1. The `portName` matches the API-default pattern `"Port N"` (i.e. the grower has not custom-named it), AND
 2. `portsLoad == 0` (no power draw detected), OR the device `devType` is in `{18, 22}` — see Quirk 24.
 
-**Custom-named ports are assumed connected.** If a grower named a port, something is plugged in.
+Custom-named ports are assumed connected in the fallback path. If a grower named a port,
+something is plugged in.
 
-**devType=18 and devType=22 exception:** Because `portsLoad` is always `0` on these devices
-(Quirk 24), the detection relies solely on the default-name signal. A default-named port on a
-devType=18 (8T4TC) or devType=22 (Q0KT4) device is always flagged as possibly empty.
+**devType=18 and devType=22 exception (fallback path only):** Because `portsLoad` is always `0`
+on these devices (Quirk 24), the fallback detection relies solely on the default-name signal.
+A default-named port on a devType=18 (8T4TC) or devType=22 (Q0KT4) device is always flagged
+as possibly empty when `portResistance` is absent.
 
 **Affected tools:**
 - **Write tools** (7): `set_port_on`, `set_port_off`, `set_port_speed`, `set_port_mode`,
   `set_vpd_automation`, `set_temperature_automation`, `set_humidity_automation` — add `warning` field
 - **Read tools** (2): `get_port_status`, `get_port_settings` — add `note` field
-- **Excluded:** `get_port_activity_report` already has its own ghost-port filter (Rules A–F)
+- **Excluded:** `get_port_activity_report` already has its own ghost-port filter (Rules A–G)
 
 **Behaviour:** The warning/note is **advisory only** — it does not block writes (including
-`dry_run=False` live writes). The grower is shown the advisory and can confirm or redirect.
+live writes). The grower is shown the advisory and can confirm or redirect.
 
-**Code location:** `server._is_port_empty()` helper; called after the read-before-write fetch in
-each affected tool.
+**Code location:** `server._is_port_empty()` helper; `_PORT_EMPTY_RESISTANCE = 65535` constant.
+Called after the read-before-write fetch in each affected tool.
+
+---
+
+### Quirk 27 — `portResistance` field: hardware open-circuit sentinel
+
+**Field location:** `devInfoListAll.deviceInfo.ports[N].portResistance`
+
+**What it is:** The AC Infinity controller continuously measures electrical resistance across
+each port outlet. The value is a uint16 integer representing the measured resistance in ohms.
+
+**Sentinel value:** `65535` (0xFFFF) — the maximum uint16 value, used as the open-circuit
+sentinel. When the server reads 65535, the hardware found no measurable resistance path,
+meaning nothing is electrically connected to that port.
+
+**Connected device examples (from Proxyman capture 2026-05-26):**
+- LED grow light (with inline switch ON): ~400 Ω
+- Inline fan: ~7500 Ω
+- Heater: ~15800 Ω
+
+**Firmware availability:** Not all firmware versions include this field. When `portResistance`
+is absent from the port object, the server falls back to the name/load heuristic (Quirk 26
+fallback). Always treat absence as "unknown" — never as 0 Ω (short circuit).
+
+**Code constant:** `_PORT_EMPTY_RESISTANCE: int = 65535` in `server.py`.
 
 ---
 
@@ -1695,7 +1734,7 @@ resolve the governing automation name (graceful degradation if the secondary cal
 - `mode` — one of: `OFF`, `ON`, `AUTO`, `VPD`, `TIMER_TO_ON`, `TIMER_TO_OFF`, `CYCLE`, `SCHEDULE`, `Automation`. `Automation` replaces the raw internal label `ADVANCE` and means the port is governed by a named Advance Automation program. The `Automation` value is returned any time `isOpenAutomation==1` in the device list (Quirk 17/19), regardless of whether the secondary automation-name lookup succeeds.
 - `automation_name` *(optional)* — present only when `mode == "Automation"` AND the governing automation was successfully identified via the secondary `getGroups` call. Absent when the secondary call fails, the port is not covered by any automation's port-group bitmask, or `devId` is absent from the device record.
 - `remain_time_seconds` *(conditional)* — countdown timer seconds remaining from `remainTime` API field; **omitted entirely** when no timer is active (value would be 0). Only present when a TIMER_TO_ON or TIMER_TO_OFF countdown is running.
-- `note` *(optional)* — present when the port appears to have nothing connected (see "Empty-port detection" below). Example: `"Port 7 doesn't appear to have anything connected. If you meant a different port, let me know which one."`
+- `note` *(optional)* — present when the port appears to have nothing connected (`portResistance == 65535`, or fallback name/load heuristic — see Quirks 26 and 27). Example: `"Port 7 doesn't appear to have anything connected. If you meant a different port, let me know which one."`
 - `human_summary` — natural language port status: `"Name (Port N) is running under 'AutomationName' automation at speed N."` (Automation mode with name resolved); `"Name (Port N) is Mode at speed N."` (running); `"Name (Port N) is Mode (speed 0)."` (stopped). Always present.
 
 ---
@@ -1816,7 +1855,17 @@ Get the full automation configuration for a port from `/api/dev/getdevModeSettin
 - `human_summary` — grower-readable description of the ADVANCE state; always present
 - `vpd_target_kpa`, `temp_range`, `humidity_range_pct`, `schedule_window`, cycle/timer fields — all `null` in ADVANCE mode
 - When the secondary automation lookup fails (API error), a `note` field is added: `"Could not fetch automation details. Use list_advance_automations to view active automations."`
-- When the port appears to have nothing connected (empty-port detection), a `note` field is also added with the empty-port advisory message. If both conditions apply, both messages are concatenated in the same `note` field.
+- When the port appears to have nothing connected (empty-port detection via `portResistance == 65535` or the fallback name/load heuristic — see Quirks 26 and 27), a `note` field is appended with the empty-port staleness advisory. If both conditions apply, both messages are concatenated in the same `note` field. On the ADVANCE path, `human_summary` is **preserved** (it already describes the automation state); only `note` is appended.
+
+**Non-ADVANCE empty-port behavior:**
+
+When `_is_port_empty()` fires on the non-ADVANCE path (primary: `portResistance == 65535`; fallback for old firmware: default-named `"Port N"` with zero load, or devType=18/22), the response diverges from the standard non-ADVANCE form:
+
+- `human_summary` is **overridden** with a staleness statement (e.g. `"Port 3 (Port 3) may not have anything connected — the settings below are from its last configuration and may not reflect an active device."`)
+- `note` is set to a redirect hint (e.g. `"If you meant a different port, let me know which one."`)
+- All raw data fields (`humidity_range_pct`, `cycle_on_seconds`, etc.) are still returned — they represent the controller's stored configuration regardless of whether hardware is present.
+
+This prevents the response from confidently asserting automation targets (e.g. "Humidity automation: 60–100%") for a port that likely has nothing plugged in.
 
 **Non-ADVANCE field notes:**
 - `vpd_target_kpa` — non-null only when VPD automation active; decoded as `targetVpd ÷ 10` (Quirk 4 analogue)

@@ -1299,6 +1299,11 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
 
 # ============ New Read Tools ============
 
+# portResistance == 65535 (0xFFFF) is the hardware open-circuit sentinel: nothing connected.
+# The controller measures electrical resistance across each port; connected devices present
+# real values (e.g. 400Ω light, 7500Ω fan, 15800Ω heater). Confirmed via ProxyMan 2026-05-26.
+_PORT_EMPTY_RESISTANCE: int = 65535
+
 # curMode (devInfoListAll) and atType (getdevModeSettingList) use the same integer encoding
 _MODE_LABELS: dict[int, str] = {
     1: "OFF", 2: "ON", 3: "AUTO",
@@ -1489,35 +1494,44 @@ def _get_port_name_from_device(device: dict | None, port: int) -> str:
 
 
 def _is_port_empty(port_data: dict | None, port: int, device: dict | None) -> bool:
-    """Return True when a port appears to have nothing connected.
+    """Return True when nothing is physically connected to this port.
 
-    Detection signal (from issue #165):
-    - Port name matches the API default pattern ``"Port N"`` (i.e. not custom-named), AND
-    - ``portsLoad == 0``, OR the device ``devType`` is in ``_ZERO_LOAD_DEV_TYPES`` (18, 22).
+    Primary signal (Quirk 27): ``portResistance == 65535`` (0xFFFF) in
+    ``devInfoListAll.deviceInfo.ports``. The controller measures electrical resistance
+    across each port; 65535 is the maximum uint16 value indicating open circuit (nothing
+    connected). Connected devices — even in OFF mode — present real values (e.g. 400Ω
+    light, 7500Ω fan, 15800Ω heater). When ``portResistance`` is present and is not
+    65535, the port is NOT empty regardless of port name or ``portsLoad``.
 
-    devType 18 (8T4TC / UIS 69 Pro+) always has ``portsLoad=0`` for all ports regardless
-    of whether anything is actually connected, so we rely on the default-name-only signal
-    for those devices. devType 22 (Q0KT4) also has unreliable portsLoad.
+    Fallback (Quirk 26): when ``portResistance`` is absent (old firmware), the existing
+    dual-signal heuristic applies — default name ``"Port N"`` AND (``portsLoad == 0`` OR
+    ``devType in _ZERO_LOAD_DEV_TYPES``). Custom-named ports in the fallback path are
+    assumed connected.
 
-    Custom-named ports are assumed connected — if the grower named a port, something is
-    plugged in. Returns False when ``port_data`` is None (port not found) or when the
-    device dict is not available.
+    Known tradeoff (user-approved 2026-05-26): LED grow lights with their own power
+    switches may read ``portResistance=65535`` when that switch is off but the device is
+    still physically plugged in. Passive loads (heaters, fans with AC motors) are not
+    affected — their resistance is measurable regardless of a device-level switch.
+
+    Returns False when ``port_data`` is None (port not found) or ``device`` is None.
     """
     if port_data is None or device is None:
         return False
 
-    port_name = port_data.get("portName")
-    # Custom-named = not default "Port N" — assume connected.
-    if port_name and port_name != f"Port {port}":
-        return False
+    port_resistance = port_data.get("portResistance")
+    if port_resistance is not None:
+        try:
+            return int(port_resistance) == _PORT_EMPTY_RESISTANCE
+        except (ValueError, TypeError, OverflowError):
+            return False  # treat as connected on malformed API data
 
-    # Port name is default or absent — check load signal.
+    # Fallback for firmware that omits portResistance: preserve dual-signal heuristic.
+    port_name = port_data.get("portName", f"Port {port}")
+    if port_name and port_name != f"Port {port}":
+        return False  # custom-named → assumed connected
     ports_load = port_data.get("portsLoad", 0) or 0
     dev_type = device.get("devType")
-    if ports_load == 0 or dev_type in _ZERO_LOAD_DEV_TYPES:
-        return True
-
-    return False
+    return ports_load == 0 or dev_type in _ZERO_LOAD_DEV_TYPES
 
 
 def _is_port_not_powered(port_data: dict | None, device: dict | None) -> bool:
@@ -1943,9 +1957,10 @@ async def get_port_status(device_id: str, port: int) -> str:
         under automation control and the governing automation name was successfully resolved;
         absent otherwise.
 
-        When the port appears to have nothing connected (default-named ``"Port N"`` with zero load,
-        or a devType=18/22 controller), the response also includes a ``note`` field alerting the
-        grower (e.g. ``"Port 7 doesn't appear to have anything connected."``).
+        When the port appears to have nothing connected (primary: ``portResistance == 65535``;
+        fallback for old firmware: default-named ``"Port N"`` with zero load, or a devType=18/22
+        controller), the response also includes a ``note`` field alerting the grower
+        (e.g. ``"Port 7 doesn't appear to have anything connected."``).
 
         On failure returns ``{"error": "...", "detail": "..."}``.
 
@@ -2114,8 +2129,9 @@ async def get_port_settings(device_id: str, port: int) -> str:
         thresholds are enabled. ``schedule_window`` times are in device local time
         (not UTC).
 
-        When the port appears to have nothing connected (default-named ``"Port N"`` with zero load,
-        or a devType=18/22 controller), the response includes a staleness-aware ``note`` field.
+        When the port appears to have nothing connected (primary: ``portResistance == 65535``;
+        fallback for old firmware: default-named ``"Port N"`` with zero load, or a devType=18/22
+        controller), the response includes a staleness-aware ``note`` field.
         On the non-ADVANCE path, ``human_summary`` is overridden with a staleness statement
         and ``note`` is set to a redirect hint, so the response doesn't contradict itself
         (e.g. "Humidity automation: 60–100%") for a port with nothing connected.
@@ -2225,8 +2241,13 @@ async def get_port_settings(device_id: str, port: int) -> str:
                     " Ask me to list your automations for details."
                 )
             if _is_port_empty(port_data, port, device):
-                _ps_port_label = (
+                _ps_raw_name = (
                     port_data.get("portName", f"Port {port}") if port_data else f"Port {port}"
+                )
+                _ps_port_label = (
+                    f"{_ps_raw_name} (Port {port})"
+                    if _ps_raw_name != f"Port {port}"
+                    else f"Port {port}"
                 )
                 _adv_stale_note = (
                     f"{_ps_port_label} doesn't appear to have anything connected. "
@@ -2333,8 +2354,13 @@ async def get_port_settings(device_id: str, port: int) -> str:
             non_adv_resp["timer_on_seconds"] = _timer_on
             non_adv_resp["timer_off_seconds"] = _timer_off
         if _is_port_empty(port_data, port, device):
-            _gps_port_label = (
+            _gps_raw_name = (
                 port_data.get("portName", f"Port {port}") if port_data else f"Port {port}"
+            )
+            _gps_port_label = (
+                f"{_gps_raw_name} (Port {port})"
+                if _gps_raw_name != f"Port {port}"
+                else f"Port {port}"
             )
             non_adv_resp["human_summary"] = (
                 f"{_gps_port_label} doesn't appear to have anything connected. "
@@ -2511,9 +2537,9 @@ async def set_port_on(
         JSON with action, device_id, port, dry_run, controller_type, sent,
         and payload (when dry_run=True).
 
-        When the port appears to have nothing connected (default-named ``"Port N"``
-        with zero load, or a devType=18/22 device), the response also includes a
-        ``warning`` field alerting the grower.
+        When the port appears to have nothing connected (primary: ``portResistance == 65535``;
+        fallback for old firmware: default-named ``"Port N"`` with zero load, or a devType=18/22
+        device), the response also includes a ``warning`` field alerting the grower.
 
         On failure returns ``{"error": "..."}``.
     """
@@ -2612,9 +2638,9 @@ async def set_port_off(
         JSON with action, device_id, port, dry_run, controller_type, sent,
         and payload (when dry_run=True).
 
-        When the port appears to have nothing connected (default-named ``"Port N"``
-        with zero load, or a devType=18/22 device), the response also includes a
-        ``warning`` field alerting the grower.
+        When the port appears to have nothing connected (primary: ``portResistance == 65535``;
+        fallback for old firmware: default-named ``"Port N"`` with zero load, or a devType=18/22
+        device), the response also includes a ``warning`` field alerting the grower.
 
         On failure returns ``{"error": "..."}``.
     """

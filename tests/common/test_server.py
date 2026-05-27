@@ -4478,10 +4478,10 @@ async def test_get_port_settings_empty_port_cycle_stale_note(mock_client):
 
 
 async def test_get_port_settings_connected_port_no_stale_note(mock_client):
-    """Custom-named port — no staleness note or override (custom name bypasses _is_port_empty)."""
+    """Port 1 (Intake Fan) has portResistance=7500 — primary signal False, no staleness note."""
     mock_client.get_mode_settings.return_value = MOCK_MODE_SETTINGS_BASIC
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        result = await get_port_settings("C58ZA", 1)  # port 1 = "Intake Fan", portsLoad=1
+        result = await get_port_settings("C58ZA", 1)  # port 1 = "Intake Fan", portResistance=7500
     data = json.loads(result)
     assert "note" not in data
     assert "stale" not in data.get("human_summary", "")
@@ -4561,6 +4561,29 @@ async def test_get_port_settings_advance_degraded_empty_port_note_concatenated(m
     # human_summary should NOT be overridden with stale message
     assert "stale" not in data["human_summary"]
 
+
+
+async def test_get_port_settings_portresistance_custom_name_stale_note(mock_client):
+    """portResistance=65535 + custom-named port → staleness note fires (core #183 fix).
+
+    Previously, custom names caused _is_port_empty to return False (assumed connected),
+    so a removed device named "Humidifier" would silently show stale automation settings.
+    """
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device["deviceInfo"]["ports"].append(
+        {"port": 3, "portName": "Humidifier", "speak": 0, "portsLoad": 0,
+         "loadState": 0, "curMode": 3, "remainTime": 0, "portResistance": 65535}
+    )
+    mock_client.get_devices.return_value = [device]
+    settings = {**MOCK_MODE_SETTINGS_BASIC, "activeLh": 1, "devLh": 60, "devHh": 100}
+    mock_client.get_mode_settings.return_value = settings
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_settings("C58ZA", 3)
+    data = json.loads(result)
+    assert "stale" in data["human_summary"]
+    assert "different port" in data["note"]
+    assert "Humidity automation" not in data["human_summary"]
+    assert data["humidity_range_pct"] == {"min_pct": 60, "max_pct": 100}  # raw data preserved
 
 
 # ============ _parse_schedule_time ============
@@ -8390,11 +8413,18 @@ def _make_port_data(
     port: int,
     name: str | None = None,
     ports_load: int = 0,
+    port_resistance: int | None = None,
 ) -> dict:
-    """Build a minimal port dict for _is_port_empty tests."""
+    """Build a minimal port dict for _is_port_empty tests.
+
+    Omitting ``port_resistance`` (the default) exercises the fallback path.
+    Pass ``port_resistance=65535`` or a real value to exercise the primary path.
+    """
     p: dict = {"port": port, "portsLoad": ports_load}
     if name is not None:
         p["portName"] = name
+    if port_resistance is not None:
+        p["portResistance"] = port_resistance
     return p
 
 
@@ -8475,6 +8505,82 @@ def test_is_port_empty_no_portname_key():
     port_data = {"port": 6, "portsLoad": 0}  # portName key absent
     device = _make_device(dev_type=11)
     assert _is_port_empty(port_data, 6, device) is True
+
+
+# ---------- Primary portResistance signal (Quirk 27) ----------
+
+
+def test_is_port_empty_resistance_65535_custom_name_returns_true():
+    """portResistance=65535 + custom name → True (the core #183 fix)."""
+    port_data = _make_port_data(1, name="Humidifier", ports_load=0, port_resistance=65535)
+    device = _make_device(dev_type=11)
+    assert _is_port_empty(port_data, 1, device) is True
+
+
+def test_is_port_empty_resistance_65535_default_name_returns_true():
+    """portResistance=65535 + default name → True (primary signal, no fallback needed)."""
+    port_data = _make_port_data(7, name="Port 7", ports_load=0, port_resistance=65535)
+    device = _make_device(dev_type=11)
+    assert _is_port_empty(port_data, 7, device) is True
+
+
+def test_is_port_empty_resistance_non_65535_custom_name_returns_false():
+    """portResistance=7500 (fan) + custom name → False (primary wins over name heuristic)."""
+    port_data = _make_port_data(4, name="Filter", ports_load=0, port_resistance=7500)
+    device = _make_device(dev_type=18)
+    assert _is_port_empty(port_data, 4, device) is False
+
+
+def test_is_port_empty_resistance_non_65535_default_name_zero_load_returns_false():
+    """portResistance=7500 + default name + portsLoad=0 → False (primary signal wins)."""
+    port_data = _make_port_data(7, name="Port 7", ports_load=0, port_resistance=7500)
+    device = _make_device(dev_type=11)
+    assert _is_port_empty(port_data, 7, device) is False
+
+
+def test_is_port_empty_resistance_65535_devtype18_custom_name_returns_true():
+    """portResistance=65535 + devType=18 + custom name → True (primary wins)."""
+    port_data = _make_port_data(4, name="Filter", ports_load=0, port_resistance=65535)
+    device = _make_device(dev_type=18)
+    assert _is_port_empty(port_data, 4, device) is True
+
+
+def test_is_port_empty_resistance_malformed_returns_false():
+    """Malformed portResistance string → False (safe default, treat as connected)."""
+    port_data = _make_port_data(3, name="Port 3", ports_load=0, port_resistance=None)
+    port_data["portResistance"] = "N/A"
+    device = _make_device(dev_type=11)
+    assert _is_port_empty(port_data, 3, device) is False
+
+
+def test_is_port_empty_resistance_zero_returns_false():
+    """portResistance=0 is a real (shorted) reading, not open-circuit → False."""
+    port_data = _make_port_data(2, name="Port 2", ports_load=0, port_resistance=0)
+    device = _make_device(dev_type=11)
+    assert _is_port_empty(port_data, 2, device) is False
+
+
+# ---------- Fallback path (portResistance absent — old firmware) ----------
+
+
+def test_is_port_empty_fallback_custom_name_no_resistance():
+    """portResistance absent + custom name → fallback path → False (assumed connected).
+
+    Old-firmware devices that omit portResistance still treat custom names as connected.
+    """
+    port_data = _make_port_data(1, name="Humidifier", ports_load=0)  # no port_resistance key
+    device = _make_device(dev_type=11)
+    assert _is_port_empty(port_data, 1, device) is False
+
+
+def test_is_port_empty_fallback_default_name_zero_load():
+    """portResistance absent + default name + portsLoad=0 → fallback path → True (empty).
+
+    Old-firmware devices that omit portResistance still use the dual-signal heuristic.
+    """
+    port_data = _make_port_data(7, name="Port 7", ports_load=0)  # no port_resistance key
+    device = _make_device(dev_type=11)
+    assert _is_port_empty(port_data, 7, device) is True
 
 
 def test_empty_port_warning_text():
@@ -8726,6 +8832,21 @@ async def test_get_port_status_connected_port_no_note(mock_client):
     assert "note" not in data
 
 
+async def test_get_port_status_portresistance_65535_custom_name_note(mock_client):
+    """portResistance=65535 + custom-named port → note fires on get_port_status (#183)."""
+    dev = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    dev["deviceInfo"]["ports"] = [
+        {"port": 1, "portName": "Humidifier", "speak": 0, "portsLoad": 0,
+         "loadState": 0, "curMode": 2, "remainTime": 0, "portResistance": 65535},
+    ]
+    mock_client.get_devices.return_value = [dev]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_status("C58ZA", 1)
+    data = json.loads(result)
+    assert "note" in data
+    assert "connected" in data["note"]
+
+
 async def test_get_port_settings_empty_port_note(mock_client):
     """get_port_settings: default-named zero-load port gets note on non-ADVANCE path."""
     dev = _make_device_with_empty_port(7)
@@ -8789,7 +8910,10 @@ async def test_set_port_on_devtype18_default_name_warns(mock_client):
 
 
 async def test_set_port_on_devtype18_custom_name_no_warning(mock_client):
-    """devType=18: custom-named port (e.g. Filter) does NOT trigger warning."""
+    """devType=18: custom-named port (e.g. Filter) does NOT trigger warning.
+
+    Exercises the fallback path (portResistance absent): custom name → assumed connected.
+    """
     mock_client.set_port_mode.return_value = MOCK_WRITE_DRY
     dev = copy.deepcopy(MOCK_DEVICE_LEGACY)
     dev["devType"] = 18
@@ -8802,6 +8926,22 @@ async def test_set_port_on_devtype18_custom_name_no_warning(mock_client):
         result = await set_port_on("C58ZA", 4)
     data = json.loads(result)
     assert "warning" not in data
+
+
+async def test_set_port_on_portresistance_65535_custom_name_warns(mock_client):
+    """portResistance=65535 + custom-named port → warning fires (core #183 — write-tool level)."""
+    mock_client.set_port_mode.return_value = MOCK_WRITE_DRY
+    dev = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    dev["deviceInfo"]["ports"] = [
+        {"port": 4, "portName": "Humidifier", "portsLoad": 0,
+         "speak": 0, "loadState": 0, "curMode": 2, "remainTime": 0, "portResistance": 65535},
+    ]
+    mock_client.get_devices.return_value = [dev]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await set_port_on("C58ZA", 4)
+    data = json.loads(result)
+    assert "warning" in data
+    assert "connected" in data["warning"]
 
 
 # ============ _is_port_not_powered helper (issue #178) ============

@@ -30,9 +30,9 @@ MOCK_DEVICE_LEGACY: dict = {
         "unit": 1,
         "ports": [
             {"port": 1, "portName": "Intake Fan", "speak": 5, "portsLoad": 1,
-             "loadState": 1, "curMode": 3, "remainTime": 0},
+             "loadState": 1, "curMode": 3, "remainTime": 0, "portResistance": 7500},
             {"port": 2, "portName": "Exhaust Fan", "speak": 7, "portsLoad": 1,
-             "loadState": 1, "curMode": 2, "remainTime": 0},
+             "loadState": 1, "curMode": 2, "remainTime": 0, "portResistance": 7500},
         ],
     },
 }
