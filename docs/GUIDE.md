@@ -25,6 +25,27 @@ A complete walkthrough of every tool, with real conversation examples.
 
 **ac-infinity-mcp** connects Claude to your AC Infinity controllers. Once set up, you can read live sensor data, run analytics, and control your ports through natural conversation — no app switching, no menus.
 
+| Capability | What it gives you |
+|---|---|
+| **Monitor** | Live sensor readings and multi-day historical data across all registered controllers and ports |
+| **Understand** | Environment health scoring with letter grades, trend detection across day/night cycles, port activity analysis |
+| **Automate** | Set VPD, temperature, and humidity automation targets; control fan speed, on/off state, and scheduled run windows |
+| **Configure** | Full port mode control across all 8 modes with mode-specific parameters; read current automation settings and schedules |
+| **Grow** | One-command grow stage templates from seedling through late flower; VPD drift diagnosis with corrective guidance |
+| **Learn** | Three guided prompts for environment alert interpretation, stage setup, and VPD troubleshooting |
+
+### What this integration makes possible
+
+AC Infinity controllers already measure, automate, and respond. What they don't do is explain, advise, or anticipate. This integration closes that gap — and because Claude can combine this MCP with other connected tools, some workflows aren't possible through the app at all:
+
+| You say… | What Claude does |
+|---|---|
+| "Here are this week's canopy shots — based on what you see and how the environment has trended, what would you change?" | Correlates visual plant indicators in the photos with the past week of VPD and temperature data, then surfaces specific recommended adjustments with reasoning *(requires image input support in your Claude client)* |
+| "We're flipping to 12/12 today" | Applies the early-flower automation template to your controller, records the flip date and current environmental baseline in your grow log, and drafts a community update — three systems from one instruction *(requires additional MCP tools for calendar/notes)* |
+| "How did my tent do overnight?" | Pulls sensor history, compares against stage targets, surfaces what drifted and what needs attention — without opening the app |
+| "Has my humidity been climbing during lights-off?" | Analyzes day/night patterns across the past week and recommends whether to adjust exhaust timing, dehumidifier scheduling, or tent sealing |
+| "What would setting fan speed to 8 actually do?" | Returns a full preview showing exactly what would change — device untouched until you confirm |
+
 ### The safety model
 
 Every write operation — changing a speed, toggling a port, creating an automation — shows you exactly what it will do before doing it. This is called **preview mode**, and it is on by default. Claude will describe the change, tell you what it's changing from, and wait for you to say "yes" (or anything equivalent) before anything reaches your equipment.
