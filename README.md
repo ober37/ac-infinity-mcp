@@ -67,6 +67,8 @@
 
 > ✦ All write tools (Write, Automation, and Intelligence categories) default to `dry_run=True` — they return the exact payload they *would* send without making any changes to your equipment. Pass `dry_run=False` only when you're ready to execute.
 
+> 📖 For a complete grower's guide with conversation examples for every tool, see [docs/GUIDE.md](docs/GUIDE.md).
+
 ## MCP Prompts
 
 Three built-in prompts are registered alongside the tools. In Claude Desktop and other MCP clients, these appear as slash commands or prompt suggestions.

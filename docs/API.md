@@ -1,5 +1,7 @@
 # AC Infinity API Reference
 
+New to the server? The [Grower's Guide](GUIDE.md) walks through every tool with conversation examples.
+
 ## Overview
 
 - **Base URL:** `http://www.acinfinityserver.com/api` (HTTP only — see Security Note)
