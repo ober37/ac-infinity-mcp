@@ -2224,7 +2224,7 @@ async def get_port_settings(device_id: str, port: int) -> str:
                     "Could not fetch automation details."
                     " Ask me to list your automations for details."
                 )
-            if _is_port_not_powered(port_data, device) or _is_port_empty(port_data, port, device):
+            if _is_port_empty(port_data, port, device):
                 _ps_port_label = (
                     port_data.get("portName", f"Port {port}") if port_data else f"Port {port}"
                 )
@@ -2332,7 +2332,7 @@ async def get_port_settings(device_id: str, port: int) -> str:
         if _timer_on or _timer_off:
             non_adv_resp["timer_on_seconds"] = _timer_on
             non_adv_resp["timer_off_seconds"] = _timer_off
-        if _is_port_not_powered(port_data, device) or _is_port_empty(port_data, port, device):
+        if _is_port_empty(port_data, port, device):
             _gps_port_label = (
                 port_data.get("portName", f"Port {port}") if port_data else f"Port {port}"
             )
