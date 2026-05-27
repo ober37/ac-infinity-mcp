@@ -569,7 +569,7 @@ Occasionally the automation list can't be fetched from the controller:
 
 The server comes with three built-in prompts — guides that Claude follows when you ask for them. In Claude Desktop, you can invoke them by name or by describing what you want. For example: "Use the VPD troubleshooting guide" or "Walk me through the new grower setup."
 
-When Claude follows a prompt, it responds in plain language. You won't see any code or technical terms in what Claude says to you.
+When Claude follows a prompt, it responds in plain language — you shouldn't see any code or technical terms in what it says to you.
 
 **Tip:** If anything in Claude's response looks out of place while following a prompt, just say "continue in plain language" and it will carry on naturally.
 
