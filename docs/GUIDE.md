@@ -83,9 +83,9 @@ The first thing to do is ask Claude to find your controllers. Claude uses the na
 > **User:** What AC Infinity controllers do I have?
 >
 > **Claude:** You have three controllers:
-> - Towlie Tent — online
-> - Willie's Tent — online
-> - Genetics Lab — online
+> - Flower Tent — online
+> - Veg Tent — online
+> - Propagation Room — online
 >
 > Which one would you like to start with?
 
@@ -101,9 +101,9 @@ Claude will list every controller associated with your account, along with each 
 
 Ask for the current state of any controller at any time. You'll get temperature, humidity, VPD, and the status of every port.
 
-> **User:** What's going on in Willie's Tent right now?
+> **User:** What's going on in Veg Tent right now?
 >
-> **Claude:** Here's Willie's Tent (2:02 PM CDT):
+> **Claude:** Here's Veg Tent (2:02 PM CDT):
 >
 > Temperature: 60.6°F | Humidity: 58.7% | VPD: 0.74 kPa
 >
@@ -139,9 +139,9 @@ Each port falls into one of three states:
 
 Ask for environmental history over any date range. You can get raw readings, or ask Claude to bucket them by 15-minute, 1-hour, or 1-day averages.
 
-> **User:** How has my VPD been in Willie's Tent this past week?
+> **User:** How has my VPD been in Veg Tent this past week?
 >
-> **Claude:** Here's the VPD trend for Willie's Tent over the last 7 days (hourly averages):
+> **Claude:** Here's the VPD trend for Veg Tent over the last 7 days (hourly averages):
 >
 > VPD averaged 0.82 kPa, trending up from 0.71 kPa at the start of the week to 0.94 kPa by the end. That's on the low end of the veg range — still within acceptable bounds, but worth watching if you're pushing into early flower.
 
@@ -157,7 +157,7 @@ Get a quick yes/no on whether your VPD is on track for a specific grow stage.
 
 > **User:** Is my VPD on track for mid-flower?
 >
-> **Claude:** Willie's Tent VPD is currently 0.74 kPa — that's LOW for mid-flower (target range: 1.2–2.0 kPa). You'll want to raise temperature or lower humidity to bring it up.
+> **Claude:** Veg Tent VPD is currently 0.74 kPa — that's LOW for mid-flower (target range: 1.2–2.0 kPa). You'll want to raise temperature or lower humidity to bring it up.
 
 Status values are: **OK**, **HIGH**, or **LOW**.
 
@@ -178,9 +178,9 @@ Score breakdown:
 | D | 60–69 | Poor |
 | F | 0–59 | Critical |
 
-> **User:** How is Willie's Tent doing overall?
+> **User:** How is Veg Tent doing overall?
 >
-> **Claude:** Willie's Tent health score: 83/100 — Grade B (Good).
+> **Claude:** Veg Tent health score: 83/100 — Grade B (Good).
 >
 > - VPD: 0.74 kPa — slightly low for current stage (score: 72/100)
 > - Temperature: 60.6°F — within target range (score: 91/100)
@@ -192,17 +192,17 @@ Score breakdown:
 
 Analyzes up to 30 days of history and projects where your environment is heading over the next 7 days.
 
-> **User:** What direction is my Towlie Tent environment heading?
+> **User:** What direction is my Flower Tent environment heading?
 >
-> **Claude:** Over the past 7 days in Towlie Tent: temperature is trending up 0.8°F/day (projected to hit 74°F by end of week), humidity is holding steady at 52%, and VPD is tracking up from 1.0 to a projected 1.3 kPa — right on target for mid-flower if that trend holds.
+> **Claude:** Over the past 7 days in Flower Tent: temperature is trending up 0.8°F/day (projected to hit 74°F by end of week), humidity is holding steady at 52%, and VPD is tracking up from 1.0 to a projected 1.3 kPa — right on target for mid-flower if that trend holds.
 
 ### Port activity report
 
 See how much each port has been running — total hours on, uptime percentage, and which hour of the day it tends to be most active.
 
-> **User:** Show me which ports have been running the most this week in Willie's Tent.
+> **User:** Show me which ports have been running the most this week in Veg Tent.
 >
-> **Claude:** Port activity for Willie's Tent, last 7 days:
+> **Claude:** Port activity for Veg Tent, last 7 days:
 >
 > | Port | Hours On | Uptime | Peak Hour |
 > |---|---|---|---|
@@ -222,7 +222,7 @@ Ask about the current operating state of any specific port — what mode it's in
 
 > **User:** What mode is my Filter running in?
 >
-> **Claude:** Filter (Port 4) on Willie's Tent is running in Automation mode, governed by the "Moderate Airflow" program at target speed 5.
+> **Claude:** Filter (Port 4) on Veg Tent is running in Automation mode, governed by the "Moderate Airflow" program at target speed 5.
 
 **A note on automation mode:** When a port is under an Advance Automation, the live status shows the mode as "Automation" — and if you ask for the port's full settings, you'll see it listed as "ADVANCE." Both mean exactly the same thing: the port is controlled by a named automation program.
 
@@ -236,7 +236,7 @@ Ask for the complete configured settings on any port — mode, VPD target, tempe
 
 > **User:** What are the full settings on Port 1?
 >
-> **Claude:** Humidifier (Port 1) on Willie's Tent:
+> **Claude:** Humidifier (Port 1) on Veg Tent:
 > - Mode: AUTO
 > - Humidity range: 50–60% RH (fan runs when humidity drops below 50%)
 > - Temperature range: 65–78°F
@@ -254,11 +254,11 @@ Claude will describe the change, tell you what it's changing from, and wait for 
 
 ### Setting a port speed
 
-> **User:** Turn Filter on Willie's Tent down to speed 3.
+> **User:** Turn Filter on Veg Tent down to speed 3.
 >
 > **Claude:** Here's the plan — previewing before any changes:
 >
-> Set Filter (Port 4) on Willie's Tent from speed 1 → speed 3.
+> Set Filter (Port 4) on Veg Tent from speed 1 → speed 3.
 >
 > Ready to apply this?
 >
@@ -266,13 +266,13 @@ Claude will describe the change, tell you what it's changing from, and wait for 
 >
 > **User:** Yes, go ahead.
 >
-> **Claude:** Done — Filter (Port 4) on Willie's Tent is now running at speed 3.
+> **Claude:** Done — Filter (Port 4) on Veg Tent is now running at speed 3.
 
 ### Turning a port on
 
 > **User:** Turn on my Humidifier.
 >
-> **Claude:** Previewing: turn Humidifier (Port 1) on Willie's Tent on at full speed.
+> **Claude:** Previewing: turn Humidifier (Port 1) on Veg Tent on at full speed.
 >
 > Ready to apply?
 >
@@ -284,9 +284,9 @@ Claude will describe the change, tell you what it's changing from, and wait for 
 
 ### Turning a port off
 
-> **User:** Turn off the Heater in Willie's Tent.
+> **User:** Turn off the Heater in Veg Tent.
 >
-> **Claude:** Previewing: turn Heater (Port 2) on Willie's Tent off.
+> **Claude:** Previewing: turn Heater (Port 2) on Veg Tent off.
 >
 > Ready to apply?
 >
@@ -310,9 +310,9 @@ These tools set automation modes directly on a single port.
 
 Sets the port to VPD mode with a specific kPa target. The controller uses its built-in temperature and humidity sensors to maintain your target.
 
-> **User:** Set Willie's Tent Filter to VPD mode targeting 1.2 kPa.
+> **User:** Set Veg Tent Filter to VPD mode targeting 1.2 kPa.
 >
-> **Claude:** Previewing: set Filter (Port 4) on Willie's Tent to VPD mode, target 1.2 kPa.
+> **Claude:** Previewing: set Filter (Port 4) on Veg Tent to VPD mode, target 1.2 kPa.
 >
 > Ready to apply?
 >
@@ -330,7 +330,7 @@ Sets the port to AUTO mode with minimum and maximum temperature thresholds.
 
 > **User:** Set the Exhaust Fan to turn on when it gets above 80°F and off below 72°F.
 >
-> **Claude:** Previewing: set Exhaust Fan (Port 3) on Towlie Tent to AUTO mode — on above 80°F, off below 72°F.
+> **Claude:** Previewing: set Exhaust Fan (Port 3) on Flower Tent to AUTO mode — on above 80°F, off below 72°F.
 >
 > Ready to apply?
 
@@ -340,7 +340,7 @@ Sets the port to AUTO mode with minimum and maximum relative humidity thresholds
 
 > **User:** Set the Humidifier to run when humidity drops below 50% and stop at 60%.
 >
-> **Claude:** Previewing: set Humidifier (Port 1) on Willie's Tent to AUTO mode — on below 50% RH, off above 60% RH.
+> **Claude:** Previewing: set Humidifier (Port 1) on Veg Tent to AUTO mode — on below 50% RH, off above 60% RH.
 >
 > Ready to apply?
 
@@ -350,7 +350,7 @@ Switch any port to any mode directly: OFF, ON, AUTO, VPD, CYCLE, SCHEDULE, TIMER
 
 > **User:** Put Port 6 into cycle mode.
 >
-> **Claude:** Previewing: set Right Fan (Port 6) on Willie's Tent to CYCLE mode.
+> **Claude:** Previewing: set Right Fan (Port 6) on Veg Tent to CYCLE mode.
 >
 > Ready to apply?
 
@@ -358,7 +358,7 @@ Switch any port to any mode directly: OFF, ON, AUTO, VPD, CYCLE, SCHEDULE, TIMER
 
 One-click setup for a named grow stage. Available stages: **clones**, **seedling**, **veg**, **early_flower**, **mid_flower**, **late_flower**.
 
-> **User:** Set up Willie's Tent Filter for mid-flower.
+> **User:** Set up Veg Tent Filter for mid-flower.
 >
 > **Claude:** Here's the mid-flower template for Filter (Port 4) — previewing before making changes:
 >
@@ -367,13 +367,13 @@ One-click setup for a named grow stage. Available stages: **clones**, **seedling
 > - Temperature range saved: 64–77°F (stored for AUTO mode — not active yet)
 > - Humidity range saved: 45–55% RH (stored for AUTO mode — not active yet)
 >
-> Apply this to Filter (Port 4) on Willie's Tent?
+> Apply this to Filter (Port 4) on Veg Tent?
 >
 > ---
 >
 > **User:** Yes.
 >
-> **Claude:** Done — Filter (Port 4) on Willie's Tent is now running in VPD mode targeting 1.6 kPa for mid-flower.
+> **Claude:** Done — Filter (Port 4) on Veg Tent is now running in VPD mode targeting 1.6 kPa for mid-flower.
 
 **Important:** When you apply a grow stage template, the port is set to VPD mode using the stage's target — that's what runs immediately. The temperature and humidity thresholds for that stage are also saved on your controller, but they won't be active until you switch the port to AUTO mode. Only VPD is running right away.
 
@@ -387,9 +387,9 @@ Advance Automations are named programs that can control multiple ports on a sche
 
 **List all automations:**
 
-> **User:** What automations do I have on Willie's Tent?
+> **User:** What automations do I have on Veg Tent?
 >
-> **Claude:** Willie's Tent has 2 Advance Automations:
+> **Claude:** Veg Tent has 2 Advance Automations:
 > - "Moderate Airflow" — enabled, controlling Filter (Port 4) and Left Fan (Port 5)
 > - "Night Cycle" — disabled, controlling Left Fan (Port 5) and Right Fan (Port 6)
 
@@ -397,7 +397,7 @@ Advance Automations are named programs that can control multiple ports on a sche
 
 > **User:** Tell me everything about the "Moderate Airflow" automation.
 >
-> **Claude:** "Moderate Airflow" on Willie's Tent:
+> **Claude:** "Moderate Airflow" on Veg Tent:
 > - Status: enabled
 > - Ports: Filter (Port 4) at speed 5, Left Fan (Port 5) at speed 4
 > - Schedule: runs all 7 days
@@ -407,13 +407,13 @@ Advance Automations are named programs that can control multiple ports on a sche
 
 > **User:** Enable the "Night Cycle" automation.
 >
-> **Claude:** Previewing: enable "Night Cycle" on Willie's Tent.
+> **Claude:** Previewing: enable "Night Cycle" on Veg Tent.
 >
 > Ready to apply?
 
 > **User:** Disable "Moderate Airflow."
 >
-> **Claude:** Previewing: disable "Moderate Airflow" on Willie's Tent.
+> **Claude:** Previewing: disable "Moderate Airflow" on Veg Tent.
 >
 > Ready to apply?
 
@@ -421,7 +421,7 @@ Advance Automations are named programs that can control multiple ports on a sche
 
 > **User:** Delete the "Night Cycle" automation.
 >
-> **Claude:** Previewing: delete "Night Cycle" on Willie's Tent. This will also disable it first if it's currently active.
+> **Claude:** Previewing: delete "Night Cycle" on Veg Tent. This will also disable it first if it's currently active.
 >
 > Ready to apply?
 
@@ -446,7 +446,7 @@ Automations are created in preview mode — Claude shows you exactly what will b
 >
 > **User:** Yes.
 >
-> **Claude:** Done — "Flower Push" is now active on Willie's Tent. Filter (Port 4), Left Fan (Port 5), and Right Fan (Port 6) are now under its control.
+> **Claude:** Done — "Flower Push" is now active on Veg Tent. Filter (Port 4), Left Fan (Port 5), and Right Fan (Port 6) are now under its control.
 
 ### Releasing a port from automation control
 
@@ -456,7 +456,7 @@ The `break_out_of_automation` feature releases a port from automation control an
 
 > **User:** Release the Left Fan from the "Night Cycle" automation.
 >
-> **Claude:** Previewing: release Left Fan (Port 5) from automation control. Note: this will also lock any other ports currently under an Advance Automation on Willie's Tent to their current speeds.
+> **Claude:** Previewing: release Left Fan (Port 5) from automation control. Note: this will also lock any other ports currently under an Advance Automation on Veg Tent to their current speeds.
 >
 > Ready to apply?
 >
@@ -516,7 +516,7 @@ Three options appear:
 
 > **User:** Disable "Night Cycle."
 >
-> **Claude:** Previewing: disable "Night Cycle" on Willie's Tent.
+> **Claude:** Previewing: disable "Night Cycle" on Veg Tent.
 >
 > Ready to apply?
 >
@@ -583,7 +583,7 @@ A step-by-step VPD diagnosis guide. Claude checks your current readings, identif
 >
 > **Claude:** Let me check your current environment first...
 >
-> Willie's Tent is at 68°F / 45% RH — VPD is 1.38 kPa. For mid-flower your target is 1.2–2.0 kPa, so you're actually within range, just at the low-mid end. If you're seeing tip burn or stress signs, you could try nudging humidity down to 42% to bring VPD up toward 1.6 kPa. Want me to adjust the Humidifier settings?
+> Veg Tent is at 68°F / 45% RH — VPD is 1.38 kPa. For mid-flower your target is 1.2–2.0 kPa, so you're actually within range, just at the low-mid end. If you're seeing tip burn or stress signs, you could try nudging humidity down to 42% to bring VPD up toward 1.6 kPa. Want me to adjust the Humidifier settings?
 
 ---
 
