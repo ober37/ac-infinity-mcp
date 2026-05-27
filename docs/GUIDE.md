@@ -40,11 +40,10 @@ AC Infinity controllers already measure, automate, and respond. What they don't 
 
 | You say… | What Claude does |
 |---|---|
-| "Here are this week's canopy shots — based on what you see and how the environment has trended, what would you change?" | Correlates visual plant indicators in the photos with the past week of VPD and temperature data, then surfaces specific recommended adjustments with reasoning *(requires image input support in your Claude client)* |
-| "We're flipping to 12/12 today" | Applies the early-flower automation template to your controller, records the flip date and current environmental baseline in your grow log, and drafts a community update — three systems from one instruction *(requires additional MCP tools for calendar/notes)* |
 | "How did my tent do overnight?" | Pulls sensor history, compares against stage targets, surfaces what drifted and what needs attention — without opening the app |
-| "Has my humidity been climbing during lights-off?" | Analyzes day/night patterns across the past week and recommends whether to adjust exhaust timing, dehumidifier scheduling, or tent sealing |
 | "What would setting fan speed to 8 actually do?" | Returns a full preview showing exactly what would change — device untouched until you confirm |
+| "Here are this week's canopy shots — based on how the environment has trended, what would you change?" | Can correlate visual plant indicators with the past week of VPD and temperature data to suggest specific adjustments *(requires image input support in your Claude client)* |
+| "We're flipping to 12/12 today" | Can apply the early-flower automation template to your controller in the same step as updating a grow log or drafting a community post *(requires additional MCP tools for calendar/notes)* |
 
 ### The safety model
 
