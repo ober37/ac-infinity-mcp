@@ -16,11 +16,18 @@ This file is the authoritative source for how Claude agents contribute to this r
   gates pass, present the status to the user and wait for them to say "merge" (or equivalent)
   before running `gh pr merge`.
 - **Before declaring CI green or recommending merge, verify the PR's actual branch state:**
-  Run `gh pr view <N> --json mergeStateStatus,headRefOid,headRefName` and confirm
-  `mergeStateStatus` is `CLEAN` (not `BEHIND` or `DIRTY`), and that `headRefOid` matches the
-  local branch HEAD (`git rev-parse HEAD`). A PR that is `BEHIND` main must be rebased and
-  re-pushed before the all-clear is given. Never report CI passing from a stale run — confirm
-  the run SHA matches the current HEAD SHA.
+  Run `gh pr view <N> --json mergeStateStatus,mergeable,headRefOid,headRefName` and confirm:
+  - `mergeStateStatus` is `CLEAN` (not `BEHIND`, `DIRTY`, or `CONFLICTING`)
+  - `mergeable` is `MERGEABLE` (not `CONFLICTING`)
+  - `headRefOid` matches the local branch HEAD (`git rev-parse HEAD`)
+
+  `CONFLICTING` on either field means a merge conflict exists — do not report CI passing and do
+  not request merge until the conflict is resolved. Fix: abort any in-progress rebase, save the
+  full diff (`git diff origin/main HEAD > /tmp/branch.patch`), reset to main
+  (`git reset --hard origin/main`), re-apply (`git apply /tmp/branch.patch`), commit, then
+  force-push. A PR that is `BEHIND` main must be similarly rebased and re-pushed before the
+  all-clear is given. Never report CI passing from a stale run — confirm the run SHA matches
+  the current HEAD SHA.
 
 ---
 
@@ -103,7 +110,11 @@ user if not converging.
 
 Worker agent implements against the approved plan:
 
-1. Branch from `main` (or use `isolation: "worktree"` if running in parallel with other issues)
+1. Branch from `main` (or use `isolation: "worktree"` if running in parallel with other issues).
+   After checkout, immediately run `git log origin/main..HEAD --oneline` and confirm **zero
+   commits** ahead of main. Worktrees can be reused across sessions and silently carry stale
+   commits from a prior phase. If stale commits exist, run `git reset --hard origin/main`
+   before writing any code.
 2. Implement the approved plan — no scope changes without returning to Stage 1
 3. Run the mechanical gate:
    - `python3 -m ruff check src/ tests/` → `All checks passed.`
