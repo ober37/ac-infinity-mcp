@@ -4478,7 +4478,7 @@ async def test_get_port_settings_empty_port_cycle_stale_note(mock_client):
 
 
 async def test_get_port_settings_connected_port_no_stale_note(mock_client):
-    """Custom-named port is assumed connected — no staleness note or override."""
+    """Custom-named port with portsLoad=1 (connected) — no staleness note or override."""
     mock_client.get_mode_settings.return_value = MOCK_MODE_SETTINGS_BASIC
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_port_settings("C58ZA", 1)  # port 1 = "Intake Fan", portsLoad=1
@@ -4560,6 +4560,27 @@ async def test_get_port_settings_advance_degraded_empty_port_note_concatenated(m
     assert "stale" in note               # from empty-port stale advisory
     # human_summary should NOT be overridden with stale message
     assert "stale" not in data["human_summary"]
+
+
+async def test_get_port_settings_custom_named_port_no_load_stale_note(mock_client):
+    """Custom-named port with portsLoad=0 triggers staleness note (issue #183)."""
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device["deviceInfo"]["ports"].append(
+        {"port": 3, "portName": "Humidifier", "speak": 0, "portsLoad": 0,
+         "loadState": 0, "curMode": 3, "remainTime": 0}
+    )
+    mock_client.get_devices.return_value = [device]
+    settings = {**MOCK_MODE_SETTINGS_BASIC, "activeLh": 1, "devLh": 60, "devHh": 100}
+    mock_client.get_mode_settings.return_value = settings
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await get_port_settings("C58ZA", 3)
+    data = json.loads(result)
+    # Custom name should appear in the staleness message
+    assert "Humidifier" in data["human_summary"]
+    assert "stale" in data["human_summary"]
+    assert "different port" in data["note"]
+    # Raw humidity data still present
+    assert data["humidity_range_pct"] == {"min_pct": 60, "max_pct": 100}
 
 
 # ============ _parse_schedule_time ============
