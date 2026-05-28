@@ -50,8 +50,13 @@ def _should_include_sensor(s: dict) -> bool:
     if sensor_type is None:
         return False
     if sensor_type in _SENSOR_TYPE_LABELS:
-        return True  # recognized type: always include (even value=0)
-    return (s.get("sensorData") or 0) != 0  # unrecognized: include only if non-zero
+        return True  # recognized external sensor type (10–20): always include
+    try:
+        if int(sensor_type) < 10:
+            return False  # types 1–9 are internal/built-in readings, not external hardware
+    except (ValueError, TypeError):
+        return False
+    return (s.get("sensorData") or 0) != 0  # unrecognized high type: include if non-zero
 
 
 _SCHEDULE_ALWAYS_ACTIVE: int = 255

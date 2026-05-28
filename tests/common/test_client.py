@@ -262,6 +262,51 @@ def test_parse_device_data_mixed_sensor_list(client):
     assert values[21] == pytest.approx(85.5)
 
 
+# devType=22 phantom sensor fixture (real field values from Proxyman capture)
+MOCK_PHANTOM_SENSORS_DEVTYPE22 = [
+    {"sensorType": 4, "sensorUnit": 0, "sensorPrecision": 3, "sensorTrend": 0,
+     "accessPort": 7, "sensorData": 6320, "sensorKey": "4-7"},
+    {"sensorType": 6, "sensorUnit": 0, "sensorPrecision": 3, "sensorTrend": 2,
+     "accessPort": 7, "sensorData": 5710, "sensorKey": "6-7"},
+    {"sensorType": 7, "sensorUnit": 0, "sensorPrecision": 3, "sensorTrend": 0,
+     "accessPort": 7, "sensorData": 83, "sensorKey": "7-7"},
+]
+
+
+def test_should_include_sensor_devtype22_phantoms_excluded(client):
+    """sensorType 4, 6, 7 with non-zero sensorData → excluded (devType=22 internal bus readings)."""
+    for entry in MOCK_PHANTOM_SENSORS_DEVTYPE22:
+        device = _device_with_sensor_list([entry])
+        result = client.parse_device_data(device)
+        st = entry["sensorType"]
+        assert result["external_sensors"] == [], f"sensorType={st} should be excluded"
+
+
+def test_should_include_sensor_any_lt10_not_in_label_dict_excluded(client):
+    """Any sensorType < 10 not in _SENSOR_TYPE_LABELS → excluded regardless of sensorData."""
+    for st in range(1, 10):
+        entry = {"sensorType": st, "sensorData": 9999, "sensorPrecision": 100, "accessPort": 1}
+        device = _device_with_sensor_list([entry])
+        result = client.parse_device_data(device)
+        assert result["external_sensors"] == [], f"sensorType={st} should be excluded"
+
+
+def test_should_include_sensor_recognized_type_zero_still_included(client):
+    """sensorType=10 (soil_moisture), sensorData=0 → always included even at zero."""
+    entry = {"sensorType": 10, "sensorData": 0, "sensorPrecision": 100, "accessPort": 1}
+    device = _device_with_sensor_list([entry])
+    result = client.parse_device_data(device)
+    assert len(result["external_sensors"]) == 1
+    assert result["external_sensors"][0]["sensor_type_label"] == "soil_moisture"
+
+
+def test_parse_device_data_devtype22_fixture_zero_external_sensors(client):
+    """devType=22 fixture with three phantom sensors → zero external sensors in response."""
+    device = _device_with_sensor_list(MOCK_PHANTOM_SENSORS_DEVTYPE22)
+    result = client.parse_device_data(device)
+    assert result["external_sensors"] == []
+
+
 # ============ parse_history_record ============
 
 def test_parse_history_record_divide_by_100(client):

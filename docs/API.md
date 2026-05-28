@@ -934,8 +934,9 @@ when no physical sensor is connected to a UIS port. These phantom entries have a
 
 | Condition | Action |
 |---|---|
-| `sensorType` matches a recognized type (1–20 per `_SENSOR_TYPE_LABELS`) | **Always include** — even if current value is `0` (sensor may be connected but reading zero) |
-| `sensorType` is unrecognized (future/unknown type) | Include **only if** `sensorData != 0` — zero value on an unknown type is treated as phantom |
+| `sensorType` matches a recognized type (10–20 per `_SENSOR_TYPE_LABELS`) | **Always include** — even if current value is `0` (sensor may be connected but reading zero) |
+| `sensorType < 10` (not in label dict) | **Always exclude** — internal/built-in bus readings, not external hardware |
+| `sensorType >= 10` and unrecognized (future/unknown type) | Include **only if** `sensorData != 0` — zero value on an unknown type is treated as phantom |
 | `sensorType` is `null` | **Always exclude** — no type means no sensor slot at all |
 
 **Implementation:**
@@ -946,12 +947,26 @@ def _should_include_sensor(s: dict) -> bool:
     if sensor_type is None:
         return False
     if sensor_type in _SENSOR_TYPE_LABELS:
-        return True  # recognized type: always include (even value=0)
-    return (s.get("sensorData") or 0) != 0  # unrecognized: include only if non-zero
+        return True  # recognized external sensor type (10–20): always include
+    try:
+        if int(sensor_type) < 10:
+            return False  # types 1–9 are internal/built-in readings, not external hardware
+    except (ValueError, TypeError):
+        return False
+    return (s.get("sensorData") or 0) != 0  # unrecognized high type: include if non-zero
 ```
 
 This means `external_sensors` will be `[]` on a controller with no sensors plugged in,
 regardless of how many phantom slot entries the API returns.
+
+**devType=22 addendum (confirmed via Proxyman capture 2026-05-28):** On devType=22
+(UIS CONTROLLER 69 PRO+), the API returns phantom sensor entries with
+`sensorType` values of 4, 6, and 7 — all with non-zero `sensorData` values and
+`accessPort: 7`. These are internal bus readings, not physically-connected
+sensors. Since all real AC Infinity external sensors (soil probes, CO2, light,
+pH, EC, TDS, water probes) use types 10–20, any entry with `sensorType < 10` that
+is not in `_SENSOR_TYPE_LABELS` is treated as internal and filtered. The
+zero-value filter alone is insufficient for devType=22.
 
 ---
 
