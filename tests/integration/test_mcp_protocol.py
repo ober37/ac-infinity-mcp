@@ -213,29 +213,26 @@ def test_get_historical_readings_defaults() -> None:
 
 
 async def test_protocol_list_tools_returns_all_25(mock_client: MagicMock) -> None:
-    with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        async with create_connected_server_and_client_session(srv.mcp_server) as session:
-            result = await session.list_tools()
-            names = {t.name for t in result.tools}
-            assert len(result.tools) == 25
-            assert names == EXPECTED_TOOLS
+    async with create_connected_server_and_client_session(srv.mcp_server) as session:
+        result = await session.list_tools()
+        names = {t.name for t in result.tools}
+        assert len(result.tools) == 25
+        assert names == EXPECTED_TOOLS
 
 
 async def test_protocol_list_tools_input_schema_present(mock_client: MagicMock) -> None:
-    with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        async with create_connected_server_and_client_session(srv.mcp_server) as session:
-            result = await session.list_tools()
-            for tool in result.tools:
-                assert isinstance(tool.inputSchema, dict), f"{tool.name}: inputSchema not a dict"
-                assert "properties" in tool.inputSchema, (
-                    f"{tool.name}: no 'properties' in inputSchema"
-                )
+    async with create_connected_server_and_client_session(srv.mcp_server) as session:
+        result = await session.list_tools()
+        for tool in result.tools:
+            assert isinstance(tool.inputSchema, dict), f"{tool.name}: inputSchema not a dict"
+            assert "properties" in tool.inputSchema, (
+                f"{tool.name}: no 'properties' in inputSchema"
+            )
 
 
 async def test_protocol_call_discover_devices_happy_path(mock_client: MagicMock) -> None:
-    with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        async with create_connected_server_and_client_session(srv.mcp_server) as session:
-            result = await session.call_tool("discover_devices", {})
+    async with create_connected_server_and_client_session(srv.mcp_server) as session:
+        result = await session.call_tool("discover_devices", {})
     assert result.isError is False
     assert len(result.content) == 1
     assert result.content[0].type == "text"
@@ -247,16 +244,14 @@ async def test_protocol_call_discover_devices_happy_path(mock_client: MagicMock)
 async def test_protocol_call_discover_devices_returns_text_content(
     mock_client: MagicMock,
 ) -> None:
-    with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        async with create_connected_server_and_client_session(srv.mcp_server) as session:
-            result = await session.call_tool("discover_devices", {})
+    async with create_connected_server_and_client_session(srv.mcp_server) as session:
+        result = await session.call_tool("discover_devices", {})
     assert result.content[0].type == "text"
 
 
 async def test_protocol_call_get_device_reading_happy_path(mock_client: MagicMock) -> None:
-    with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        async with create_connected_server_and_client_session(srv.mcp_server) as session:
-            result = await session.call_tool("get_device_reading", {"device_id": "C58ZA"})
+    async with create_connected_server_and_client_session(srv.mcp_server) as session:
+        result = await session.call_tool("get_device_reading", {"device_id": "C58ZA"})
     assert result.isError is False
     data = json.loads(result.content[0].text)
     assert "temperature" in data
@@ -269,9 +264,8 @@ async def test_protocol_call_get_device_reading_happy_path(mock_client: MagicMoc
 async def test_protocol_call_get_all_device_readings_happy_path(
     mock_client: MagicMock,
 ) -> None:
-    with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        async with create_connected_server_and_client_session(srv.mcp_server) as session:
-            result = await session.call_tool("get_all_device_readings", {})
+    async with create_connected_server_and_client_session(srv.mcp_server) as session:
+        result = await session.call_tool("get_all_device_readings", {})
     assert result.isError is False
     data = json.loads(result.content[0].text)
     assert "readings" in data
@@ -279,11 +273,10 @@ async def test_protocol_call_get_all_device_readings_happy_path(
 
 
 async def test_protocol_call_check_vpd_drift_happy_path(mock_client: MagicMock) -> None:
-    with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        async with create_connected_server_and_client_session(srv.mcp_server) as session:
-            result = await session.call_tool(
-                "check_vpd_drift", {"device_id": "C58ZA", "stage": "veg"}
-            )
+    async with create_connected_server_and_client_session(srv.mcp_server) as session:
+        result = await session.call_tool(
+            "check_vpd_drift", {"device_id": "C58ZA", "stage": "veg"}
+        )
     assert result.isError is False
     data = json.loads(result.content[0].text)
     assert "current_vpd" in data
@@ -295,11 +288,10 @@ async def test_protocol_call_check_vpd_drift_happy_path(mock_client: MagicMock) 
 async def test_protocol_call_check_vpd_drift_invalid_stage_returns_error(
     mock_client: MagicMock,
 ) -> None:
-    with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        async with create_connected_server_and_client_session(srv.mcp_server) as session:
-            result = await session.call_tool(
-                "check_vpd_drift", {"device_id": "C58ZA", "stage": "bloom"}
-            )
+    async with create_connected_server_and_client_session(srv.mcp_server) as session:
+        result = await session.call_tool(
+            "check_vpd_drift", {"device_id": "C58ZA", "stage": "bloom"}
+        )
     assert result.isError is False  # tool-level error, not MCP-level
     data = json.loads(result.content[0].text)
     assert "error" in data
@@ -316,12 +308,11 @@ async def test_protocol_call_set_port_speed_dry_run_happy_path(
         "controller_type": "legacy",
         "payload": {"onSpead": 5},
     }
-    with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        async with create_connected_server_and_client_session(srv.mcp_server) as session:
-            result = await session.call_tool(
-                "set_port_speed",
-                {"device_id": "C58ZA", "port": 1, "speed": 5, "dry_run": True},
-            )
+    async with create_connected_server_and_client_session(srv.mcp_server) as session:
+        result = await session.call_tool(
+            "set_port_speed",
+            {"device_id": "C58ZA", "port": 1, "speed": 5, "dry_run": True},
+        )
     assert result.isError is False
     data = json.loads(result.content[0].text)
     assert data["dry_run"] is True
@@ -338,11 +329,10 @@ async def test_protocol_call_set_port_on_dry_run_happy_path(
         "controller_type": "legacy",
         "payload": {"onSpead": 10},
     }
-    with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        async with create_connected_server_and_client_session(srv.mcp_server) as session:
-            result = await session.call_tool(
-                "set_port_on", {"device_id": "C58ZA", "port": 1, "dry_run": True}
-            )
+    async with create_connected_server_and_client_session(srv.mcp_server) as session:
+        result = await session.call_tool(
+            "set_port_on", {"device_id": "C58ZA", "port": 1, "dry_run": True}
+        )
     assert result.isError is False
     data = json.loads(result.content[0].text)
     assert "on" in data["action"]
@@ -359,11 +349,10 @@ async def test_protocol_call_set_port_off_dry_run_happy_path(
         "controller_type": "legacy",
         "payload": {"onSpead": 0},
     }
-    with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        async with create_connected_server_and_client_session(srv.mcp_server) as session:
-            result = await session.call_tool(
-                "set_port_off", {"device_id": "C58ZA", "port": 1, "dry_run": True}
-            )
+    async with create_connected_server_and_client_session(srv.mcp_server) as session:
+        result = await session.call_tool(
+            "set_port_off", {"device_id": "C58ZA", "port": 1, "dry_run": True}
+        )
     assert result.isError is False
     data = json.loads(result.content[0].text)
     assert "off" in data["action"]
@@ -372,13 +361,13 @@ async def test_protocol_call_set_port_off_dry_run_happy_path(
 
 
 async def test_protocol_missing_client_guard() -> None:
-    """With aci_client=None, tools return a JSON error — not an MCP-level error frame.
+    """With _aci_client=None, tools return a JSON error — not an MCP-level error frame.
 
     The error message is generic by design (P3-F021) — the specific
     "client not initialized" RuntimeError text only appears in server logs,
     not in the LLM-facing response.
     """
-    with patch("ac_infinity_mcp.server.aci_client", None):
+    with patch("ac_infinity_mcp.server._aci_client", None):
         async with create_connected_server_and_client_session(srv.mcp_server) as session:
             result = await session.call_tool("discover_devices", {})
     assert result.isError is False
@@ -390,11 +379,10 @@ async def test_protocol_missing_client_guard() -> None:
 
 async def test_protocol_call_tool_with_wrong_argument_type(mock_client: MagicMock) -> None:
     """FastMCP/Pydantic rejects non-integer port — expect MCP error or JSON error."""
-    with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        async with create_connected_server_and_client_session(srv.mcp_server) as session:
-            result = await session.call_tool(
-                "set_port_speed", {"device_id": "C58ZA", "port": "not_an_int", "speed": 5}
-            )
+    async with create_connected_server_and_client_session(srv.mcp_server) as session:
+        result = await session.call_tool(
+            "set_port_speed", {"device_id": "C58ZA", "port": "not_an_int", "speed": 5}
+        )
     is_mcp_error = result.isError is True
     is_json_error = (
         not is_mcp_error

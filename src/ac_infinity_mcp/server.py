@@ -99,28 +99,13 @@ _install_credential_redactor()
 
 mcp_server = FastMCP(name="ac-infinity-mcp")
 
-# Initialized at startup via setup() / main()
-aci_client: ACInfinityClient | None = None
-
-
-def setup(client: ACInfinityClient) -> None:
-    """Wire the client into the server. Call once at startup (or in tests)."""
-    global aci_client
-    aci_client = client
-
-
-def _client() -> ACInfinityClient:
-    """Return the initialized client; raises RuntimeError if setup() was not called."""
-    if aci_client is None:
-        raise RuntimeError("AC Infinity client not initialized — call setup() first")
-    return aci_client
-
-
 # TTL cache for get_devices — avoids redundant API fetches in interactive sessions.
 # Device data stales only on physical change or port rename; 45s covers normal usage.
 _DEVICE_CACHE_TTL: float = 45.0
 _device_cache: list[dict] | None = None
 _device_cache_expires_at: float = 0.0
+
+_aci_client: ACInfinityClient | None = None
 
 
 def _invalidate_device_cache() -> None:
@@ -128,6 +113,20 @@ def _invalidate_device_cache() -> None:
     global _device_cache, _device_cache_expires_at
     _device_cache = None
     _device_cache_expires_at = 0.0
+
+
+def setup(client: ACInfinityClient) -> None:
+    """Wire the client into the server and reset state. Call once at startup or in tests."""
+    global _aci_client
+    _aci_client = client
+    _invalidate_device_cache()
+
+
+def _client() -> ACInfinityClient:
+    """Return the initialized client; raises RuntimeError if setup() was not called."""
+    if _aci_client is None:
+        raise RuntimeError("AC Infinity client not initialized — call setup() first")
+    return _aci_client
 
 
 async def _get_device(device_id: str) -> tuple[dict | None, str | None]:

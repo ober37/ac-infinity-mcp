@@ -36,7 +36,7 @@ def authed_client() -> ACInfinityClient:
     password = os.getenv("AC_INFINITY_PASSWORD", "")
     client = ACInfinityClient(email, password)
     assert client.authenticate() is True, "Live authentication failed"
-    srv.aci_client = client
+    srv.setup(client)
     return client
 
 
