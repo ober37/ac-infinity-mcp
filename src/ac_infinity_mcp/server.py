@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import unicodedata
+import weakref
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -40,8 +41,7 @@ def _resolve_log_level(raw: str | None) -> tuple[str, bool]:
     Defensive: a malformed LOG_LEVEL would cause logging.basicConfig to raise
     ValueError at import, before any error handler can format the failure for
     the operator. Falls back to INFO and signals that a warning should be
-    emitted once the logger is configured. P3-F007 (Cycle 1); extracted into
-    a function for direct testability in Cycle 2 (P2-C2-F003).
+    emitted once the logger is configured.
     """
     candidate = (raw or "INFO").upper()
     if candidate not in _VALID_LOG_LEVELS:
@@ -77,15 +77,13 @@ _FIELD_PATTERN = re.compile(
     # chars until a structural terminator). The terminator set covers JSON
     # delimiters (newline, comma, closing brace/bracket) AND URL/query
     # separators (`&`, `;`) so URL-query credentials don't swallow trailing
-    # params — `?userId=tok&other=val` redacts only the token, not `&other=val`
-    # (Cycle 3 P1-C3-F002).
+    # params — `?userId=tok&other=val` redacts only the token, not `&other=val`.
     #
     # A naked whitespace inside a value (e.g. password with embedded space) is
-    # preserved as part of the value so we never under-redact a Cycle 2
-    # P3-C2-F004-class leak. The remaining edge case — two adjacent credential
-    # markers in space-separated positional form on the same log line
-    # (P1-C3-F001) — does not occur in any production log site in this server
-    # and is documented as an accepted trade-off.
+    # preserved as part of the value so we never under-redact. The remaining
+    # edge case — two adjacent credential markers in space-separated positional
+    # form on the same log line — does not occur in any production log site in
+    # this server and is documented as an accepted trade-off.
     r"(?:(['\"])([^'\"]*)\3|([^\n,}\];&]+))",
     re.IGNORECASE,
 )
@@ -111,14 +109,10 @@ class _CredentialRedactingFormatter(logging.Formatter):
     """Formatter that scrubs credential markers from both the message line AND
     any exception text (the traceback emitted by ``exc_info=True``).
 
-    Switched from a logging.Filter to a Formatter subclass during Cycle 2:
-    Filter only sees ``record.msg`` and cannot scrub the post-formatExc text,
-    which is what every ``logger.error(..., exc_info=True)`` site emits. The
-    formatter wraps both surfaces. Defense in depth: every existing logger.*
-    call site is audited clean; the formatter prevents future leaks.
-
-    Tracks the lineage of Cycle 1 P3-F006 / P3-F019 and Cycle 2
-    P1-C2-F001 / P1-C2-F002 / P3-C2-F001 / P3-C2-F002 / P3-C2-F004.
+    Uses a Formatter subclass rather than a logging.Filter so that exception
+    tracebacks — emitted after format() by every ``logger.error(...,
+    exc_info=True)`` site — are also scrubbed. Defense in depth: every
+    existing log call site is audited clean; the formatter prevents future leaks.
     """
 
     def format(self, record: logging.LogRecord) -> str:
@@ -165,14 +159,16 @@ def _client() -> ACInfinityClient:
 # Per-device async locks for break_out_of_automation sequencing.
 # Prevents concurrent break-out operations on the same device from interleaving
 # the disable + port-lock steps (a race could partially apply state).
-_device_locks: dict[str, asyncio.Lock] = {}
+_device_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
 
 def _get_device_lock(device_id: str) -> asyncio.Lock:
     """Return (creating if absent) the per-device async lock."""
-    if device_id not in _device_locks:
-        _device_locks[device_id] = asyncio.Lock()
-    return _device_locks[device_id]
+    lock = _device_locks.get(device_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _device_locks[device_id] = lock
+    return lock
 
 
 _AUTOMATION_ID_RE = re.compile(r"^[1-9]\d{0,19}$")
@@ -1303,6 +1299,9 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
 # The controller measures electrical resistance across each port; connected devices present
 # real values (e.g. 400Ω light, 7500Ω fan, 15800Ω heater). Confirmed via ProxyMan 2026-05-26.
 _PORT_EMPTY_RESISTANCE: int = 65535
+# Schedule sentinel: begin_time/end_time == 255 means "no schedule window" (always active).
+# Distinct from 65535 which is the API's general disabled-sentinel for other fields.
+_SCHEDULE_ALWAYS_ACTIVE: int = 255
 
 # curMode (devInfoListAll) and atType (getdevModeSettingList) use the same integer encoding
 _MODE_LABELS: dict[int, str] = {
@@ -1333,7 +1332,7 @@ def _format_schedule_time(minutes: int | None) -> str | None:
     silently producing nonsense like "25:00" — a corrupt or unset field is
     indistinguishable from disabled in this context.
     """
-    if minutes is None or minutes == 65535 or minutes == 255:
+    if minutes is None or minutes == 65535 or minutes == _SCHEDULE_ALWAYS_ACTIVE:
         return None
     if not (0 <= minutes < 1440):
         return None
@@ -1343,7 +1342,7 @@ def _format_schedule_time(minutes: int | None) -> str | None:
 
 def _format_schedule_summary(begin: int, end: int) -> str:
     """Return a grower-readable schedule description in 12-hour format."""
-    if begin in (255, 65535):
+    if begin in (_SCHEDULE_ALWAYS_ACTIVE, 65535):
         return "Always active"
 
     def _fmt(m: int) -> str:
@@ -1551,24 +1550,8 @@ def _is_port_not_powered(port_data: dict | None, device: dict | None) -> bool:
     return (port_data.get("portsLoad") or 0) == 0
 
 
-def _empty_port_warning(port: int, port_label: str) -> str:
-    """Return the grower-friendly advisory warning text for an empty port.
-
-    Used by write tools (``warning`` field). The message is advisory — it does not
-    block the action. ``port_label`` is the formatted label, e.g. ``"Port 7"`` or
-    ``"Inline Fan (Port 3)"``.
-    """
-    return (
-        f"{port_label} doesn't appear to have anything connected. "
-        "If you meant a different port, let me know which one."
-    )
-
-
-def _empty_port_note(port: int, port_label: str) -> str:
-    """Return the grower-friendly note text for an empty port.
-
-    Used by read tools (``note`` field).
-    """
+def _empty_port_advisory(port_label: str) -> str:
+    """Return the grower-friendly advisory text for an empty port."""
     return (
         f"{port_label} doesn't appear to have anything connected. "
         "If you meant a different port, let me know which one."
@@ -2050,7 +2033,7 @@ async def get_port_status(device_id: str, port: int) -> str:
             result["plug_status"] = "not powered"
         if _is_port_empty(port_data, port, device):
             _port_label_s = _ps_raw_name
-            result["note"] = _empty_port_note(port, _port_label_s)
+            result["note"] = _empty_port_advisory(_port_label_s)
         result["human_summary"] = _ps_summary
         return json.dumps(result, indent=2)
 
@@ -2266,7 +2249,7 @@ async def get_port_settings(device_id: str, port: int) -> str:
             # Clamp out-of-range / corrupted values. Realistic VPD targets are
             # 0–3 kPa; anything outside [0, 50] (i.e. 0..500 raw) suggests a
             # corrupt or unset field rather than a plant-bearable target. Return
-            # None instead of feeding nonsense to the LLM (P3-F020).
+            # None instead of feeding nonsense to the LLM.
             try:
                 vpd_target = round(int(raw) / 10, 2)
                 if not (0 <= vpd_target <= 50):
@@ -2482,7 +2465,7 @@ async def set_port_speed(
             )
 
         if _is_port_empty(port_data, port, device):
-            empty_warn = _empty_port_warning(port, port_label)
+            empty_warn = _empty_port_advisory(port_label)
             if "warning" in response:
                 response["warning"] = response["warning"] + " " + empty_warn
             else:
@@ -2581,7 +2564,7 @@ async def set_port_on(
             response["payload"] = write_result["payload"]
 
         if _is_port_empty(port_data, port, device):
-            response["warning"] = _empty_port_warning(port, port_label)
+            response["warning"] = _empty_port_advisory(port_label)
 
         return json.dumps(response, indent=2)
 
@@ -2682,7 +2665,7 @@ async def set_port_off(
             response["payload"] = write_result["payload"]
 
         if _is_port_empty(port_data, port, device):
-            response["warning"] = _empty_port_warning(port, port_label)
+            response["warning"] = _empty_port_advisory(port_label)
 
         return json.dumps(response, indent=2)
 
@@ -2804,7 +2787,7 @@ async def set_vpd_automation(
         if write_result["dry_run"]:
             response["payload"] = write_result["payload"]
         if _is_port_empty(port_data, port, device):
-            response["warning"] = _empty_port_warning(port, port_label)
+            response["warning"] = _empty_port_advisory(port_label)
         return json.dumps(response, indent=2)
 
     except ACInfinityAuthError as e:
@@ -2960,7 +2943,7 @@ async def set_temperature_automation(
         if write_result["dry_run"]:
             response["payload"] = write_result["payload"]
         if _is_port_empty(port_data, port, device):
-            response["warning"] = _empty_port_warning(port, port_label)
+            response["warning"] = _empty_port_advisory(port_label)
         return json.dumps(response, indent=2)
 
     except ACInfinityAuthError as e:
@@ -3079,7 +3062,7 @@ async def set_humidity_automation(
         if write_result["dry_run"]:
             response["payload"] = write_result["payload"]
         if _is_port_empty(port_data, port, device):
-            response["warning"] = _empty_port_warning(port, port_label)
+            response["warning"] = _empty_port_advisory(port_label)
         return json.dumps(response, indent=2)
 
     except ACInfinityAuthError as e:
@@ -3252,7 +3235,7 @@ async def set_port_mode(
         if write_result["dry_run"]:
             response["payload"] = write_result["payload"]
         if _is_port_empty(port_data, port, device):
-            response["warning"] = _empty_port_warning(port, port_label)
+            response["warning"] = _empty_port_advisory(port_label)
         return json.dumps(response, indent=2)
 
     except ACInfinityAuthError as e:
@@ -3353,9 +3336,8 @@ async def apply_grow_stage_template(
         )
         return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
     except Exception as e:
-        # P1-C2-F003 / P3-C2-F010: previously returned str(e) here, which echoed
-        # arbitrary exception text into the LLM-facing response. Match the
-        # generic pattern used elsewhere.
+        # Never return str(e) here — that echoes arbitrary exception text into
+        # the LLM-facing response. Use the generic pattern used elsewhere.
         logger.error(
             "Unexpected error fetching devices in apply_grow_stage_template (device=%s): %s",
             device_id, e, exc_info=True,
@@ -3976,15 +3958,16 @@ async def create_advance_automation(
             return json.dumps({"error": "on_speed must be 1–10"})
         if not 0 <= off_speed <= 10:
             return json.dumps({"error": "off_speed must be 0–10"})
-        if not (0 <= begin_time <= 1439 or begin_time == 255):
+        if not (0 <= begin_time <= 1439 or begin_time == _SCHEDULE_ALWAYS_ACTIVE):
             return json.dumps({"error": "begin_time must be 0–1439 or 255 (no schedule)"})
-        if not (0 <= end_time <= 1439 or end_time == 255):
+        if not (0 <= end_time <= 1439 or end_time == _SCHEDULE_ALWAYS_ACTIVE):
             return json.dumps({"error": "end_time must be 0–1439 or 255 (no schedule)"})
-        if begin_time != 255 and end_time != 255 and begin_time > end_time:
+        if (begin_time != _SCHEDULE_ALWAYS_ACTIVE and end_time != _SCHEDULE_ALWAYS_ACTIVE
+                and begin_time > end_time):
             return json.dumps(
                 {"error": "begin_time must be <= end_time (or both 255 for no schedule)"}
             )
-        if (begin_time == 255) != (end_time == 255):
+        if (begin_time == _SCHEDULE_ALWAYS_ACTIVE) != (end_time == _SCHEDULE_ALWAYS_ACTIVE):
             return json.dumps({
                 "error": (
                     "begin_time and end_time must both be 255 (no schedule) or both be 0–1439"
@@ -4077,9 +4060,9 @@ async def create_advance_automation(
             "onSpeed": on_speed,
             # On mode has no user-settable min; port's own min setting is used.
             "offSpeed": 0,
-            # Map "always active" sentinel (255) to a valid full-day range.
-            "beginTime": 0 if begin_time == 255 else begin_time,
-            "endTime": 1439 if end_time == 255 else end_time,
+            # Map "always active" sentinel to a valid full-day range.
+            "beginTime": 0 if begin_time == _SCHEDULE_ALWAYS_ACTIVE else begin_time,
+            "endTime": 1439 if end_time == _SCHEDULE_ALWAYS_ACTIVE else end_time,
             "groupNums": 9,
             "sortType": 9,
             "subNumber": 0,
@@ -4812,11 +4795,11 @@ def _filter_readings_by_time(
     for reading in readings:
         timestamp_str = reading.get("timestamp", "")
         try:
-            # P1-C2-F005: handle both UTC-naive (..."T...Z") and aware (...+HH:MM)
-            # timestamps. The historical-data parser always emits the naive-Z
-            # form today, but a future fixture or hand-crafted payload could
-            # carry a non-UTC offset — converting via astimezone preserves the
-            # instant, where the old .replace(tzinfo=UTC) silently corrupted it.
+            # Handle both UTC-naive (..."T...Z") and aware (...+HH:MM) timestamps.
+            # The historical-data parser always emits the naive-Z form today, but
+            # a future fixture or hand-crafted payload could carry a non-UTC offset
+            # — converting via astimezone preserves the instant, whereas
+            # .replace(tzinfo=UTC) would silently corrupt it.
             ts_dt = datetime.fromisoformat(timestamp_str.rstrip("Z"))
             if ts_dt.tzinfo is None:
                 ts_dt = ts_dt.replace(tzinfo=UTC)
@@ -4867,7 +4850,7 @@ def apply_sampling(readings: list, interval: str) -> list:
             # Narrow exception set: only timestamp-parse failures (bad string,
             # None, unexpected type) should drop a reading. Anything else
             # should propagate — silently swallowing every Exception masks
-            # real bugs in the parser layer (P1-F014).
+            # real bugs in the parser layer.
             logger.debug("apply_sampling skipping bad timestamp %r: %s", timestamp_str, e)
             continue
         bucket_key = (unix_ts // bucket_secs) * bucket_secs

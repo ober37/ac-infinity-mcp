@@ -1,5 +1,4 @@
 import math
-from dataclasses import dataclass, field
 
 # ============ Custom Exception Classes ============
 
@@ -31,33 +30,6 @@ class ACInfinityAdvanceConflictError(ACInfinityDeviceError):
 class ACInfinityConfigError(ACInfinityError):
     """Configuration or file error."""
     pass
-
-
-@dataclass
-class ACIReading:
-    """Current sensor reading from AC Infinity"""
-    timestamp: str
-    device_id: str
-    device_name: str
-    temperature_c: float
-    temperature_f: float
-    humidity: float  # 0-100
-    vpd: float
-    ports: list[dict] = field(default_factory=list)
-    external_sensors: list[dict] = field(default_factory=list)
-
-    def to_dict(self) -> dict:
-        return {
-            "timestamp": self.timestamp,
-            "device_id": self.device_id,
-            "device_name": self.device_name,
-            "temperature_c": self.temperature_c,
-            "temperature_f": self.temperature_f,
-            "humidity": self.humidity,
-            "vpd": self.vpd,
-            "ports": self.ports or [],
-            "external_sensors": self.external_sensors or [],
-        }
 
 
 # ============ Advance Automation Constants ============

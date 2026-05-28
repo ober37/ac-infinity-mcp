@@ -19,8 +19,7 @@ from ac_infinity_mcp.schema import (
 from ac_infinity_mcp.server import (
     _check_advance_mode,
     _decode_mode,
-    _empty_port_note,
-    _empty_port_warning,
+    _empty_port_advisory,
     _filter_readings_by_time,
     _find_governing_automation,
     _find_governing_port_group,
@@ -8583,18 +8582,24 @@ def test_is_port_empty_fallback_default_name_zero_load():
     assert _is_port_empty(port_data, 7, device) is True
 
 
-def test_empty_port_warning_text():
-    """Warning text must not contain 'dry_run' or Python call syntax."""
-    msg = _empty_port_warning(7, "Port 7")
-    assert "dry_run" not in msg
-    assert "(" not in msg or "Port" in msg  # allow "Port 7" parens style only
-    assert "Port 7" in msg
-    assert "connected" in msg
+def test_empty_port_advisory_message():
+    """Merged function produces the canonical message text."""
+    msg = _empty_port_advisory("Humidifier (Port 3)")
+    assert "Humidifier (Port 3)" in msg
+    assert "doesn't appear to have anything connected" in msg
+    assert "If you meant a different port" in msg
 
 
-def test_empty_port_note_text():
-    """Note text must not contain 'dry_run' or Python call syntax."""
-    msg = _empty_port_note(7, "Port 7")
+def test_empty_port_advisory_does_not_accept_port_int():
+    """Confirm signature is (port_label: str), not (port: int, port_label: str)."""
+    import inspect
+    sig = inspect.signature(_empty_port_advisory)
+    assert list(sig.parameters.keys()) == ["port_label"]
+
+
+def test_empty_port_advisory_text_no_dry_run():
+    """Advisory text must not contain 'dry_run' or expose internal params."""
+    msg = _empty_port_advisory("Port 7")
     assert "dry_run" not in msg
     assert "Port 7" in msg
     assert "connected" in msg
