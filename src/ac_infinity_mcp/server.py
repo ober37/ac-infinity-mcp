@@ -3880,20 +3880,27 @@ async def break_out_of_automation(
         # Step 2: Identify co-governed ports — all ports currently under automation
         # control except the target port.
         co_ports: list[dict] = []
-        for p_data in ports_data:
-            p_num = p_data.get("port")
-            if p_num is None or p_num == port:
-                continue
-            p_settings = await asyncio.to_thread(_client().get_mode_settings, dev_id, p_num)
-            if p_settings.get("modeType") == _ADVANCE_MODE_TYPE:
-                raw_p_name = p_data.get("portName")
-                p_name = _sanitize_api_string(raw_p_name, 64) if raw_p_name else f"Port {p_num}"
-                current_speed = p_data.get("speak", 0)
-                co_ports.append({
-                    "port": p_num,
-                    "port_name": p_name,
-                    "current_speed": current_speed,
-                })
+        candidate_ports = [
+            p for p in ports_data if p.get("port") is not None and p.get("port") != port
+        ]
+        if candidate_ports:
+            gather_results = await asyncio.gather(
+                *[
+                    asyncio.to_thread(_client().get_mode_settings, dev_id, p["port"])
+                    for p in candidate_ports
+                ]
+            )
+            for p_data, p_settings in zip(candidate_ports, gather_results):
+                p_num = p_data["port"]
+                if p_settings.get("modeType") == _ADVANCE_MODE_TYPE:
+                    raw_p_name = p_data.get("portName")
+                    p_name = _sanitize_api_string(raw_p_name, 64) if raw_p_name else f"Port {p_num}"
+                    current_speed = p_data.get("speak", 0)
+                    co_ports.append({
+                        "port": p_num,
+                        "port_name": p_name,
+                        "current_speed": current_speed,
+                    })
 
         # Estimate: 1.5s rate limit per write; 1 disable + len(co_ports) locks.
         n_writes = 1 + len(co_ports)

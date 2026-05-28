@@ -6531,6 +6531,96 @@ async def test_break_out_of_automation_auth_error(mock_client, caplog):
     assert "Authentication failed — check AC_INFINITY_EMAIL" in data["error"]
 
 
+# ============ break_out_of_automation gather tests ============
+
+async def test_break_out_gather_replaces_sequential(mock_client):
+    """4-port device with all ports under ADVANCE; gather fires for ports 2, 3, 4."""
+    import copy
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    # Add ports 3 and 4 so device has ports 1–4
+    device["deviceInfo"]["ports"].append(
+        {"port": 3, "portName": "CO2 Fan", "speak": 3, "portsLoad": 1,
+         "loadState": 1, "curMode": 3, "remainTime": 0}
+    )
+    device["deviceInfo"]["ports"].append(
+        {"port": 4, "portName": "Humidifier", "speak": 5, "portsLoad": 1,
+         "loadState": 1, "curMode": 3, "remainTime": 0}
+    )
+    mock_client.get_devices.return_value = [device]
+    # All ports return ADVANCE mode
+    mock_client.get_mode_settings.return_value = {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 5}
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await break_out_of_automation("C58ZA", port=1, dry_run=True)
+    data = json.loads(result)
+    assert data["dry_run"] is True
+    # 1 call for the idempotency check (port 1) + 3 gather calls (ports 2, 3, 4)
+    assert mock_client.get_mode_settings.call_count == 4
+    called_ports = [call.args[1] for call in mock_client.get_mode_settings.call_args_list]
+    # Idempotency check is port 1; gather covers the remaining three
+    assert set(called_ports) == {1, 2, 3, 4}
+    gather_ports = [p for p in called_ports if p != 1]
+    assert set(gather_ports) == {2, 3, 4}
+
+
+async def test_break_out_gather_single_port_device(mock_client):
+    """Single-port device: candidate_ports is empty, gather never fires, co_ports is empty."""
+    import copy
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    # Keep only port 1
+    device["deviceInfo"]["ports"] = [
+        {"port": 1, "portName": "Intake Fan", "speak": 5, "portsLoad": 1,
+         "loadState": 1, "curMode": 3, "remainTime": 0}
+    ]
+    mock_client.get_devices.return_value = [device]
+    mock_client.get_mode_settings.return_value = {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 5}
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await break_out_of_automation("C58ZA", port=1, dry_run=True)
+    data = json.loads(result)
+    assert data["dry_run"] is True
+    # Only the idempotency check for the target port is called
+    assert mock_client.get_mode_settings.call_count == 1
+    assert mock_client.get_mode_settings.call_args.args[1] == 1
+    # No co-ports to lock
+    assert data["co_ports_to_lock"] == []
+
+
+async def test_break_out_gather_no_advance_co_ports(mock_client):
+    """4-port device; co-ports 2–4 return a non-ADVANCE modeType; co_ports stays empty."""
+    import copy
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device["deviceInfo"]["ports"].append(
+        {"port": 3, "portName": "CO2 Fan", "speak": 3, "portsLoad": 1,
+         "loadState": 1, "curMode": 3, "remainTime": 0}
+    )
+    device["deviceInfo"]["ports"].append(
+        {"port": 4, "portName": "Humidifier", "speak": 5, "portsLoad": 1,
+         "loadState": 1, "curMode": 3, "remainTime": 0}
+    )
+    mock_client.get_devices.return_value = [device]
+
+    def mode_settings_side_effect(dev_id, port_num):
+        # Target port (1) is ADVANCE; co-ports are not
+        if port_num == 1:
+            return {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 5}
+        return {"modeType": 3, "onSpead": 0}
+
+    mock_client.get_mode_settings.side_effect = mode_settings_side_effect
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        result = await break_out_of_automation("C58ZA", port=1, dry_run=True)
+    data = json.loads(result)
+    assert data["dry_run"] is True
+    # gather fired for 3 co-ports, plus 1 idempotency call = 4 total
+    assert mock_client.get_mode_settings.call_count == 4
+    # No co-ports are ADVANCE, so co_ports_to_lock is empty
+    assert data["co_ports_to_lock"] == []
+    # Sequence has only the disable step (step 1), no lock steps
+    lock_steps = [s for s in data["sequence"] if "lock" in s["action"]]
+    assert len(lock_steps) == 0
+
+
 # ============ dry_run_never_writes parametrize ============
 
 @pytest.mark.parametrize("tool_fn,kwargs", [
