@@ -3630,7 +3630,7 @@ async def test_get_port_status_load_not_detected(mock_client):
         "deviceInfo": {
             **MOCK_DEVICE_LEGACY["deviceInfo"],
             "ports": [
-                {"port": 1, "portName": "Empty Port", "speak": 0,
+                {"port": 1, "portName": "Port 1", "speak": 0,
                  "portsLoad": 0, "loadState": 0, "curMode": 1, "remainTime": 0},
             ],
         },
@@ -3648,7 +3648,7 @@ async def test_get_port_status_load_not_detected(mock_client):
 ])
 async def test_get_port_status_plug_status_conditional(mock_client, load_state, expect_plug_status):
     """plug_status appears only when loadState is falsy."""
-    port_data: dict = {"port": 1, "portName": "Fan", "speak": 0,
+    port_data: dict = {"port": 1, "portName": "Port 1", "speak": 0,
                        "portsLoad": 0, "curMode": 1, "remainTime": 0}
     if load_state is not None:
         port_data["loadState"] = load_state
@@ -3661,6 +3661,46 @@ async def test_get_port_status_plug_status_conditional(mock_client, load_state, 
     assert ("plug_status" in data) == expect_plug_status
     if expect_plug_status:
         assert data["plug_status"] == "not powered"
+
+
+async def test_get_port_status_custom_named_off_no_plug_status(mock_client):
+    """Custom-named port with loadState=0 and speak=0 → plug_status absent (TC-003).
+
+    A grower-named port implies a device is intentionally connected; OFF state
+    cannot be distinguished from 'nothing plugged in' by loadState alone.
+    """
+    mock_client.get_devices.return_value = [{
+        **MOCK_DEVICE_LEGACY,
+        "deviceInfo": {
+            **MOCK_DEVICE_LEGACY["deviceInfo"],
+            "ports": [
+                {"port": 1, "portName": "Heater", "speak": 0,
+                 "portsLoad": 0, "loadState": 0, "curMode": 1, "remainTime": 0},
+            ],
+        },
+    }]
+    result = await get_port_status("C58ZA", 1)
+    data = json.loads(result)
+    assert "plug_status" not in data
+    assert data["mode"] == "OFF"
+
+
+async def test_get_port_status_default_named_off_has_plug_status(mock_client):
+    """Default-named port with loadState=0 and speak=0 → plug_status present."""
+    mock_client.get_devices.return_value = [{
+        **MOCK_DEVICE_LEGACY,
+        "deviceInfo": {
+            **MOCK_DEVICE_LEGACY["deviceInfo"],
+            "ports": [
+                {"port": 3, "portName": "Port 3", "speak": 0,
+                 "portsLoad": 0, "loadState": 0, "curMode": 1, "remainTime": 0},
+            ],
+        },
+    }]
+    result = await get_port_status("C58ZA", 3)
+    data = json.loads(result)
+    assert data["plug_status"] == "not powered"
+    assert data["mode"] == "OFF"
 
 
 async def test_get_port_status_running_port_no_plug_status(mock_client):

@@ -1384,7 +1384,7 @@ async def get_port_status(device_id: str, port: int) -> str:
             {
               "device_id": "C58ZA",
               "port": 1,
-              "port_name": "Humidifier",
+              "port_name": "Port 1",
               "power_level": 0,
               "mode": "OFF",
               "plug_status": "not powered"
@@ -1393,6 +1393,9 @@ async def get_port_status(device_id: str, port: int) -> str:
         ``mode`` is one of: OFF, ON, AUTO, TIMER_TO_ON, TIMER_TO_OFF, CYCLE, SCHEDULE, VPD,
         Automation. ``plug_status`` is only present when no current is detected on the port (the
         port is not powered or nothing is connected). It is omitted when the port is running.
+        Only emitted for default-named ports (``"Port N"``) — custom-named ports are assumed to
+        have a device intentionally connected; ``loadState=0`` alone cannot distinguish "nothing
+        plugged in" from "device is off".
         ``remain_time_seconds`` is only present when a countdown timer is active (value > 0);
         it is omitted when there is no active timer.
         When ``mode`` is ``Automation``, the port is governed by a named Advance Automation
@@ -1489,7 +1492,7 @@ async def get_port_status(device_id: str, port: int) -> str:
         remain = port_data.get("remainTime") or 0
         if remain > 0:
             result["remain_time_seconds"] = remain
-        if not port_data.get("loadState", 0) and not _ps_power:
+        if not port_data.get("loadState", 0) and not _ps_power and _ps_raw_name == f"Port {port}":
             result["plug_status"] = "not powered"
         if _is_port_empty(port_data, port, device):
             _port_label_s = _ps_raw_name
