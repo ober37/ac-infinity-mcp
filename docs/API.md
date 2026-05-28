@@ -2628,9 +2628,10 @@ Delete an Advance Automation. If currently enabled, disables it first.
 
 ### `break_out_of_automation(device_id, port, dry_run=True, confirm_automation_name=None)`
 
-Safely break a port out of Advance Automation control. Disables the governing automation
-and locks all co-governed ADVANCE-mode ports to their current manual speed, leaving the
-target port free for manual control.
+Safely break a port out of Advance Automation control. Identifies the governing automation
+(the one whose bitmask covers the target port), disables it, and locks only the co-ports
+within that same automation to their current manual speed, leaving the target port free for
+manual control. Ports in other automations are unaffected.
 
 **Parameters:**
 | Parameter | Type | Description |
@@ -2660,10 +2661,21 @@ target port free for manual control.
 {"info": "Port is not currently under automation control."}
 ```
 
+**Response (port is in ADVANCE mode but no active automation claims it — ghost state):**
+```json
+{"info": "Port is not currently under active automation control. No action taken."}
+```
+
 **Field notes:**
-- Locks *all* ADVANCE-mode ports on the device, not only those of the governing automation
-  (on devices with multiple active automations, all ADVANCE-mode ports are affected)
+- Locks only the co-ports within the governing automation (ports that share the same automation
+  as the target port). Ports governed by other automations, or empty ports
+  (`portResistance == 65535`), are unaffected.
+- On devices with multiple active automations, only the automation whose bitmask covers the
+  target port is disabled and its co-ports locked — other automations continue running.
 - `confirm_automation_name` match is case-insensitive; required for live execution as a safety gate
+- When all automations on the device are disabled (Quirk 19), returns an error rather than the
+  ghost-state no-op — the port is stuck in a disabled automation and the user needs to take
+  explicit action to clear it.
 
 ---
 
