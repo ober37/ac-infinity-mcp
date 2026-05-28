@@ -9,7 +9,6 @@ import sys
 import time
 import weakref
 from datetime import UTC, datetime, timedelta
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from mcp.server.fastmcp import FastMCP
 
@@ -34,6 +33,28 @@ from ac_infinity_mcp.automation import (
     _sanitize_api_string,
 )
 from ac_infinity_mcp.client import ACInfinityClient, build_add_groups_payload
+from ac_infinity_mcp.formatting import (
+    _effective_tz,
+    _effective_unit,
+    _format_window_dt,
+    _short_date,
+    _to_preferred_temp,
+    _unit_label,
+    _utc_hour_to_local,
+    _utc_iso_to_local,
+    _utcnow,  # noqa: F401 — re-exported so tests can patch ac_infinity_mcp.server._utcnow
+)
+from ac_infinity_mcp.logging_config import (
+    _FIELD_PATTERN,  # noqa: F401 — re-exported for test compatibility
+    _CredentialRedactingFormatter,  # noqa: F401 — re-exported for test compatibility
+    _install_credential_redactor,
+    _redact_credentials,  # noqa: F401 — re-exported for test compatibility
+)
+from ac_infinity_mcp.ports import (
+    _PORT_EMPTY_RESISTANCE,  # noqa: F401 — re-exported for test compatibility
+    _empty_port_advisory,
+    _is_port_empty,
+)
 from ac_infinity_mcp.schema import (
     _ADVANCE_MODE_TYPE,
     ACInfinityAdvanceConflictError,
@@ -74,101 +95,18 @@ if _log_level_fallback_warning:
     )
 
 
-# Credential markers redacted in formatted log output. Tuple of (field_name,
-# value_pattern) — the field-name alternation matches the marker token, and the
-# value pattern is intentionally permissive to handle:
-#   field=value        (positional log args, e.g. "token=abc123")
-#   'field': 'value'   (dict repr from logger.debug("%s", payload_dict))
-#   "field": "value"   (json.dumps output)
-#   field=value with spaces in the value (greedy until a structural terminator)
-#   url?userId=value   (query-string credentials in HTTPError __str__)
-_FIELD_PATTERN = re.compile(
-    r"(appPasswordl|appPassword|AC_INFINITY_PASSWORD|appEmail|token|appId|userId)"
-    r"(['\"]?\s*[:=]\s*)"
-    # Value: either quoted (any chars until matching quote) or unquoted (any
-    # chars until a structural terminator). The terminator set covers JSON
-    # delimiters (newline, comma, closing brace/bracket) AND URL/query
-    # separators (`&`, `;`) so URL-query credentials don't swallow trailing
-    # params — `?userId=tok&other=val` redacts only the token, not `&other=val`.
-    #
-    # A naked whitespace inside a value (e.g. password with embedded space) is
-    # preserved as part of the value so we never under-redact. The remaining
-    # edge case — two adjacent credential markers in space-separated positional
-    # form on the same log line — does not occur in any production log site in
-    # this server and is documented as an accepted trade-off.
-    r"(?:(['\"])([^'\"]*)\3|([^\n,}\];&]+))",
-    re.IGNORECASE,
-)
-
-
-def _redact_credentials(text: str) -> str:
-    """Redact credential-field values from any text. Idempotent."""
-    if not text:
-        return text
-
-    def _sub(match: re.Match[str]) -> str:
-        field = match.group(1)
-        sep = match.group(2)
-        quote = match.group(3)
-        if quote is not None:
-            return f"{field}{sep}{quote}<redacted>{quote}"
-        return f"{field}{sep}<redacted>"
-
-    return _FIELD_PATTERN.sub(_sub, text)
-
-
-class _CredentialRedactingFormatter(logging.Formatter):
-    """Formatter that scrubs credential markers from both the message line AND
-    any exception text (the traceback emitted by ``exc_info=True``).
-
-    Uses a Formatter subclass rather than a logging.Filter so that exception
-    tracebacks — emitted after format() by every ``logger.error(...,
-    exc_info=True)`` site — are also scrubbed. Defense in depth: every
-    existing log call site is audited clean; the formatter prevents future leaks.
-    """
-
-    def format(self, record: logging.LogRecord) -> str:
-        formatted = super().format(record)
-        return _redact_credentials(formatted)
-
-    def formatException(self, ei: object) -> str:  # type: ignore[override]
-        return _redact_credentials(super().formatException(ei))  # type: ignore[arg-type]
-
-
-def _install_credential_redactor(target_logger: logging.Logger | None = None) -> None:
-    """Attach the credential-redacting formatter to every handler on the root logger.
-
-    Filters on logger objects (vs handlers) skip records propagated up from
-    child loggers — Python's logging design. Attaching at the handler layer
-    means every record emitted to a sink (stderr, file) passes through the
-    redactor regardless of origin logger. Also called from tests after they
-    add their own handlers.
-    """
-    target = target_logger or logging.getLogger()
-    for handler in target.handlers:
-        # Preserve any existing format string the operator may have configured.
-        existing_fmt = handler.formatter._fmt if handler.formatter else None  # type: ignore[union-attr]
-        handler.setFormatter(_CredentialRedactingFormatter(existing_fmt))
-
-
 _install_credential_redactor()
 
 mcp_server = FastMCP(name="ac-infinity-mcp")
 
-# Initialized at startup via setup() / main()
+# Initialized at startup via main()
 aci_client: ACInfinityClient | None = None
 
 
-def setup(client: ACInfinityClient) -> None:
-    """Wire the client into the server. Call once at startup (or in tests)."""
-    global aci_client
-    aci_client = client
-
-
 def _client() -> ACInfinityClient:
-    """Return the initialized client; raises RuntimeError if setup() was not called."""
+    """Return the initialized client; raises RuntimeError if main() was not called."""
     if aci_client is None:
-        raise RuntimeError("AC Infinity client not initialized — call setup() first")
+        raise RuntimeError("AC Infinity client not initialized — call main() first")
     return aci_client
 
 
@@ -1301,10 +1239,6 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
 
 # ============ New Read Tools ============
 
-# portResistance == 65535 (0xFFFF) is the hardware open-circuit sentinel: nothing connected.
-# The controller measures electrical resistance across each port; connected devices present
-# real values (e.g. 400Ω light, 7500Ω fan, 15800Ω heater). Confirmed via ProxyMan 2026-05-26.
-_PORT_EMPTY_RESISTANCE: int = 65535
 # Schedule sentinel: begin_time/end_time == 255 means "no schedule window" (always active).
 # Distinct from 65535 which is the API's general disabled-sentinel for other fields.
 _SCHEDULE_ALWAYS_ACTIVE: int = 255
@@ -1378,81 +1312,6 @@ def _parse_schedule_time(time_str: str | None) -> int:
         ) from None
 
 
-# ============ Timezone and Unit Helpers ============
-
-
-def _effective_tz(zone_id: str | None) -> ZoneInfo:
-    """Return a ZoneInfo for the given IANA zone string, or UTC on any error."""
-    if zone_id:
-        try:
-            return ZoneInfo(_sanitize_api_string(zone_id, 64))
-        except (ZoneInfoNotFoundError, ValueError, KeyError):
-            pass
-    return ZoneInfo("UTC")
-
-
-def _effective_unit(unit_raw: int | None) -> str:
-    """Return 'C' for Celsius devices (unit=1) or 'F' for all others."""
-    return "C" if unit_raw == 1 else "F"
-
-
-def _to_preferred_temp(c: float, unit: str) -> float:
-    """Convert a Celsius value to the preferred unit, rounded to 1 decimal place."""
-    return round(c * 9 / 5 + 32, 1) if unit == "F" else round(c, 1)
-
-
-def _unit_label(unit: str) -> str:
-    """Return the display label for the given unit code."""
-    return "°F" if unit == "F" else "°C"
-
-
-def _utc_iso_to_local(utc_iso: str | None, tz: ZoneInfo) -> str | None:
-    """Convert a UTC ISO 8601 string to a local timezone string, or None if input is None."""
-    if not utc_iso:
-        return None
-    dt = datetime.fromisoformat(utc_iso.rstrip("Z")).replace(tzinfo=UTC)
-    return dt.astimezone(tz).strftime("%Y-%m-%dT%H:%M:%S %Z")
-
-
-def _utcnow() -> datetime:
-    """Returns current UTC time as a tz-aware datetime. Wrappable for testing."""
-    return datetime.now(UTC)
-
-
-def _format_window_dt(dt: datetime) -> str:
-    """Format a tz-aware datetime to a human-readable local string, e.g. 'May 23, 10:35 AM CDT'.
-
-    Caller must always pass a tz-aware datetime — asserted at entry.
-    Uses literal 'AM'/'PM' strings to avoid strftime('%p') locale variation.
-    """
-    assert dt.tzinfo is not None, "_format_window_dt requires a tz-aware datetime"
-    period = "AM" if dt.hour < 12 else "PM"
-    display_hour = dt.hour % 12 or 12
-    tz_name = dt.strftime("%Z")
-    return f"{dt.strftime('%B')} {dt.day}, {display_hour}:{dt.strftime('%M')} {period} {tz_name}"
-
-
-def _short_date(dt: datetime) -> str:
-    """Return a short local date string like 'May 23'. Cross-platform (no %-d)."""
-    return f"{dt.strftime('%B')} {dt.day}"
-
-
-def _utc_hour_to_local(utc_dt: datetime, tz: ZoneInfo) -> str:
-    """Convert a naive UTC datetime to a local time string like '3:00 PM CDT (peak on May 23)'.
-
-    Includes the calendar date to disambiguate peak hours across multi-day report windows.
-    Uses astimezone for full DST-aware conversion — sub-hour UTC offsets (UTC+5:30) are
-    handled correctly (replaces the prior floor-of-whole-hours approximation, Quirk 23).
-    Uses literal 'AM'/'PM' strings to avoid strftime('%p') locale variation.
-    """
-    local_dt = utc_dt.replace(tzinfo=UTC).astimezone(tz)
-    display_hour = local_dt.hour % 12 or 12
-    period = "AM" if local_dt.hour < 12 else "PM"
-    tz_name = local_dt.strftime("%Z")
-    date_str = f"{local_dt.strftime('%b')} {local_dt.day}"
-    return f"{display_hour}:00 {period} {tz_name} (peak on {date_str})"
-
-
 async def _check_advance_mode(dev_id: str | None, port: int, fallback: str) -> str:
     """Secondary call to getdevModeSettingList to verify ADVANCE state.
 
@@ -1496,53 +1355,6 @@ def _get_port_label(device: dict, port: int) -> tuple[str, str, dict | None]:
     return port_name, port_label, port_data
 
 
-def _is_port_empty(port_data: dict | None, port: int, device: dict | None) -> bool:
-    """Return True when nothing is physically connected to this port.
-
-    Primary signal (Quirk 27): ``portResistance == 65535`` (0xFFFF) in
-    ``devInfoListAll.deviceInfo.ports``. The controller measures electrical resistance
-    across each port; 65535 is the maximum uint16 value indicating open circuit (nothing
-    connected). Connected devices — even in OFF mode — present real values (e.g. 400Ω
-    light, 7500Ω fan, 15800Ω heater). When ``portResistance`` is present and is not
-    65535, the port is NOT empty regardless of port name or ``portsLoad``.
-
-    Fallback (Quirk 26): when ``portResistance`` is absent (old firmware), the existing
-    dual-signal heuristic applies — default name ``"Port N"`` AND (``portsLoad == 0`` OR
-    ``devType in _ZERO_LOAD_DEV_TYPES``). Custom-named ports in the fallback path are
-    assumed connected.
-
-    Known tradeoff (user-approved 2026-05-26): LED grow lights with their own power
-    switches may read ``portResistance=65535`` when that switch is off but the device is
-    still physically plugged in. Passive loads (heaters, fans with AC motors) are not
-    affected — their resistance is measurable regardless of a device-level switch.
-
-    Returns False when ``port_data`` is None (port not found) or ``device`` is None.
-    """
-    if port_data is None or device is None:
-        return False
-
-    port_resistance = port_data.get("portResistance")
-    if port_resistance is not None:
-        try:
-            return int(port_resistance) == _PORT_EMPTY_RESISTANCE
-        except (ValueError, TypeError, OverflowError):
-            return False  # treat as connected on malformed API data
-
-    # Fallback for firmware that omits portResistance: preserve dual-signal heuristic.
-    port_name = port_data.get("portName", f"Port {port}")
-    if port_name and port_name != f"Port {port}":
-        return False  # custom-named → assumed connected
-    ports_load = port_data.get("portsLoad", 0) or 0
-    dev_type = device.get("devType")
-    return ports_load == 0 or dev_type in _ZERO_LOAD_DEV_TYPES
-
-
-def _empty_port_advisory(port_label: str) -> str:
-    """Return the grower-friendly advisory text for an empty port."""
-    return (
-        f"{port_label} doesn't appear to have anything connected. "
-        "If you meant a different port, let me know which one."
-    )
 
 
 
@@ -4305,8 +4117,9 @@ def main() -> None:  # pragma: no cover
         )
         sys.exit(1)
 
-    setup(ACInfinityClient(email, password))
-    if not _client().authenticate():
+    global aci_client
+    aci_client = ACInfinityClient(email, password)
+    if not aci_client.authenticate():
         logger.error("Failed to authenticate with AC Infinity")
         sys.exit(1)
 
