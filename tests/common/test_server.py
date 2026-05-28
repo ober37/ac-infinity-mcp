@@ -6086,7 +6086,9 @@ async def test_break_out_co_port_sequence_default_name_no_redundancy(mock_client
             p["portName"] = "Port 2"
     mock_client.get_devices.return_value = [device]
     mock_client.get_mode_settings.return_value = {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 5}
-    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    _auto = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST[0])
+    _auto["grouptDevType"] = 3  # ports 1+2 (0b00000011)
+    mock_client.get_advance_automations.return_value = [_auto]
     result = await break_out_of_automation("C58ZA", port=1, dry_run=True)
     data = json.loads(result)
     assert data["dry_run"] is True
@@ -6101,8 +6103,11 @@ async def test_break_out_co_port_sequence_default_name_no_redundancy(mock_client
 
 async def test_break_out_dry_run(mock_client):
     """Port under automation → dry run returns plan, zero HTTP writes."""
+    import copy
     mock_client.get_mode_settings.return_value = {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 2}
-    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    _auto = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST[0])
+    _auto["grouptDevType"] = 1  # port 1 only (0b00000001)
+    mock_client.get_advance_automations.return_value = [_auto]
     result = await break_out_of_automation("C58ZA", port=1, dry_run=True)
     data = json.loads(result)
     assert "release" in data["action"]
@@ -6124,8 +6129,11 @@ async def test_break_out_dry_run(mock_client):
 
 async def test_break_out_confirm_name_required(mock_client):
     """dry_run=False without confirm_automation_name → error."""
+    import copy
     mock_client.get_mode_settings.return_value = {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 2}
-    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    _auto = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST[0])
+    _auto["grouptDevType"] = 1  # port 1 only
+    mock_client.get_advance_automations.return_value = [_auto]
     result = await break_out_of_automation(
         "C58ZA", port=1, dry_run=False, confirm_automation_name=None
     )
@@ -6136,8 +6144,11 @@ async def test_break_out_confirm_name_required(mock_client):
 
 async def test_break_out_confirm_name_mismatch(mock_client):
     """Wrong confirm_automation_name → error."""
+    import copy
     mock_client.get_mode_settings.return_value = {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 2}
-    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    _auto = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST[0])
+    _auto["grouptDevType"] = 1  # port 1 only
+    mock_client.get_advance_automations.return_value = [_auto]
     result = await break_out_of_automation(
         "C58ZA", port=1, dry_run=False,
         confirm_automation_name="Wrong Name"
@@ -6149,12 +6160,11 @@ async def test_break_out_confirm_name_mismatch(mock_client):
 
 async def test_break_out_confirm_name_case_insensitive(mock_client):
     """Case-insensitive match for confirm_automation_name."""
-    # Port 1 is under automation; port 2 is under automation too (co-port)
-    def mode_settings_side_effect(dev_id, port):
-        return {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 2}
-
-    mock_client.get_mode_settings.side_effect = mode_settings_side_effect
-    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    import copy
+    mock_client.get_mode_settings.return_value = {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 2}
+    _auto = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST[0])
+    _auto["grouptDevType"] = 1  # port 1 only — no co-ports
+    mock_client.get_advance_automations.return_value = [_auto]
     mock_client.disable_advance_automation.return_value = {"code": 200}
     mock_client.set_port_mode.return_value = {
         "dry_run": False, "sent": True, "controller_type": "legacy", "payload": {}
@@ -6172,11 +6182,11 @@ async def test_break_out_confirm_name_case_insensitive(mock_client):
 
 async def test_break_out_live_human_summary(mock_client):
     """Live break_out response includes human_summary saying port is released."""
-    def mode_settings_side_effect(dev_id, port):
-        return {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 2}
-
-    mock_client.get_mode_settings.side_effect = mode_settings_side_effect
-    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    import copy
+    mock_client.get_mode_settings.return_value = {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 2}
+    _auto = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST[0])
+    _auto["grouptDevType"] = 1  # port 1 only — no co-ports
+    mock_client.get_advance_automations.return_value = [_auto]
     mock_client.disable_advance_automation.return_value = {"code": 200}
     mock_client.set_port_mode.return_value = {
         "dry_run": False, "sent": True, "controller_type": "legacy", "payload": {}
@@ -6222,11 +6232,10 @@ async def test_break_out_of_automation_auth_error(mock_client, caplog):
 
 # ============ break_out_of_automation gather tests ============
 
-async def test_break_out_gather_replaces_sequential(mock_client):
-    """4-port device with all ports under ADVANCE; gather fires for ports 2, 3, 4."""
+async def test_break_out_bitmask_replaces_gather(mock_client):
+    """Bitmask decode replaces gather: get_mode_settings called once (idempotency only)."""
     import copy
     device = copy.deepcopy(MOCK_DEVICE_LEGACY)
-    # Add ports 3 and 4 so device has ports 1–4
     device["deviceInfo"]["ports"].append(
         {"port": 3, "portName": "CO2 Fan", "speak": 3, "portsLoad": 1,
          "loadState": 1, "curMode": 3, "remainTime": 0}
@@ -6236,23 +6245,24 @@ async def test_break_out_gather_replaces_sequential(mock_client):
          "loadState": 1, "curMode": 3, "remainTime": 0}
     )
     mock_client.get_devices.return_value = [device]
-    # All ports return ADVANCE mode
     mock_client.get_mode_settings.return_value = {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 5}
-    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    # Automation covers ports 1-4 (grouptDevType=15 = 0b00001111)
+    _auto = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST[0])
+    _auto["grouptDevType"] = 15
+    mock_client.get_advance_automations.return_value = [_auto]
     result = await break_out_of_automation("C58ZA", port=1, dry_run=True)
     data = json.loads(result)
     assert data["dry_run"] is True
-    # 1 call for the idempotency check (port 1) + 3 gather calls (ports 2, 3, 4)
-    assert mock_client.get_mode_settings.call_count == 4
-    called_ports = [call.args[1] for call in mock_client.get_mode_settings.call_args_list]
-    # Idempotency check is port 1; gather covers the remaining three
-    assert set(called_ports) == {1, 2, 3, 4}
-    gather_ports = [p for p in called_ports if p != 1]
-    assert set(gather_ports) == {2, 3, 4}
+    # Only one get_mode_settings call: the Step 0 idempotency check for port 1
+    assert mock_client.get_mode_settings.call_count == 1
+    assert mock_client.get_mode_settings.call_args.args[1] == 1
+    # Co-ports are ports 2, 3, 4 (bitmask decode, not gather)
+    co_port_nums = {c["port"] for c in data["co_ports_to_lock"]}
+    assert co_port_nums == {2, 3, 4}
 
 
 async def test_break_out_gather_single_port_device(mock_client):
-    """Single-port device: candidate_ports is empty, gather never fires, co_ports is empty."""
+    """Single-port device: automation covers only port 1, co_ports is empty."""
     import copy
     device = copy.deepcopy(MOCK_DEVICE_LEGACY)
     # Keep only port 1
@@ -6262,7 +6272,9 @@ async def test_break_out_gather_single_port_device(mock_client):
     ]
     mock_client.get_devices.return_value = [device]
     mock_client.get_mode_settings.return_value = {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 5}
-    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    _auto = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST[0])
+    _auto["grouptDevType"] = 1  # port 1 only
+    mock_client.get_advance_automations.return_value = [_auto]
     result = await break_out_of_automation("C58ZA", port=1, dry_run=True)
     data = json.loads(result)
     assert data["dry_run"] is True
@@ -6273,38 +6285,92 @@ async def test_break_out_gather_single_port_device(mock_client):
     assert data["co_ports_to_lock"] == []
 
 
-async def test_break_out_gather_no_advance_co_ports(mock_client):
-    """4-port device; co-ports 2–4 return a non-ADVANCE modeType; co_ports stays empty."""
+async def test_break_out_ghost_state_empty_automations(mock_client):
+    """modeType=15 but get_advance_automations returns [] → ghost state no-op, not error."""
+    mock_client.get_mode_settings.return_value = {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 2}
+    mock_client.get_advance_automations.return_value = []
+    result = await break_out_of_automation("C58ZA", port=1, dry_run=True)
+    data = json.loads(result)
+    assert "info" in data
+    assert "not currently under active automation control" in data["info"]
+    mock_client.disable_advance_automation.assert_not_called()
+
+
+async def test_break_out_ghost_state_active_no_coverage(mock_client):
+    """modeType=15 but active automations don't cover port 1 → ghost state no-op."""
+    import copy
+    mock_client.get_mode_settings.return_value = {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 2}
+    # Automation is active but covers only ports 5+6 — not port 1
+    _auto = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST[0])
+    _auto["grouptDevType"] = 48  # ports 5+6
+    mock_client.get_advance_automations.return_value = [_auto]
+    result = await break_out_of_automation("C58ZA", port=1, dry_run=True)
+    data = json.loads(result)
+    assert "info" in data
+    assert "not currently under active automation control" in data["info"]
+    mock_client.disable_advance_automation.assert_not_called()
+
+
+async def test_break_out_empty_port_excluded(mock_client):
+    """portResistance==65535 co-port is excluded from co_ports_to_lock."""
     import copy
     device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    # Add ports 5 and 6; port 5 is disconnected (portResistance=65535)
     device["deviceInfo"]["ports"].append(
-        {"port": 3, "portName": "CO2 Fan", "speak": 3, "portsLoad": 1,
-         "loadState": 1, "curMode": 3, "remainTime": 0}
+        {"port": 5, "portName": "Left Fan", "speak": 3, "portsLoad": 0,
+         "portResistance": 65535, "loadState": 0, "curMode": 0, "remainTime": 0}
     )
     device["deviceInfo"]["ports"].append(
-        {"port": 4, "portName": "Humidifier", "speak": 5, "portsLoad": 1,
-         "loadState": 1, "curMode": 3, "remainTime": 0}
+        {"port": 6, "portName": "Right Fan", "speak": 3, "portsLoad": 1,
+         "portResistance": 0, "loadState": 1, "curMode": 3, "remainTime": 0}
     )
     mock_client.get_devices.return_value = [device]
-
-    def mode_settings_side_effect(dev_id, port_num):
-        # Target port (1) is ADVANCE; co-ports are not
-        if port_num == 1:
-            return {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 5}
-        return {"modeType": 3, "onSpead": 0}
-
-    mock_client.get_mode_settings.side_effect = mode_settings_side_effect
-    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    mock_client.get_mode_settings.return_value = {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 3}
+    # Automation covers ports 1+5+6 (grouptDevType = 1+16+32 = 49)
+    _auto = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST[0])
+    _auto["grouptDevType"] = 49
+    mock_client.get_advance_automations.return_value = [_auto]
     result = await break_out_of_automation("C58ZA", port=1, dry_run=True)
     data = json.loads(result)
     assert data["dry_run"] is True
-    # gather fired for 3 co-ports, plus 1 idempotency call = 4 total
-    assert mock_client.get_mode_settings.call_count == 4
-    # No co-ports are ADVANCE, so co_ports_to_lock is empty
-    assert data["co_ports_to_lock"] == []
-    # Sequence has only the disable step (step 1), no lock steps
-    lock_steps = [s for s in data["sequence"] if "lock" in s["action"]]
-    assert len(lock_steps) == 0
+    co_port_nums = {c["port"] for c in data["co_ports_to_lock"]}
+    # Port 5 excluded (portResistance=65535); port 6 included
+    assert co_port_nums == {6}
+    assert len(data["co_ports_to_lock"]) == 1
+
+
+async def test_break_out_cross_automation_isolation(mock_client):
+    """Only ports in the governing automation are locked; other automation's ports untouched."""
+    import copy
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    # Add ports 3, 4, 5 so device has ports 1-5
+    for p_num, p_name in [(3, "CO2 Fan"), (4, "Heater"), (5, "Left Fan")]:
+        device["deviceInfo"]["ports"].append(
+            {"port": p_num, "portName": p_name, "speak": 3, "portsLoad": 1,
+             "loadState": 1, "curMode": 3, "remainTime": 0}
+        )
+    mock_client.get_devices.return_value = [device]
+    mock_client.get_mode_settings.return_value = {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 3}
+    # Automation A covers ports 1+3+5 (grouptDevType=21=0b010101), listed first
+    auto_a = {
+        "advId": 1001, "advName": "Night Cycle", "isOn": 1, "onSpeed": 5,
+        "offSpeed": 0, "grouptDevType": 21, "advKey": "1-0", "runState": 1,
+        "beginTime": 255, "endTime": 255, "onTimeSwitch": 0,
+    }
+    # Automation B covers ports 2+4 (grouptDevType=10=0b001010)
+    auto_b = {
+        "advId": 1002, "advName": "Day Cycle", "isOn": 1, "onSpeed": 3,
+        "offSpeed": 0, "grouptDevType": 10, "advKey": "2-0", "runState": 1,
+        "beginTime": 255, "endTime": 255, "onTimeSwitch": 0,
+    }
+    mock_client.get_advance_automations.return_value = [auto_a, auto_b]
+    result = await break_out_of_automation("C58ZA", port=1, dry_run=True)
+    data = json.loads(result)
+    assert data["dry_run"] is True
+    assert data.get("automation_name") == "Night Cycle"
+    co_port_nums = {c["port"] for c in data["co_ports_to_lock"]}
+    # Only Night Cycle's co-ports (3 and 5), not Day Cycle's (2 and 4)
+    assert co_port_nums == {3, 5}
 
 
 # ============ dry_run_never_writes parametrize ============
@@ -6875,13 +6941,13 @@ async def test_break_out_no_enabled_automation(mock_client):
 
 async def test_break_out_selects_run_state_only_automation(mock_client):
     """Port is ADVANCE; isOn=0 but runState=1 (mid-toggle) → run_state-only fallback selects."""
-    fixture = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST)
-    fixture[0]["isOn"] = 0
-    fixture[0]["runState"] = 1
-    fixture[1]["isOn"] = 0
-    fixture[1]["runState"] = 1
+    import copy
+    _auto = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST[0])
+    _auto["isOn"] = 0
+    _auto["runState"] = 1
+    _auto["grouptDevType"] = 1  # covers port 1
     mock_client.get_mode_settings.return_value = {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 2}
-    mock_client.get_advance_automations.return_value = fixture
+    mock_client.get_advance_automations.return_value = [_auto]
     result = await break_out_of_automation("C58ZA", port=1, dry_run=True)
     data = json.loads(result)
     assert "release" in (data.get("action") or "")
@@ -6891,8 +6957,11 @@ async def test_break_out_selects_run_state_only_automation(mock_client):
 
 async def test_break_out_disable_fails_rolls_back(mock_client):
     """Disable step fails → rollback re-enable attempted, structured error returned."""
+    import copy
     mock_client.get_mode_settings.return_value = {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 2}
-    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    _auto = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST[0])
+    _auto["grouptDevType"] = 1  # port 1 only
+    mock_client.get_advance_automations.return_value = [_auto]
     mock_client.disable_advance_automation.side_effect = RuntimeError("network error")
     mock_client.enable_advance_automation.return_value = {"code": 200}
     result = await break_out_of_automation(
@@ -6907,11 +6976,12 @@ async def test_break_out_disable_fails_rolls_back(mock_client):
 
 async def test_break_out_lock_port_fails_rollback(mock_client):
     """Co-port lock step fails → rollback attempted, structured error with rollback fields."""
-    def mode_settings_side_effect(dev_id, port):
-        return {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 2}
-
-    mock_client.get_mode_settings.side_effect = mode_settings_side_effect
-    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    import copy
+    mock_client.get_mode_settings.return_value = {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 2}
+    # grouptDevType=3 → ports 1+2 so port 2 is a co-port and the lock will fail
+    _auto = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST[0])
+    _auto["grouptDevType"] = 3
+    mock_client.get_advance_automations.return_value = [_auto]
     mock_client.disable_advance_automation.return_value = {"code": 200}
     mock_client.set_port_mode.side_effect = RuntimeError("port lock failed")
     mock_client.enable_advance_automation.return_value = {"code": 200}  # rollback succeeds
@@ -6939,8 +7009,11 @@ async def test_create_advance_automation_begin_end_reversed(mock_client):
 
 async def test_break_out_confirm_name_too_long(mock_client):
     """confirm_automation_name > 256 chars → structured error, no writes."""
+    import copy
     mock_client.get_mode_settings.return_value = {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 2}
-    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    _auto = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST[0])
+    _auto["grouptDevType"] = 1  # port 1 only
+    mock_client.get_advance_automations.return_value = [_auto]
     result = await break_out_of_automation(
         "C58ZA", port=1, dry_run=False,
         confirm_automation_name="A" * 257,

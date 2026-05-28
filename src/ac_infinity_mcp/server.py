@@ -3630,10 +3630,8 @@ async def break_out_of_automation(
 
     1. Checks that the port is actually under automation (idempotent: no-ops if not).
     2. Finds the governing automation.
-    3. Identifies all other ports currently in ADVANCE mode on this device (co-ports).
-       Note: This locks *all* ADVANCE-mode ports on the device, not only those belonging
-       to the governing automation. On devices with multiple active automations all
-       ADVANCE-mode ports will be locked to manual control.
+    3. Identifies all other ports in the same automation as the target port (co-ports).
+       Only those ports are locked — ports in other automations or empty ports are unaffected.
     4. On dry_run=False:
        a. Disables the automation.
        b. Locks each co-port to its current manual speed (prevents unexpected speed changes).
@@ -3657,8 +3655,8 @@ async def break_out_of_automation(
         On failure returns ``{"error": "..."}``.
     """
     try:
-        if port < 1:
-            return json.dumps({"error": "port must be a positive integer"})
+        if port < 1 or port > 8:
+            return json.dumps({"error": f"port must be between 1 and 8 (got {port})"})
 
         device, err = await _get_device(device_id)
         if err:
@@ -3698,19 +3696,29 @@ async def break_out_of_automation(
         )
         grouped = _group_automations(raw_automations)
 
-        # Find the first enabled+running automation; fall back to first enabled-only,
-        # then to first run_state-only (mid-toggle transient where isOn=0 but runState=1).
-        automation = (
-            next((g for g in grouped if g["enabled"] and g["run_state"]), None)
-            or next((g for g in grouped if g["enabled"]), None)
-            or next((g for g in grouped if g["run_state"]), None)
-        )
+        # Find the automation whose bitmask covers the target port.
+        automation = _find_governing_automation(grouped, port)
 
         if automation is None:
+            if grouped:
+                has_active = any(g.get("enabled") or g.get("run_state") for g in grouped)
+                if not has_active:
+                    # All automations disabled (Quirk 19) — port stuck in disabled automation.
+                    return json.dumps({
+                        "error": (
+                            "Could not identify governing automation. "
+                            "No enabled or actively running automations found on this device."
+                        ),
+                    })
+            # Ghost state: either no automations at all, or active automations exist but none
+            # covers this port — modeType=15 flag is stale from a deleted automation.
+            _port_display = (
+                f"{port_name} (Port {port})" if port_name != f"Port {port}" else port_name
+            )
             return json.dumps({
-                "error": (
-                    "Could not identify governing automation. "
-                    "No enabled or actively running automations found on this device."
+                "info": (
+                    f"{_port_display} is not currently under active automation control. "
+                    "No action taken."
                 ),
             })
 
@@ -3718,30 +3726,32 @@ async def break_out_of_automation(
         auto_id = automation["automation_id"]
         adv_ids = automation["adv_ids"]
 
-        # Step 2: Identify co-governed ports — all ports currently under automation
-        # control except the target port.
+        # Step 2: Identify co-governed ports from the governing automation's bitmasks.
+        # Only ports in the same automation are locked — ports in other automations or
+        # empty/disconnected ports (portResistance==65535) are excluded.
+        automation_port_nums: set[int] = set()
+        for pg in automation.get("port_groups", []):
+            bitmask = int(pg.get("grp_dev_type") or 0)
+            for bit in range(8):
+                if bitmask & (1 << bit):
+                    automation_port_nums.add(bit + 1)
+        automation_port_nums.discard(port)  # exclude the target port
+
         co_ports: list[dict] = []
-        candidate_ports = [
-            p for p in ports_data if p.get("port") is not None and p.get("port") != port
-        ]
-        if candidate_ports:
-            gather_results = await asyncio.gather(
-                *[
-                    asyncio.to_thread(_client().get_mode_settings, dev_id, p["port"])
-                    for p in candidate_ports
-                ]
-            )
-            for p_data, p_settings in zip(candidate_ports, gather_results):
-                p_num = p_data["port"]
-                if p_settings.get("modeType") == _ADVANCE_MODE_TYPE:
-                    raw_p_name = p_data.get("portName")
-                    p_name = _sanitize_api_string(raw_p_name, 64) if raw_p_name else f"Port {p_num}"
-                    current_speed = p_data.get("speak", 0)
-                    co_ports.append({
-                        "port": p_num,
-                        "port_name": p_name,
-                        "current_speed": current_speed,
-                    })
+        for p_data in ports_data:
+            p_num = p_data.get("port")
+            if p_num not in automation_port_nums:
+                continue
+            if p_data.get("portResistance") == 65535:  # empty/disconnected — skip
+                continue
+            raw_p_name = p_data.get("portName")
+            p_name = _sanitize_api_string(raw_p_name, 64) if raw_p_name else f"Port {p_num}"
+            current_speed = p_data.get("speak", 0)
+            co_ports.append({
+                "port": p_num,
+                "port_name": p_name,
+                "current_speed": current_speed,
+            })
 
         # Estimate: 1.5s rate limit per write; 1 disable + len(co_ports) locks.
         n_writes = 1 + len(co_ports)
