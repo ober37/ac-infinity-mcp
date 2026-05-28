@@ -99,14 +99,20 @@ _install_credential_redactor()
 
 mcp_server = FastMCP(name="ac-infinity-mcp")
 
-# Initialized at startup via main()
+# Initialized at startup via setup() / main()
 aci_client: ACInfinityClient | None = None
 
 
+def setup(client: ACInfinityClient) -> None:
+    """Wire the client into the server. Call once at startup (or in tests)."""
+    global aci_client
+    aci_client = client
+
+
 def _client() -> ACInfinityClient:
-    """Return the initialized client; raises RuntimeError if main() was not called."""
+    """Return the initialized client; raises RuntimeError if setup() was not called."""
     if aci_client is None:
-        raise RuntimeError("AC Infinity client not initialized — call main() first")
+        raise RuntimeError("AC Infinity client not initialized — call setup() first")
     return aci_client
 
 
@@ -4117,9 +4123,8 @@ def main() -> None:  # pragma: no cover
         )
         sys.exit(1)
 
-    global aci_client
-    aci_client = ACInfinityClient(email, password)
-    if not aci_client.authenticate():
+    setup(ACInfinityClient(email, password))
+    if not _client().authenticate():
         logger.error("Failed to authenticate with AC Infinity")
         sys.exit(1)
 

@@ -93,4 +93,7 @@ def mock_client():
     client.disable_advance_automation.return_value = {"code": 200}
     client.create_advance_automation.return_value = {"advId": 2302819}
     client.delete_advance_automation.return_value = {"code": 200}
-    return client
+    from ac_infinity_mcp.server import setup
+    setup(client)
+    yield client
+    setup(MagicMock())
