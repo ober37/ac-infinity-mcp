@@ -17,10 +17,14 @@ from ac_infinity_mcp.analytics import (
     _ZERO_LOAD_DEV_TYPES,
     STAGE_TARGETS,
     ActivityReport,
+    _filter_readings_by_time,  # noqa: F401 — re-exported for test compatibility
+    _parse_duration_seconds,  # noqa: F401 — re-exported for test compatibility
+    apply_sampling,  # noqa: F401 — re-exported for test compatibility
+    average_readings,  # noqa: F401 — re-exported for test compatibility
     build_activity_report,
     calculate_health_score,
     detect_trends,
-)  # noqa: E402 (ruff isort: _ZERO_LOAD_DEV_TYPES sorted before ActivityReport below)
+)  # noqa: E402 (ruff isort: private names _ZERO_LOAD_DEV_TYPES/_filter_…/_parse_… sorted before public)
 from ac_infinity_mcp.client import ACInfinityClient
 from ac_infinity_mcp.schema import (
     _ADVANCE_MODE_TYPE,
@@ -4707,173 +4711,6 @@ below 60 on any metric is the most likely root cause of a low overall score.
 | First time setup | `new_grower_setup` prompt |
 """
 
-
-# ============ Helpers ============
-
-_DURATION_RE = re.compile(r"^(\d+)(m|h|d)$", re.IGNORECASE)
-_DURATION_UNITS = {"m": 60, "h": 3600, "d": 86400}
-
-
-def _parse_duration_seconds(interval: str) -> int:
-    """Parse a duration string into a bucket size in seconds.
-
-    Accepts e.g. "1m", "5m", "15m", "30m", "1h", "2h", "6h", "12h", "1d".
-    "daily" is accepted as an alias for "1d".
-    Raises ValueError for unrecognised formats.
-    """
-    if interval in ("daily", "1d"):
-        return 86400
-    m = _DURATION_RE.fullmatch(interval)
-    if not m:
-        raise ValueError(
-            f"Invalid sample_interval {interval!r}. "
-            "Use 'raw' for unsampled data, or a duration like '1m', '5m', '15m', "
-            "'30m', '1h', '2h', '6h', '12h', '1d'."
-        )
-    value, unit = int(m.group(1)), m.group(2).lower()
-    return value * _DURATION_UNITS[unit]
-
-
-def _filter_readings_by_time(
-    readings: list, time_start: str | None = None, time_end: str | None = None
-) -> tuple[list, int]:
-    """Filter readings to only include those within a UTC time window (HH:MM format).
-
-    Returns:
-        (filtered_readings, dropped_count) where dropped_count is the number of
-        readings whose timestamps could not be parsed (and were therefore excluded
-        from the result). The caller is expected to surface a non-zero drop count
-        in the response so the user knows data was dropped.
-
-    Overnight windows: when time_start > time_end (e.g. "22:00"-"06:00"), the
-    filter is the OR of [time_start, 24:00) and [00:00, time_end] — i.e. the
-    window crosses midnight. Same-day windows use the inclusive intersection.
-    """
-    if not time_start and not time_end:
-        return readings, 0
-
-    overnight = (
-        time_start is not None and time_end is not None and time_start > time_end
-    )
-    filtered = []
-    dropped = 0
-    for reading in readings:
-        timestamp_str = reading.get("timestamp", "")
-        try:
-            # Handle both UTC-naive (..."T...Z") and aware (...+HH:MM) timestamps.
-            # The historical-data parser always emits the naive-Z form today, but
-            # a future fixture or hand-crafted payload could carry a non-UTC offset
-            # — converting via astimezone preserves the instant, whereas
-            # .replace(tzinfo=UTC) would silently corrupt it.
-            ts_dt = datetime.fromisoformat(timestamp_str.rstrip("Z"))
-            if ts_dt.tzinfo is None:
-                ts_dt = ts_dt.replace(tzinfo=UTC)
-            else:
-                ts_dt = ts_dt.astimezone(UTC)
-            reading_time = ts_dt.strftime("%H:%M")
-        except (ValueError, AttributeError, TypeError) as e:
-            logger.warning("Could not parse timestamp %s: %s", timestamp_str, e)
-            dropped += 1
-            continue
-
-        if time_start and time_end:
-            if overnight:
-                include = reading_time >= time_start or reading_time <= time_end
-            else:
-                include = time_start <= reading_time <= time_end
-        elif time_start:
-            include = reading_time >= time_start
-        else:  # time_end only
-            include = reading_time <= time_end  # type: ignore[operator]
-
-        if include:
-            filtered.append(reading)
-
-    return filtered, dropped
-
-
-def apply_sampling(readings: list, interval: str) -> list:
-    """Bucket readings by the given duration interval and average each bucket.
-
-    "raw" returns all records unchanged.
-    Any duration string (e.g. "1m", "15m", "1h", "6h", "1d") averages readings
-    into fixed-width time buckets of that size; each bucket is represented by
-    a single averaged record whose timestamp is the bucket-start time (UTC).
-    """
-    if interval == "raw":
-        return readings
-
-    bucket_secs = _parse_duration_seconds(interval)
-    sampled: dict = {}
-
-    for reading in readings:
-        timestamp_str = reading.get("timestamp", "")
-        try:
-            ts_dt = datetime.fromisoformat(timestamp_str.rstrip("Z"))
-            unix_ts = int(ts_dt.replace(tzinfo=UTC).timestamp())
-        except (ValueError, AttributeError, TypeError) as e:
-            # Narrow exception set: only timestamp-parse failures (bad string,
-            # None, unexpected type) should drop a reading. Anything else
-            # should propagate — silently swallowing every Exception masks
-            # real bugs in the parser layer.
-            logger.debug("apply_sampling skipping bad timestamp %r: %s", timestamp_str, e)
-            continue
-        bucket_key = (unix_ts // bucket_secs) * bucket_secs
-        sampled.setdefault(bucket_key, []).append(reading)
-
-    result = []
-    for bucket_key in sorted(sampled.keys()):
-        avg = average_readings(sampled[bucket_key])
-        avg["timestamp"] = (
-            datetime.fromtimestamp(bucket_key, UTC).replace(tzinfo=None).isoformat() + "Z"
-        )
-        result.append(avg)
-    return result
-
-
-def average_readings(readings: list) -> dict:
-    """Compute average of multiple readings."""
-    if not readings:
-        return {}
-
-    temps_c = [r.get("temperature_c", 0) for r in readings]
-    temps_f = [r.get("temperature_f", 0) for r in readings]
-    humidities = [r.get("humidity", 0) for r in readings]
-    vpds = [r.get("vpd", 0) for r in readings]
-
-    ports_by_number: dict = {}
-    for reading in readings:
-        for port in reading.get("ports", []):
-            port_num = port.get("port")
-            if port_num not in ports_by_number:
-                ports_by_number[port_num] = {
-                    "port": port_num,
-                    "name": port.get("name", f"Port {port_num}"),
-                    "speeds": [],
-                    "on_count": 0,
-                }
-            ports_by_number[port_num]["speeds"].append(port.get("speed", 0))
-            if port.get("on"):
-                ports_by_number[port_num]["on_count"] += 1
-
-    averaged_ports = [
-        {
-            "port": port_num,
-            "name": data["name"],
-            "speed": round(sum(data["speeds"]) / len(data["speeds"]), 2),
-            "on": data["on_count"] > 0,
-        }
-        for port_num, data in sorted(ports_by_number.items())
-    ]
-
-    return {
-        "timestamp": readings[0].get("timestamp"),
-        "temperature_c": round(sum(temps_c) / len(temps_c), 2) if temps_c else None,
-        "temperature_f": round(sum(temps_f) / len(temps_f), 2) if temps_f else None,
-        "humidity": round(sum(humidities) / len(humidities), 2) if humidities else None,
-        "vpd": round(sum(vpds) / len(vpds), 2) if vpds else None,
-        "ports": averaged_ports,
-    }
 
 
 def main() -> None:  # pragma: no cover

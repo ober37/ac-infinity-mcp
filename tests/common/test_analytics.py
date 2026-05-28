@@ -1880,3 +1880,23 @@ def test_rule_g_api_constant_speed_port_in_output() -> None:
     assert result[0].data_quality == "api_constant_speed", (
         "Port must exit via api_constant_speed early-exit, bypassing Rule G"
     )
+
+
+def test_sampling_functions_importable_from_analytics() -> None:
+    """analytics.py is the canonical home for these functions."""
+    from ac_infinity_mcp.analytics import (
+        _filter_readings_by_time,
+        _parse_duration_seconds,
+        apply_sampling,
+        average_readings,
+    )
+    assert callable(apply_sampling)
+    assert callable(average_readings)
+    assert callable(_filter_readings_by_time)
+    assert callable(_parse_duration_seconds)
+
+
+def test_sampling_shim_still_works_from_server() -> None:
+    """Re-export shim keeps legacy imports green during transition."""
+    from ac_infinity_mcp.server import apply_sampling
+    assert callable(apply_sampling)
