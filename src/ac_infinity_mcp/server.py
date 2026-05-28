@@ -154,6 +154,18 @@ def _client() -> ACInfinityClient:
     return aci_client
 
 
+async def _get_device(device_id: str) -> tuple[dict | None, str | None]:
+    """Fetch devices and find the one matching device_id.
+
+    Returns (device_dict, None) on success, (None, error_json) on not-found.
+    """
+    devices = await asyncio.to_thread(_client().get_devices)
+    device = next((d for d in devices if d.get("devCode") == device_id), None)
+    if not device:
+        return None, json.dumps({"error": f"Device {device_id} not found"})
+    return device, None
+
+
 # ============ Advance Automation Helpers ============
 
 # Per-device async locks for break_out_of_automation sequencing.
@@ -349,11 +361,10 @@ async def get_device_reading(device_id: str) -> str:
         On failure returns ``{"error": "...", "detail": "..."}``.
     """
     try:
-        devices = await asyncio.to_thread(_client().get_devices)
-
-        device = next((d for d in devices if d.get("devCode") == device_id), None)
-        if not device:
-            return json.dumps({"error": f"Device {device_id} not found"})
+        device, err = await _get_device(device_id)
+        if err:
+            return err
+        assert device is not None
 
         parsed = _client().parse_device_data(device)
         tz = _effective_tz(parsed.get("zone_id"))
@@ -474,11 +485,10 @@ async def get_historical_readings(
                         ),
                     })
 
-        devices = await asyncio.to_thread(_client().get_devices)
-
-        device = next((d for d in devices if d.get("devCode") == device_id), None)
-        if not device:
-            return json.dumps({"error": f"Device {device_id} not found"})
+        device, err = await _get_device(device_id)
+        if err:
+            return err
+        assert device is not None
 
         zone_id = device.get("zoneId")
         temp_unit_raw = device.get("deviceInfo", {}).get("unit")
@@ -822,10 +832,10 @@ async def get_environment_health(device_id: str, stage: str = "veg") -> str:
             valid = ", ".join(STAGE_TARGETS)
             return json.dumps({"error": f"Unknown stage: {stage}. Valid: {valid}"})
 
-        devices = await asyncio.to_thread(_client().get_devices)
-        device = next((d for d in devices if d.get("devCode") == device_id), None)
-        if not device:
-            return json.dumps({"error": f"Device {device_id} not found"})
+        device, err = await _get_device(device_id)
+        if err:
+            return err
+        assert device is not None
 
         parsed = _client().parse_device_data(device)
 
@@ -878,10 +888,10 @@ async def detect_environment_trends(device_id: str, days: int = 7) -> str:
         if not 1 <= days <= 30:
             return json.dumps({"error": "days must be between 1 and 30"})
 
-        devices = await asyncio.to_thread(_client().get_devices)
-        device = next((d for d in devices if d.get("devCode") == device_id), None)
-        if not device:
-            return json.dumps({"error": f"Device {device_id} not found"})
+        device, err = await _get_device(device_id)
+        if err:
+            return err
+        assert device is not None
 
         dev_id = device.get("devId")
         temp_unit_raw = device.get("deviceInfo", {}).get("unit")
@@ -1050,10 +1060,10 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         if not 1 <= days <= 30:
             return json.dumps({"error": "days must be between 1 and 30"})
 
-        devices = await asyncio.to_thread(_client().get_devices)
-        device = next((d for d in devices if d.get("devCode") == device_id), None)
-        if not device:
-            return json.dumps({"error": f"Device {device_id} not found"})
+        device, err = await _get_device(device_id)
+        if err:
+            return err
+        assert device is not None
 
         dev_id = device.get("devId")
         zone_id = device.get("zoneId")
@@ -1490,6 +1500,20 @@ def _get_port_name_from_device(device: dict | None, port: int) -> str:
     port_data = next((p for p in ports if p.get("port") == port), None)
     raw_name = port_data.get("portName") if port_data else None
     return _sanitize_api_string(raw_name, 64) if raw_name else f"Port {port}"
+
+
+def _get_port_label(device: dict, port: int) -> tuple[str, str, dict | None]:
+    """Return (port_name, port_label, port_data).
+
+    port_label = 'Name (Port N)' for custom-named ports, or 'Port N' for defaults.
+    port_data is the raw port dict from deviceInfo.ports, or None if not found.
+    """
+    port_name = _get_port_name_from_device(device, port)
+    default_name = f"Port {port}"
+    port_label = f"{port_name} ({default_name})" if port_name != default_name else port_name
+    ports = device.get("deviceInfo", {}).get("ports", [])
+    port_data = next((p for p in ports if p.get("port") == port), None)
+    return port_name, port_label, port_data
 
 
 def _is_port_empty(port_data: dict | None, port: int, device: dict | None) -> bool:
@@ -1955,10 +1979,10 @@ async def get_port_status(device_id: str, port: int) -> str:
         if port < 1:
             return json.dumps({"error": "port must be a positive integer"})
 
-        devices = await asyncio.to_thread(_client().get_devices)
-        device = next((d for d in devices if d.get("devCode") == device_id), None)
-        if not device:
-            return json.dumps({"error": f"Device {device_id} not found"})
+        device, err = await _get_device(device_id)
+        if err:
+            return err
+        assert device is not None
 
         ports = device.get("deviceInfo", {}).get("ports", [])
         port_data = next((p for p in ports if p.get("port") == port), None)
@@ -2126,10 +2150,10 @@ async def get_port_settings(device_id: str, port: int) -> str:
         if port < 1:
             return json.dumps({"error": "port must be a positive integer"})
 
-        devices = await asyncio.to_thread(_client().get_devices)
-        device = next((d for d in devices if d.get("devCode") == device_id), None)
-        if not device:
-            return json.dumps({"error": f"Device {device_id} not found"})
+        device, err = await _get_device(device_id)
+        if err:
+            return err
+        assert device is not None
 
         dev_id = device.get("devId")
         if not dev_id:
@@ -2421,10 +2445,10 @@ async def set_port_speed(
         if not 1 <= speed <= 10:
             return json.dumps({"error": "speed must be 1–10"})
 
-        devices = await asyncio.to_thread(_client().get_devices)
-        device = next((d for d in devices if d.get("devCode") == device_id), None)
-        if not device:
-            return json.dumps({"error": f"Device {device_id} not found"})
+        device, err = await _get_device(device_id)
+        if err:
+            return err
+        assert device is not None
 
         write_result = await asyncio.to_thread(
             _client().set_port_mode, device, port, {"onSpead": speed}, dry_run,
@@ -2434,15 +2458,7 @@ async def set_port_speed(
         if write_result.get("ai_plus_write_unsupported"):
             return _ai_plus_unsupported_error(device_id, port, write_result["controller_type"])
 
-        ports_list = device.get("deviceInfo", {}).get("ports", [])
-        port_data = next((p for p in ports_list if p.get("port") == port), None)
-        has_custom_name = bool(
-            port_data
-            and port_data.get("portName")
-            and port_data.get("portName") != f"Port {port}"
-        )
-        port_name = _get_port_name_from_device(device, port)
-        port_label = f"{port_name} (Port {port})" if has_custom_name else port_name
+        port_name, port_label, port_data = _get_port_label(device, port)
 
         response: dict = {
             "action": f"set {port_label} speed to {speed}",
@@ -2530,10 +2546,10 @@ async def set_port_on(
         if port < 1:
             return json.dumps({"error": "port must be a positive integer"})
 
-        devices = await asyncio.to_thread(_client().get_devices)
-        device = next((d for d in devices if d.get("devCode") == device_id), None)
-        if not device:
-            return json.dumps({"error": f"Device {device_id} not found"})
+        device, err = await _get_device(device_id)
+        if err:
+            return err
+        assert device is not None
 
         write_result = await asyncio.to_thread(
             _client().set_port_mode, device, port, {"onSpead": 10}, dry_run
@@ -2542,15 +2558,7 @@ async def set_port_on(
         if write_result.get("ai_plus_write_unsupported"):
             return _ai_plus_unsupported_error(device_id, port, write_result["controller_type"])
 
-        ports_list = device.get("deviceInfo", {}).get("ports", [])
-        port_data = next((p for p in ports_list if p.get("port") == port), None)
-        has_custom_name = bool(
-            port_data
-            and port_data.get("portName")
-            and port_data.get("portName") != f"Port {port}"
-        )
-        port_name = _get_port_name_from_device(device, port)
-        port_label = f"{port_name} (Port {port})" if has_custom_name else port_name
+        port_name, port_label, port_data = _get_port_label(device, port)
 
         response: dict = {
             "action": f"turn {port_label} on",
@@ -2631,10 +2639,10 @@ async def set_port_off(
         if port < 1:
             return json.dumps({"error": "port must be a positive integer"})
 
-        devices = await asyncio.to_thread(_client().get_devices)
-        device = next((d for d in devices if d.get("devCode") == device_id), None)
-        if not device:
-            return json.dumps({"error": f"Device {device_id} not found"})
+        device, err = await _get_device(device_id)
+        if err:
+            return err
+        assert device is not None
 
         write_result = await asyncio.to_thread(
             _client().set_port_mode, device, port, {"onSpead": 0}, dry_run
@@ -2643,15 +2651,7 @@ async def set_port_off(
         if write_result.get("ai_plus_write_unsupported"):
             return _ai_plus_unsupported_error(device_id, port, write_result["controller_type"])
 
-        ports_list = device.get("deviceInfo", {}).get("ports", [])
-        port_data = next((p for p in ports_list if p.get("port") == port), None)
-        has_custom_name = bool(
-            port_data
-            and port_data.get("portName")
-            and port_data.get("portName") != f"Port {port}"
-        )
-        port_name = _get_port_name_from_device(device, port)
-        port_label = f"{port_name} (Port {port})" if has_custom_name else port_name
+        port_name, port_label, port_data = _get_port_label(device, port)
 
         response: dict = {
             "action": f"turn {port_label} off",
@@ -2747,10 +2747,10 @@ async def set_vpd_automation(
         if not 0.1 <= target_vpd <= 3.0:
             return json.dumps({"error": "target_vpd must be between 0.1 and 3.0 kPa"})
 
-        devices = await asyncio.to_thread(_client().get_devices)
-        device = next((d for d in devices if d.get("devCode") == device_id), None)
-        if not device:
-            return json.dumps({"error": f"Device {device_id} not found"})
+        device, err = await _get_device(device_id)
+        if err:
+            return err
+        assert device is not None
 
         updates = {
             "atType": 8,  # VPD mode
@@ -2765,15 +2765,7 @@ async def set_vpd_automation(
         if write_result.get("ai_plus_write_unsupported"):
             return _ai_plus_unsupported_error(device_id, port, write_result["controller_type"])
 
-        ports_list = device.get("deviceInfo", {}).get("ports", [])
-        port_data = next((p for p in ports_list if p.get("port") == port), None)
-        has_custom_name = bool(
-            port_data
-            and port_data.get("portName")
-            and port_data.get("portName") != f"Port {port}"
-        )
-        port_name = _get_port_name_from_device(device, port)
-        port_label = f"{port_name} (Port {port})" if has_custom_name else port_name
+        port_name, port_label, port_data = _get_port_label(device, port)
 
         response: dict = {
             "action": f"set {port_label} VPD automation to {target_vpd} kPa",
@@ -2861,10 +2853,10 @@ async def set_temperature_automation(
         if port < 1:
             return json.dumps({"error": "port must be a positive integer"})
 
-        devices = await asyncio.to_thread(_client().get_devices)
-        device = next((d for d in devices if d.get("devCode") == device_id), None)
-        if not device:
-            return json.dumps({"error": f"Device {device_id} not found"})
+        device, err = await _get_device(device_id)
+        if err:
+            return err
+        assert device is not None
 
         temp_unit_raw = device.get("deviceInfo", {}).get("unit")
         unit = _effective_unit(temp_unit_raw)
@@ -2919,15 +2911,7 @@ async def set_temperature_automation(
         if write_result.get("ai_plus_write_unsupported"):
             return _ai_plus_unsupported_error(device_id, port, write_result["controller_type"])
 
-        ports_list = device.get("deviceInfo", {}).get("ports", [])
-        port_data = next((p for p in ports_list if p.get("port") == port), None)
-        has_custom_name = bool(
-            port_data
-            and port_data.get("portName")
-            and port_data.get("portName") != f"Port {port}"
-        )
-        port_name = _get_port_name_from_device(device, port)
-        port_label = f"{port_name} (Port {port})" if has_custom_name else port_name
+        port_name, port_label, port_data = _get_port_label(device, port)
 
         response: dict = {
             "action": f"set {port_label} temperature automation {min_temp}–{max_temp}{unit_label}",
@@ -3018,10 +3002,10 @@ async def set_humidity_automation(
         if min_rh >= max_rh:
             return json.dumps({"error": "min_rh must be less than max_rh"})
 
-        devices = await asyncio.to_thread(_client().get_devices)
-        device = next((d for d in devices if d.get("devCode") == device_id), None)
-        if not device:
-            return json.dumps({"error": f"Device {device_id} not found"})
+        device, err = await _get_device(device_id)
+        if err:
+            return err
+        assert device is not None
 
         updates = {
             "atType": 3,  # AUTO mode
@@ -3039,15 +3023,7 @@ async def set_humidity_automation(
         if write_result.get("ai_plus_write_unsupported"):
             return _ai_plus_unsupported_error(device_id, port, write_result["controller_type"])
 
-        ports_list = device.get("deviceInfo", {}).get("ports", [])
-        port_data = next((p for p in ports_list if p.get("port") == port), None)
-        has_custom_name = bool(
-            port_data
-            and port_data.get("portName")
-            and port_data.get("portName") != f"Port {port}"
-        )
-        port_name = _get_port_name_from_device(device, port)
-        port_label = f"{port_name} (Port {port})" if has_custom_name else port_name
+        port_name, port_label, port_data = _get_port_label(device, port)
 
         response: dict = {
             "action": f"set {port_label} humidity automation {min_rh}–{max_rh}%",
@@ -3177,10 +3153,10 @@ async def set_port_mode(
             if timer_duration_seconds < 1:
                 return json.dumps({"error": "timer_duration_seconds must be >= 1"})
 
-        devices = await asyncio.to_thread(_client().get_devices)
-        device = next((d for d in devices if d.get("devCode") == device_id), None)
-        if not device:
-            return json.dumps({"error": f"Device {device_id} not found"})
+        device, err = await _get_device(device_id)
+        if err:
+            return err
+        assert device is not None
 
         at_type = _MODE_AT_TYPES[mode_upper]
         updates: dict = {"atType": at_type}
@@ -3213,15 +3189,7 @@ async def set_port_mode(
         if write_result.get("ai_plus_write_unsupported"):
             return _ai_plus_unsupported_error(device_id, port, write_result["controller_type"])
 
-        ports_list = device.get("deviceInfo", {}).get("ports", [])
-        port_data = next((p for p in ports_list if p.get("port") == port), None)
-        has_custom_name = bool(
-            port_data
-            and port_data.get("portName")
-            and port_data.get("portName") != f"Port {port}"
-        )
-        port_name = _get_port_name_from_device(device, port)
-        port_label = f"{port_name} (Port {port})" if has_custom_name else port_name
+        port_name, port_label, port_data = _get_port_label(device, port)
 
         response: dict = {
             "action": f"set {port_label} mode to {mode_upper}",
@@ -3319,7 +3287,7 @@ async def apply_grow_stage_template(
     target_vpd_x10 = int(midpoint_x100 / 10 + 0.5)
 
     try:
-        devices = await asyncio.to_thread(_client().get_devices)
+        device, err = await _get_device(device_id)
     except ACInfinityAuthError as e:
         logger.warning(
             "Auth error fetching devices in apply_grow_stage_template (device=%s): %s",
@@ -3336,17 +3304,14 @@ async def apply_grow_stage_template(
         )
         return json.dumps({"error": "AC Infinity API error", "detail": "see server logs"})
     except Exception as e:
-        # Never return str(e) here — that echoes arbitrary exception text into
-        # the LLM-facing response. Use the generic pattern used elsewhere.
         logger.error(
             "Unexpected error fetching devices in apply_grow_stage_template (device=%s): %s",
             device_id, e, exc_info=True,
         )
         return json.dumps({"error": "Unexpected error", "detail": "see server logs"})
-
-    device = next((d for d in devices if d.get("devCode") == device_id), None)
-    if not device:
-        return json.dumps({"error": f"Device {device_id} not found"})
+    if err:
+        return err
+    assert device is not None
 
     # Single atomic write: VPD mode active, temp/humidity thresholds stored on the
     # controller for fallback if the user later switches to AUTO mode. Earlier
@@ -3454,10 +3419,10 @@ async def list_advance_automations(device_id: str) -> str:
         On failure returns ``{"error": "...", "detail": "..."}``.
     """
     try:
-        devices = await asyncio.to_thread(_client().get_devices)
-        device = next((d for d in devices if d.get("devCode") == device_id), None)
-        if not device:
-            return json.dumps({"error": f"Device {device_id} not found"})
+        device, err = await _get_device(device_id)
+        if err:
+            return err
+        assert device is not None
 
         dev_id = device.get("devId")
         if not dev_id:
@@ -3518,10 +3483,10 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
         if adv_id_int is None:
             return json.dumps({"error": "Invalid automation_id format"})
 
-        devices = await asyncio.to_thread(_client().get_devices)
-        device = next((d for d in devices if d.get("devCode") == device_id), None)
-        if not device:
-            return json.dumps({"error": f"Device {device_id} not found"})
+        device, err = await _get_device(device_id)
+        if err:
+            return err
+        assert device is not None
 
         dev_id = device.get("devId")
         if not dev_id:
@@ -3709,10 +3674,10 @@ async def enable_advance_automation(
         if adv_id_int is None:
             return json.dumps({"error": "Invalid automation_id format"})
 
-        devices = await asyncio.to_thread(_client().get_devices)
-        device = next((d for d in devices if d.get("devCode") == device_id), None)
-        if not device:
-            return json.dumps({"error": f"Device {device_id} not found"})
+        device, err = await _get_device(device_id)
+        if err:
+            return err
+        assert device is not None
 
         dev_id = device.get("devId")
         if not dev_id:
@@ -3802,10 +3767,10 @@ async def disable_advance_automation(
         if adv_id_int is None:
             return json.dumps({"error": "Invalid automation_id format"})
 
-        devices = await asyncio.to_thread(_client().get_devices)
-        device = next((d for d in devices if d.get("devCode") == device_id), None)
-        if not device:
-            return json.dumps({"error": f"Device {device_id} not found"})
+        device, err = await _get_device(device_id)
+        if err:
+            return err
+        assert device is not None
 
         dev_id = device.get("devId")
         if not dev_id:
@@ -3987,10 +3952,10 @@ async def create_advance_automation(
                 ),
             })
 
-        devices = await asyncio.to_thread(_client().get_devices)
-        device = next((d for d in devices if d.get("devCode") == device_id), None)
-        if not device:
-            return json.dumps({"error": f"Device {device_id} not found"})
+        device, err = await _get_device(device_id)
+        if err:
+            return err
+        assert device is not None
 
         dev_id = device.get("devId")
         if not dev_id:
@@ -4198,10 +4163,10 @@ async def delete_advance_automation(
         if adv_id_int is None:
             return json.dumps({"error": "Invalid automation_id format"})
 
-        devices = await asyncio.to_thread(_client().get_devices)
-        device = next((d for d in devices if d.get("devCode") == device_id), None)
-        if not device:
-            return json.dumps({"error": f"Device {device_id} not found"})
+        device, err = await _get_device(device_id)
+        if err:
+            return err
+        assert device is not None
 
         dev_id = device.get("devId")
         if not dev_id:
@@ -4305,10 +4270,10 @@ async def break_out_of_automation(
         if port < 1:
             return json.dumps({"error": "port must be a positive integer"})
 
-        devices = await asyncio.to_thread(_client().get_devices)
-        device = next((d for d in devices if d.get("devCode") == device_id), None)
-        if not device:
-            return json.dumps({"error": f"Device {device_id} not found"})
+        device, err = await _get_device(device_id)
+        if err:
+            return err
+        assert device is not None
 
         dev_id = device.get("devId")
         if not dev_id:

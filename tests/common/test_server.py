@@ -4,7 +4,7 @@ import asyncio
 import copy
 import json
 from datetime import UTC, datetime
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -25,6 +25,8 @@ from ac_infinity_mcp.server import (
     _find_governing_port_group,
     _format_schedule_time,
     _format_window_dt,
+    _get_device,
+    _get_port_label,
     _group_automations,
     _is_port_empty,
     _is_port_not_powered,
@@ -8603,6 +8605,72 @@ def test_empty_port_advisory_text_no_dry_run():
     assert "dry_run" not in msg
     assert "Port 7" in msg
     assert "connected" in msg
+
+
+# ============ _get_device() helper (issue #201) ============
+
+@pytest.mark.asyncio
+async def test_get_device_found():
+    mock_device = {"devCode": "ABC123", "devName": "Controller"}
+    mock_client = MagicMock()
+    mock_client.get_devices.return_value = [mock_device]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        device, err = await _get_device("ABC123")
+    assert device == mock_device
+    assert err is None
+
+
+@pytest.mark.asyncio
+async def test_get_device_not_found():
+    mock_client = MagicMock()
+    mock_client.get_devices.return_value = []
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        device, err = await _get_device("MISSING")
+    assert device is None
+    assert err is not None
+    payload = json.loads(err)
+    assert "error" in payload
+    assert "MISSING" in payload["error"]
+
+
+@pytest.mark.asyncio
+async def test_get_device_not_found_returns_json_string():
+    """err must be a JSON string (tool handlers return it directly)."""
+    mock_client = MagicMock()
+    mock_client.get_devices.return_value = []
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        _, err = await _get_device("X")
+    assert isinstance(err, str)
+    json.loads(err)  # must not raise
+
+
+# ============ _get_port_label() helper (issue #201) ============
+
+@pytest.mark.parametrize("port_name,port,expected_label", [
+    ("Humidifier",  3, "Humidifier (Port 3)"),
+    ("Port 3",      3, "Port 3"),
+    ("CO2 Sensor",  1, "CO2 Sensor (Port 1)"),
+    ("Port 8",      8, "Port 8"),
+])
+def test_get_port_label(port_name, port, expected_label):
+    device = {
+        "deviceInfo": {
+            "ports": [{"port": port, "portName": port_name}]
+        }
+    }
+    name, label, port_data = _get_port_label(device, port)
+    assert name == port_name
+    assert label == expected_label
+    assert port_data is not None
+    assert port_data.get("portName") == port_name
+
+
+def test_get_port_label_missing_port_data():
+    """Falls back gracefully when port not in ports list."""
+    device = {"deviceInfo": {"ports": []}}
+    name, label, port_data = _get_port_label(device, 5)
+    assert label == "Port 5"
+    assert port_data is None
 
 
 # ============ Write-tool empty-port warning (issue #165) ============
