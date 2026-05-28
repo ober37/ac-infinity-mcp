@@ -2063,6 +2063,11 @@ async def test_get_port_activity_report_caveat_line_speak_based_on_off(mock_clie
         "speak=1 must yield 'Currently ON' grouped caveat"
     )
 
+    # Invalidate cache so the next call fetches the updated mock (speak=0 device).
+    # Within a single test function the autouse fixture doesn't run between sub-cases.
+    import ac_infinity_mcp.server as _srv
+    _srv._invalidate_device_cache()
+
     # speak=0 → Currently OFF (portsLoad still 0; speak is the authoritative signal)
     device_off = _make_devtype18_device([
         {"port": 2, "portName": "Heater", "portsLoad": 0, "loadType": 4, "speak": 0},
