@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import sys
+import time
 import weakref
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -165,13 +166,31 @@ def _client() -> ACInfinityClient:
     return aci_client
 
 
+# TTL cache for get_devices — avoids redundant API fetches in interactive sessions.
+# Device data stales only on physical change or port rename; 45s covers normal usage.
+_DEVICE_CACHE_TTL: float = 45.0
+_device_cache: list[dict] | None = None
+_device_cache_expires_at: float = 0.0
+
+
+def _invalidate_device_cache() -> None:
+    """Expire the device cache immediately (call after writes that change device structure)."""
+    global _device_cache, _device_cache_expires_at
+    _device_cache = None
+    _device_cache_expires_at = 0.0
+
+
 async def _get_device(device_id: str) -> tuple[dict | None, str | None]:
-    """Fetch devices and find the one matching device_id.
+    """Fetch devices (from TTL cache if warm) and find the one matching device_id.
 
     Returns (device_dict, None) on success, (None, error_json) on not-found.
     """
-    devices = await asyncio.to_thread(_client().get_devices)
-    device = next((d for d in devices if d.get("devCode") == device_id), None)
+    global _device_cache, _device_cache_expires_at
+    now = time.monotonic()
+    if _device_cache is None or now >= _device_cache_expires_at:
+        _device_cache = await asyncio.to_thread(_client().get_devices)
+        _device_cache_expires_at = now + _DEVICE_CACHE_TTL
+    device = next((d for d in _device_cache if d.get("devCode") == device_id), None)
     if not device:
         return None, json.dumps({"error": f"Device {device_id} not found"})
     return device, None

@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import json
+import time
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
@@ -28,6 +29,7 @@ from ac_infinity_mcp.server import (
     _get_device,
     _get_port_label,
     _group_automations,
+    _invalidate_device_cache,
     _is_port_empty,
     _is_port_not_powered,
     _parse_duration_seconds,
@@ -85,6 +87,17 @@ def _make_history_record(ts: str, temp_c: float = 24.0, humidity: float = 55.0,
         "vpd": vpd,
         "ports": ports or [],
     }
+
+
+@pytest.fixture(autouse=True)
+def reset_device_cache():
+    """Reset the TTL cache before each test so tests are independent."""
+    import ac_infinity_mcp.server as srv
+    srv._device_cache = None
+    srv._device_cache_expires_at = 0.0
+    yield
+    srv._device_cache = None
+    srv._device_cache_expires_at = 0.0
 
 
 # ============ Smoke / symbol checks ============
@@ -9394,3 +9407,57 @@ async def test_advance_conflict_not_powered_note_absent_on_subpath_b(mock_client
     assert "1_break_out" not in data["options"]  # confirms Sub-path B
     assert "not currently drawing power" not in data["suggested_reply"]
     assert "not currently drawing power" not in data["human_summary"]
+
+
+# ============ _get_device TTL cache ============
+
+
+async def test_device_cache_hit_skips_second_fetch(mock_client):
+    """Second call within TTL must not hit the API again."""
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        await _get_device("C58ZA")
+        await _get_device("C58ZA")
+    assert mock_client.get_devices.call_count == 1
+
+
+async def test_device_cache_miss_after_ttl_expiry(mock_client, monkeypatch):
+    """After TTL expires, the next call must re-fetch from the API."""
+    import ac_infinity_mcp.server as srv
+
+    call_times = [0.0]
+
+    def advancing_monotonic():
+        t = call_times[0]
+        call_times[0] += 1.0
+        return t
+
+    monkeypatch.setattr(time, "monotonic", advancing_monotonic)
+    monkeypatch.setattr(srv, "_DEVICE_CACHE_TTL", 0.5)  # short TTL so expiry is easy to trigger
+
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        await _get_device("C58ZA")      # t=0 → cache miss, fetches, expires_at=0.5
+        await _get_device("C58ZA")      # t=1 → past expiry, fetches again
+    assert mock_client.get_devices.call_count == 2
+
+
+async def test_invalidate_device_cache_forces_fresh_fetch(mock_client):
+    """_invalidate_device_cache() must cause the next _get_device call to re-fetch."""
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        await _get_device("C58ZA")      # warms cache
+        _invalidate_device_cache()
+        await _get_device("C58ZA")      # cache is cold → must fetch again
+    assert mock_client.get_devices.call_count == 2
+
+
+async def test_device_cache_not_found_returns_error_json(mock_client):
+    """Cache hit for a missing device_id must return (None, error_json) without re-fetching."""
+    mock_client.get_devices.return_value = [copy.deepcopy({"devCode": "OTHER", "devName": "Other"})]
+    with patch("ac_infinity_mcp.server.aci_client", mock_client):
+        device, error = await _get_device("NOTHERE")
+        # A second attempt should still use the cached list (no extra fetch)
+        device2, error2 = await _get_device("NOTHERE")
+    assert device is None
+    assert error is not None
+    error_data = json.loads(error)
+    assert "not found" in error_data["error"].lower()
+    assert mock_client.get_devices.call_count == 1
