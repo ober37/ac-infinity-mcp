@@ -2,6 +2,7 @@ import logging
 import threading
 import time
 from datetime import UTC, datetime
+from typing import Any
 
 import requests
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
@@ -51,6 +52,103 @@ def _should_include_sensor(s: dict) -> bool:
     if sensor_type in _SENSOR_TYPE_LABELS:
         return True  # recognized type: always include (even value=0)
     return (s.get("sensorData") or 0) != 0  # unrecognized: include only if non-zero
+
+
+_SCHEDULE_ALWAYS_ACTIVE: int = 255
+
+
+def build_add_groups_payload(
+    dev_id: str,
+    port: int,
+    clean_name: str,
+    on_speed: int,
+    begin_time: int,
+    end_time: int,
+) -> dict[str, Any]:
+    """Build the addGroups API payload for create_advance_automation."""
+    grp_dev_type = 2 ** (port - 1)
+    return {
+        # devId NOT included here — _create_advance_automation_inner injects it.
+        # advCode NOT included — absent from addGroups live capture (unlike addAlarms).
+        # isFlag (capital F) confirmed for addGroups;
+        # isflag (lowercase) for updateGroupsIsOn/delByid.
+        "advName": clean_name,
+        "currentMode": 1,
+        "isOn": 1,
+        "onSpeed": on_speed,
+        # On mode has no user-settable min; port's own min setting is used.
+        "offSpeed": 0,
+        # Map "always active" sentinel to a valid full-day range.
+        "beginTime": 0 if begin_time == _SCHEDULE_ALWAYS_ACTIVE else begin_time,
+        "endTime": 1439 if end_time == _SCHEDULE_ALWAYS_ACTIVE else end_time,
+        "groupNums": 9,
+        "sortType": 9,
+        "subNumber": 0,
+        "subNumberSort": 0,
+        "isDel": 0,
+        "isFlag": 1,
+        "returnData": 1,
+        "templateType": 0,
+        "grouptDevType": grp_dev_type,
+        "portType": 0,
+        "portState": 0,
+        "portSetHex": "",
+        "portStateHex": "",
+        "autoHighTempF": 110,
+        "autoLowTempF": 40,
+        "autoHighTempC": 90,
+        "autoLowTempC": 0,
+        "autoHighTempSwitch": 1,
+        "autoLowTempSwitch": 1,
+        "autoHighHumi": 90,
+        "autoLowHumi": 40,
+        "autoHighHumiSwitch": 1,
+        "autoLowHumiSwitch": 1,
+        "highVpd": 99,
+        "lowVpd": 0,
+        "highVpdSwitch": 1,
+        "lowVpdSwitch": 1,
+        "cycleOn": 0,
+        "cycleOff": 0,
+        "onTime": 0,
+        "onTimeSwitch": 0,
+        # 127 = binary 01111111 = all 7 days bitmask. 255 has bit 7 set which
+        # causes the app to ignore the schedule and treat it as Continuous.
+        "switchTime": 127,
+        "dualZoneSwitch": 1,
+        "photocellSwitch": 0,
+        "isOpenDoseTime": 0,
+        "onDoseTime": 60,
+        "offDoseTime": 1,
+        "isOnMinMaxTime": 1,
+        "onMinTime": 0,
+        "onMaxTime": 0,
+        "settingMode": 0,
+        "targetTSwitch": 1,
+        "targetHumiSwitch": 1,
+        "targetVpdSwitch": 1,
+        "targetTemp": 0,
+        "targetTempF": 32,
+        "targetHumi": 0,
+        "targetVpd": 0,
+        "insidePort": 255,
+        "insideType": 15,
+        "outsidePort": 255,
+        "outsideType": 15,
+        "runState": 0,
+        "setSelect": 0,
+        "humidityBuff": 0,
+        "humidityTrans": 0,
+        "temperatureFBuff": 0,
+        "temperatureFTrans": 0,
+        "switchHumidityBuff": 0,
+        "switchTemperatureFBuff": 0,
+        "switchVpdBuff": 0,
+        "vpdBuff": 0,
+        "vpdTrans": 0,
+        "nameLangKey": "",
+        "remarkLangKey": "",
+    }
 
 
 class ACInfinityClient:
