@@ -8157,16 +8157,19 @@ async def test_create_advance_automation_live_api_error(mock_client, caplog):
     assert any(r.levelname == "ERROR" and "api" in r.message.lower() for r in caplog.records)
 
 
-async def test_create_advance_automation_live_auth_error(mock_client):
-    """ACInfinityAuthError → {"error": "Authentication failed", "detail": "see server logs"}."""
+async def test_create_advance_automation_live_auth_error(mock_client, caplog):
+    """ACInfinityAuthError → auth error JSON + warning log."""
+    import logging
     mock_client.create_advance_automation.side_effect = ACInfinityAuthError("auth")
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        result = await create_advance_automation(
-            "C58ZA", "Test", on_speed=5, port=1, dry_run=False
-        )
+        with caplog.at_level(logging.WARNING, logger="ac_infinity_mcp.server"):
+            result = await create_advance_automation(
+                "C58ZA", "Test", on_speed=5, port=1, dry_run=False
+            )
     data = json.loads(result)
     assert "Authentication failed — check AC_INFINITY_EMAIL" in data["error"]
     assert data["detail"] == "see server logs"
+    assert any(r.levelname == "WARNING" and "auth" in r.message.lower() for r in caplog.records)
 
 
 async def test_create_advance_automation_dry_run_note_grower_facing(mock_client):
