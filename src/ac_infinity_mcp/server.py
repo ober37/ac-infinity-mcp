@@ -3789,10 +3789,17 @@ async def break_out_of_automation(
             for cp in co_ports
         ]
         _co_str = ", ".join(_co_label_parts) if _co_label_parts else ""
-        _human_co = f" {_co_str} will be locked to current speeds." if _co_str else ""
+        if _co_str:
+            _human_co = (
+                f" The other ports in this automation — {_co_str} — "
+                "will be locked to their current speeds."
+            )
+        else:
+            _human_co = ""
         _bo_human_summary = (
-            f"This will disable the '{auto_name}' automation and free {_target_label} for "
-            f"manual control.{_human_co} You can re-enable the automation at any time — "
+            f"This will disable the '{auto_name}' automation.{_human_co} "
+            f"{_target_label} will be freed for manual control. "
+            "You can re-enable the automation at any time — "
             "all ports will return to automated control right away."
         )
 
