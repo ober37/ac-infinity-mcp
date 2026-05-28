@@ -4461,7 +4461,7 @@ async def test_get_port_settings_advance_mode_returns_early(mock_client):
 
 
 async def test_get_port_settings_empty_port_stale_note(mock_client):
-    """Empty port with stale humidity settings: human_summary and note are staleness-aware."""
+    """Empty port with stale humidity settings: human_summary and advisory are staleness-aware."""
     device = copy.deepcopy(MOCK_DEVICE_LEGACY)
     device["deviceInfo"]["ports"].append(
         {"port": 3, "portName": "Port 3", "speak": 0, "portsLoad": 0,
@@ -4474,7 +4474,7 @@ async def test_get_port_settings_empty_port_stale_note(mock_client):
         result = await get_port_settings("C58ZA", 3)
     data = json.loads(result)
     assert "stale" in data["human_summary"]
-    assert "different port" in data["note"]
+    assert "different port" in data["advisory"]
     assert "Humidity automation" not in data["human_summary"]
     assert data["humidity_range_pct"] == {"min_pct": 60, "max_pct": 100}  # raw data preserved
 
@@ -4497,12 +4497,12 @@ async def test_get_port_settings_empty_port_cycle_stale_note(mock_client):
 
 
 async def test_get_port_settings_connected_port_no_stale_note(mock_client):
-    """Port 1 (Intake Fan) has portResistance=7500 — primary signal False, no staleness note."""
+    """Port 1 (Intake Fan) has portResistance=7500 — primary signal False, no staleness advisory."""
     mock_client.get_mode_settings.return_value = MOCK_MODE_SETTINGS_BASIC
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_port_settings("C58ZA", 1)  # port 1 = "Intake Fan", portResistance=7500
     data = json.loads(result)
-    assert "note" not in data
+    assert "advisory" not in data
     assert "stale" not in data.get("human_summary", "")
 
 
@@ -4528,8 +4528,8 @@ async def test_get_port_settings_advance_empty_port_human_summary_unchanged(mock
         "automations are disabled" in data["human_summary"]
         or "automation" in data["human_summary"].lower()
     )
-    # note should contain the staleness advisory
-    assert "stale" in data["note"]
+    # advisory should contain the staleness message
+    assert "stale" in data["advisory"]
 
 
 async def test_get_port_settings_advance_governing_found_empty_port_human_summary_unchanged(
@@ -4553,12 +4553,12 @@ async def test_get_port_settings_advance_governing_found_empty_port_human_summar
     # human_summary preserved — should reference the governing automation
     assert "stale" not in data["human_summary"]
     assert data["automation_name"] is not None
-    # note should contain the staleness advisory
-    assert "stale" in data["note"]
+    # advisory should contain the staleness message
+    assert "stale" in data["advisory"]
 
 
 async def test_get_port_settings_advance_degraded_empty_port_note_concatenated(mock_client):
-    """ADVANCE mode + degraded secondary call + empty port: note concatenates both messages."""
+    """ADVANCE mode + degraded secondary call + empty port: advisory concatenates both messages."""
     device = copy.deepcopy(MOCK_DEVICE_LEGACY)
     device["deviceInfo"]["ports"].append(
         {"port": 3, "portName": "Port 3", "speak": 0, "portsLoad": 0,
@@ -4573,17 +4573,17 @@ async def test_get_port_settings_advance_degraded_empty_port_note_concatenated(m
         result = await get_port_settings("C58ZA", 3)
     data = json.loads(result)
     assert data["mode"] == "ADVANCE"
-    note = data["note"]
+    advisory = data["advisory"]
     # Both degraded and stale messages must be present
-    assert "automation" in note.lower()  # from degraded: "Could not fetch automation details"
-    assert "stale" in note               # from empty-port stale advisory
+    assert "automation" in advisory.lower()  # from degraded: "Could not fetch automation details"
+    assert "stale" in advisory               # from empty-port stale advisory
     # human_summary should NOT be overridden with stale message
     assert "stale" not in data["human_summary"]
 
 
 
 async def test_get_port_settings_portresistance_custom_name_stale_note(mock_client):
-    """portResistance=65535 + custom-named port → staleness note fires (core #183 fix).
+    """portResistance=65535 + custom-named port → staleness advisory fires (core #183 fix).
 
     Previously, custom names caused _is_port_empty to return False (assumed connected),
     so a removed device named "Humidifier" would silently show stale automation settings.
@@ -4600,7 +4600,7 @@ async def test_get_port_settings_portresistance_custom_name_stale_note(mock_clie
         result = await get_port_settings("C58ZA", 3)
     data = json.loads(result)
     assert "stale" in data["human_summary"]
-    assert "different port" in data["note"]
+    assert "different port" in data["advisory"]
     assert "Humidity automation" not in data["human_summary"]
     assert data["humidity_range_pct"] == {"min_pct": 60, "max_pct": 100}  # raw data preserved
 
@@ -7513,7 +7513,7 @@ async def test_get_port_settings_advance_secondary_call_fails_degrades(mock_clie
     assert data["mode"] == "ADVANCE"
     assert data["advance_automation"] is True
     assert data["automation_name"] is None
-    assert "note" in data
+    assert "advisory" in data
     assert data.get("automation_configured") is None
     assert data.get("automation_running") is None
 
@@ -8977,71 +8977,71 @@ MOCK_WRITE_DRY_SPEED = {
 
 
 async def test_set_port_on_empty_port_warning(mock_client):
-    """set_port_on: default-named zero-load port gets warning."""
+    """set_port_on: default-named zero-load port gets advisory."""
     mock_client.set_port_mode.return_value = MOCK_WRITE_DRY
     mock_client.get_devices.return_value = [_make_device_with_empty_port(7)]
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await set_port_on("C58ZA", 7)
     data = json.loads(result)
-    assert "warning" in data
-    assert "Port 7" in data["warning"]
-    assert "connected" in data["warning"]
+    assert "advisory" in data
+    assert "Port 7" in data["advisory"]
+    assert "connected" in data["advisory"]
 
 
 async def test_set_port_on_connected_port_no_warning(mock_client):
-    """set_port_on: custom-named port does NOT get warning."""
+    """set_port_on: custom-named port does NOT get advisory."""
     mock_client.set_port_mode.return_value = MOCK_WRITE_DRY
     mock_client.get_devices.return_value = [_make_device_with_connected_port(4)]
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await set_port_on("C58ZA", 4)
     data = json.loads(result)
-    assert "warning" not in data
+    assert "advisory" not in data
 
 
 async def test_set_port_off_empty_port_warning(mock_client):
-    """set_port_off: default-named zero-load port gets warning."""
+    """set_port_off: default-named zero-load port gets advisory."""
     mock_client.set_port_mode.return_value = MOCK_WRITE_DRY
     mock_client.get_devices.return_value = [_make_device_with_empty_port(7)]
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await set_port_off("C58ZA", 7)
     data = json.loads(result)
-    assert "warning" in data
-    assert "connected" in data["warning"]
+    assert "advisory" in data
+    assert "connected" in data["advisory"]
 
 
 async def test_set_port_off_connected_port_no_warning(mock_client):
-    """set_port_off: custom-named connected port has no warning."""
+    """set_port_off: custom-named connected port has no advisory."""
     mock_client.set_port_mode.return_value = MOCK_WRITE_DRY
     mock_client.get_devices.return_value = [_make_device_with_connected_port(4)]
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await set_port_off("C58ZA", 4)
     data = json.loads(result)
-    assert "warning" not in data
+    assert "advisory" not in data
 
 
 async def test_set_port_speed_empty_port_warning(mock_client):
-    """set_port_speed: default-named zero-load port gets warning."""
+    """set_port_speed: default-named zero-load port gets advisory."""
     mock_client.set_port_mode.return_value = MOCK_WRITE_DRY_SPEED
     mock_client.get_devices.return_value = [_make_device_with_empty_port(7)]
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await set_port_speed("C58ZA", 7, 5)
     data = json.loads(result)
-    assert "warning" in data
-    assert "connected" in data["warning"]
+    assert "advisory" in data
+    assert "connected" in data["advisory"]
 
 
 async def test_set_port_speed_connected_port_no_warning(mock_client):
-    """set_port_speed: custom-named port has no empty-port warning."""
+    """set_port_speed: custom-named port has no empty-port advisory."""
     mock_client.set_port_mode.return_value = MOCK_WRITE_DRY_SPEED
     mock_client.get_devices.return_value = [_make_device_with_connected_port(4)]
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await set_port_speed("C58ZA", 4, 5)
     data = json.loads(result)
-    assert "warning" not in data
+    assert "advisory" not in data
 
 
 async def test_set_port_speed_off_mode_and_empty_port_both_warned(mock_client):
-    """set_port_speed: both OFF-mode and empty-port warnings combine in single warning field."""
+    """set_port_speed: OFF-mode warning and empty-port advisory are separate keys."""
     off_mode_dry = {**MOCK_WRITE_DRY_SPEED, "prior_mode_type": 1}  # atType=1 = OFF
     mock_client.set_port_mode.return_value = off_mode_dry
     mock_client.get_devices.return_value = [_make_device_with_empty_port(7)]
@@ -9050,32 +9050,33 @@ async def test_set_port_speed_off_mode_and_empty_port_both_warned(mock_client):
     data = json.loads(result)
     assert "warning" in data
     assert "OFF mode" in data["warning"]
-    assert "connected" in data["warning"]
+    assert "advisory" in data
+    assert "connected" in data["advisory"]
 
 
 async def test_set_vpd_automation_empty_port_warning(mock_client):
-    """set_vpd_automation: empty port gets warning."""
+    """set_vpd_automation: empty port gets advisory."""
     mock_client.set_port_mode.return_value = MOCK_WRITE_DRY
     mock_client.get_devices.return_value = [_make_device_with_empty_port(7)]
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await set_vpd_automation("C58ZA", 7, 1.2)
     data = json.loads(result)
-    assert "warning" in data
-    assert "connected" in data["warning"]
+    assert "advisory" in data
+    assert "connected" in data["advisory"]
 
 
 async def test_set_vpd_automation_connected_port_no_warning(mock_client):
-    """set_vpd_automation: connected port has no warning."""
+    """set_vpd_automation: connected port has no advisory."""
     mock_client.set_port_mode.return_value = MOCK_WRITE_DRY
     mock_client.get_devices.return_value = [_make_device_with_connected_port(4)]
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await set_vpd_automation("C58ZA", 4, 1.2)
     data = json.loads(result)
-    assert "warning" not in data
+    assert "advisory" not in data
 
 
 async def test_set_temperature_automation_empty_port_warning(mock_client):
-    """set_temperature_automation: empty port gets warning."""
+    """set_temperature_automation: empty port gets advisory."""
     mock_client.set_port_mode.return_value = MOCK_WRITE_DRY
     mock_client.get_devices.return_value = [_make_device_with_empty_port(7, dev_type=11)]
     # devType=11 device uses °C (unit=1 in deviceInfo)
@@ -9085,12 +9086,12 @@ async def test_set_temperature_automation_empty_port_warning(mock_client):
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await set_temperature_automation("C58ZA", 7, 20.0, 28.0)
     data = json.loads(result)
-    assert "warning" in data
-    assert "connected" in data["warning"]
+    assert "advisory" in data
+    assert "connected" in data["advisory"]
 
 
 async def test_set_temperature_automation_connected_port_no_warning(mock_client):
-    """set_temperature_automation: connected port has no warning."""
+    """set_temperature_automation: connected port has no advisory."""
     mock_client.set_port_mode.return_value = MOCK_WRITE_DRY
     dev = _make_device_with_connected_port(4)
     dev["deviceInfo"]["unit"] = 1
@@ -9098,77 +9099,77 @@ async def test_set_temperature_automation_connected_port_no_warning(mock_client)
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await set_temperature_automation("C58ZA", 4, 20.0, 28.0)
     data = json.loads(result)
-    assert "warning" not in data
+    assert "advisory" not in data
 
 
 async def test_set_humidity_automation_empty_port_warning(mock_client):
-    """set_humidity_automation: empty port gets warning."""
+    """set_humidity_automation: empty port gets advisory."""
     mock_client.set_port_mode.return_value = MOCK_WRITE_DRY
     mock_client.get_devices.return_value = [_make_device_with_empty_port(7)]
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await set_humidity_automation("C58ZA", 7, 50.0, 70.0)
     data = json.loads(result)
-    assert "warning" in data
-    assert "connected" in data["warning"]
+    assert "advisory" in data
+    assert "connected" in data["advisory"]
 
 
 async def test_set_humidity_automation_connected_port_no_warning(mock_client):
-    """set_humidity_automation: connected port has no warning."""
+    """set_humidity_automation: connected port has no advisory."""
     mock_client.set_port_mode.return_value = MOCK_WRITE_DRY
     mock_client.get_devices.return_value = [_make_device_with_connected_port(4)]
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await set_humidity_automation("C58ZA", 4, 50.0, 70.0)
     data = json.loads(result)
-    assert "warning" not in data
+    assert "advisory" not in data
 
 
 async def test_set_port_mode_empty_port_warning(mock_client):
-    """set_port_mode: empty port gets warning."""
+    """set_port_mode: empty port gets advisory."""
     mock_client.set_port_mode.return_value = MOCK_WRITE_DRY
     mock_client.get_devices.return_value = [_make_device_with_empty_port(7)]
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await set_port_mode("C58ZA", 7, "ON")
     data = json.loads(result)
-    assert "warning" in data
-    assert "connected" in data["warning"]
+    assert "advisory" in data
+    assert "connected" in data["advisory"]
 
 
 async def test_set_port_mode_connected_port_no_warning(mock_client):
-    """set_port_mode: connected port has no warning."""
+    """set_port_mode: connected port has no advisory."""
     mock_client.set_port_mode.return_value = MOCK_WRITE_DRY
     mock_client.get_devices.return_value = [_make_device_with_connected_port(4)]
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await set_port_mode("C58ZA", 4, "ON")
     data = json.loads(result)
-    assert "warning" not in data
+    assert "advisory" not in data
 
 
-# ============ Read-tool empty-port note (issue #165) ============
+# ============ Read-tool empty-port advisory (issue #165) ============
 
 async def test_get_port_status_empty_port_note(mock_client):
-    """get_port_status: default-named zero-load port gets note."""
+    """get_port_status: default-named zero-load port gets advisory."""
     dev = _make_device_with_empty_port(7)
     mock_client.get_devices.return_value = [dev]
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_port_status("C58ZA", 7)
     data = json.loads(result)
-    assert "note" in data
-    assert "Port 7" in data["note"]
-    assert "connected" in data["note"]
+    assert "advisory" in data
+    assert "Port 7" in data["advisory"]
+    assert "connected" in data["advisory"]
 
 
 async def test_get_port_status_connected_port_no_note(mock_client):
-    """get_port_status: custom-named port has no note."""
+    """get_port_status: custom-named port has no advisory."""
     dev = _make_device_with_connected_port(4)
     mock_client.get_devices.return_value = [dev]
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_port_status("C58ZA", 4)
     data = json.loads(result)
-    assert "note" not in data
+    assert "advisory" not in data
 
 
 async def test_get_port_status_portresistance_65535_custom_name_note(mock_client):
-    """portResistance=65535 + custom-named port → note fires on get_port_status (#183)."""
+    """portResistance=65535 + custom-named port → advisory fires on get_port_status (#183)."""
     dev = copy.deepcopy(MOCK_DEVICE_LEGACY)
     dev["deviceInfo"]["ports"] = [
         {"port": 1, "portName": "Humidifier", "speak": 0, "portsLoad": 0,
@@ -9178,12 +9179,12 @@ async def test_get_port_status_portresistance_65535_custom_name_note(mock_client
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_port_status("C58ZA", 1)
     data = json.loads(result)
-    assert "note" in data
-    assert "connected" in data["note"]
+    assert "advisory" in data
+    assert "connected" in data["advisory"]
 
 
 async def test_get_port_settings_empty_port_note(mock_client):
-    """get_port_settings: default-named zero-load port gets note on non-ADVANCE path."""
+    """get_port_settings: default-named zero-load port gets advisory on non-ADVANCE path."""
     dev = _make_device_with_empty_port(7)
     mock_client.get_devices.return_value = [dev]
     mock_client.get_mode_settings.return_value = {
@@ -9192,14 +9193,14 @@ async def test_get_port_settings_empty_port_note(mock_client):
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_port_settings("C58ZA", 7)
     data = json.loads(result)
-    assert "note" in data
-    assert "different port" in data["note"]
+    assert "advisory" in data
+    assert "different port" in data["advisory"]
     assert "Port 7" in data["human_summary"]
     assert "connected" in data["human_summary"]
 
 
 async def test_get_port_settings_connected_port_no_note(mock_client):
-    """get_port_settings: custom-named port has no note."""
+    """get_port_settings: custom-named port has no advisory."""
     dev = _make_device_with_connected_port(4)
     mock_client.get_devices.return_value = [dev]
     mock_client.get_mode_settings.return_value = {
@@ -9208,11 +9209,11 @@ async def test_get_port_settings_connected_port_no_note(mock_client):
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_port_settings("C58ZA", 4)
     data = json.loads(result)
-    assert "note" not in data
+    assert "advisory" not in data
 
 
 async def test_get_port_settings_empty_port_note_advance_path(mock_client):
-    """get_port_settings: ADVANCE path also gets note when port is empty."""
+    """get_port_settings: ADVANCE path also gets advisory when port is empty."""
     dev = _make_device_with_empty_port(7)
     mock_client.get_devices.return_value = [dev]
     mock_client.get_mode_settings.return_value = {
@@ -9222,14 +9223,14 @@ async def test_get_port_settings_empty_port_note_advance_path(mock_client):
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await get_port_settings("C58ZA", 7)
     data = json.loads(result)
-    assert "note" in data
-    assert "connected" in data["note"]
+    assert "advisory" in data
+    assert "connected" in data["advisory"]
 
 
-# ============ devType=18 empty-port warning integration (issue #165) ============
+# ============ devType=18 empty-port advisory integration (issue #165) ============
 
 async def test_set_port_on_devtype18_default_name_warns(mock_client):
-    """devType=18 (Willie's Tent): default-named port triggers warning."""
+    """devType=18 (Willie's Tent): default-named port triggers advisory."""
     mock_client.set_port_mode.return_value = MOCK_WRITE_DRY
     dev = copy.deepcopy(MOCK_DEVICE_LEGACY)
     dev["devType"] = 18
@@ -9241,11 +9242,11 @@ async def test_set_port_on_devtype18_default_name_warns(mock_client):
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await set_port_on("C58ZA", 7)
     data = json.loads(result)
-    assert "warning" in data
+    assert "advisory" in data
 
 
 async def test_set_port_on_devtype18_custom_name_no_warning(mock_client):
-    """devType=18: custom-named port (e.g. Filter) does NOT trigger warning.
+    """devType=18: custom-named port (e.g. Filter) does NOT trigger advisory.
 
     Exercises the fallback path (portResistance absent): custom name → assumed connected.
     """
@@ -9260,11 +9261,11 @@ async def test_set_port_on_devtype18_custom_name_no_warning(mock_client):
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await set_port_on("C58ZA", 4)
     data = json.loads(result)
-    assert "warning" not in data
+    assert "advisory" not in data
 
 
 async def test_set_port_on_portresistance_65535_custom_name_warns(mock_client):
-    """portResistance=65535 + custom-named port → warning fires (core #183 — write-tool level)."""
+    """portResistance=65535 + custom-named port → advisory fires (core #183 — write-tool level)."""
     mock_client.set_port_mode.return_value = MOCK_WRITE_DRY
     dev = copy.deepcopy(MOCK_DEVICE_LEGACY)
     dev["deviceInfo"]["ports"] = [
@@ -9275,8 +9276,8 @@ async def test_set_port_on_portresistance_65535_custom_name_warns(mock_client):
     with patch("ac_infinity_mcp.server.aci_client", mock_client):
         result = await set_port_on("C58ZA", 4)
     data = json.loads(result)
-    assert "warning" in data
-    assert "connected" in data["warning"]
+    assert "advisory" in data
+    assert "connected" in data["advisory"]
 
 
 # ============ _is_port_not_powered helper (issue #178) ============

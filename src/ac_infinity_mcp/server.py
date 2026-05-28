@@ -1670,7 +1670,7 @@ async def get_port_status(device_id: str, port: int) -> str:
             result["plug_status"] = "not powered"
         if _is_port_empty(port_data, port, device):
             _port_label_s = _ps_raw_name
-            result["note"] = _empty_port_advisory(_port_label_s)
+            result["advisory"] = _empty_port_advisory(_port_label_s)
         result["human_summary"] = _ps_summary
         return json.dumps(result, indent=2)
 
@@ -1856,7 +1856,7 @@ async def get_port_settings(device_id: str, port: int) -> str:
                     " Ask me to list your automations for details."
                 )
             if degraded:
-                resp["note"] = (
+                resp["advisory"] = (
                     "Could not fetch automation details."
                     " Ask me to list your automations for details."
                 )
@@ -1874,10 +1874,10 @@ async def get_port_settings(device_id: str, port: int) -> str:
                     "Any settings shown may be stale from a previous configuration. "
                     "If you meant a different port, let me know which one."
                 )
-                if "note" in resp:
-                    resp["note"] = resp["note"] + " " + _adv_stale_note
+                if "advisory" in resp:
+                    resp["advisory"] = resp["advisory"] + " " + _adv_stale_note
                 else:
-                    resp["note"] = _adv_stale_note
+                    resp["advisory"] = _adv_stale_note
             return json.dumps(resp, indent=2)
 
         vpd_target = None
@@ -1986,7 +1986,7 @@ async def get_port_settings(device_id: str, port: int) -> str:
                 f"{_gps_port_label} doesn't appear to have anything connected. "
                 "Any settings shown may be stale from a previous configuration."
             )
-            non_adv_resp["note"] = "If you meant a different port, let me know which one."
+            non_adv_resp["advisory"] = "If you meant a different port, let me know which one."
         return json.dumps(non_adv_resp, indent=2)
 
     except ACInfinityAuthError as e:
@@ -2094,11 +2094,7 @@ async def set_port_speed(
             )
 
         if _is_port_empty(port_data, port, device):
-            empty_warn = _empty_port_advisory(port_label)
-            if "warning" in response:
-                response["warning"] = response["warning"] + " " + empty_warn
-            else:
-                response["warning"] = empty_warn
+            response["advisory"] = _empty_port_advisory(port_label)
 
         return json.dumps(response, indent=2)
 
@@ -2185,7 +2181,7 @@ async def set_port_on(
             response["payload"] = write_result["payload"]
 
         if _is_port_empty(port_data, port, device):
-            response["warning"] = _empty_port_advisory(port_label)
+            response["advisory"] = _empty_port_advisory(port_label)
 
         return json.dumps(response, indent=2)
 
@@ -2278,7 +2274,7 @@ async def set_port_off(
             response["payload"] = write_result["payload"]
 
         if _is_port_empty(port_data, port, device):
-            response["warning"] = _empty_port_advisory(port_label)
+            response["advisory"] = _empty_port_advisory(port_label)
 
         return json.dumps(response, indent=2)
 
@@ -2392,7 +2388,7 @@ async def set_vpd_automation(
         if write_result["dry_run"]:
             response["payload"] = write_result["payload"]
         if _is_port_empty(port_data, port, device):
-            response["warning"] = _empty_port_advisory(port_label)
+            response["advisory"] = _empty_port_advisory(port_label)
         return json.dumps(response, indent=2)
 
     except ACInfinityAuthError as e:
@@ -2540,7 +2536,7 @@ async def set_temperature_automation(
         if write_result["dry_run"]:
             response["payload"] = write_result["payload"]
         if _is_port_empty(port_data, port, device):
-            response["warning"] = _empty_port_advisory(port_label)
+            response["advisory"] = _empty_port_advisory(port_label)
         return json.dumps(response, indent=2)
 
     except ACInfinityAuthError as e:
@@ -2651,7 +2647,7 @@ async def set_humidity_automation(
         if write_result["dry_run"]:
             response["payload"] = write_result["payload"]
         if _is_port_empty(port_data, port, device):
-            response["warning"] = _empty_port_advisory(port_label)
+            response["advisory"] = _empty_port_advisory(port_label)
         return json.dumps(response, indent=2)
 
     except ACInfinityAuthError as e:
@@ -2816,7 +2812,7 @@ async def set_port_mode(
         if write_result["dry_run"]:
             response["payload"] = write_result["payload"]
         if _is_port_empty(port_data, port, device):
-            response["warning"] = _empty_port_advisory(port_label)
+            response["advisory"] = _empty_port_advisory(port_label)
         return json.dumps(response, indent=2)
 
     except ACInfinityAuthError as e:
