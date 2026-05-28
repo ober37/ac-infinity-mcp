@@ -3978,19 +3978,19 @@ how much moisture the air can hold at saturation. It drives transpiration — to
 stresses the plant, too low causes wet conditions and disease risk.
 
 **Step 1 — Check your current VPD**
-Call `get_device_reading(device_id)` and look at the `vpd` field (kPa).
-Or call `check_vpd_drift(device_id, stage)` to compare against a growth stage target.
+Ask me to check the current readings for your device and look at the `vpd` field (kPa).
+Or ask me to check VPD drift against your grow stage to compare against a growth stage target.
 
 **Step 2 — Diagnose HIGH VPD (above target range)**
 High VPD means the air is too dry. The plant is losing water faster than it can absorb it.
 Signs: wilting, leaf curl, slow growth.
 
 Fixes (choose one or both):
-- **Lower temperature** — call `set_temperature_automation(device_id, port, min_c, max_c)`
+- **Lower temperature** — ask me to set temperature automation on the port
   to drop the max threshold 1–2°C.
-- **Raise humidity** — call `set_humidity_automation(device_id, port, min_rh, max_rh)`
+- **Raise humidity** — ask me to set humidity automation on the port
   to increase the lower humidity bound.
-- **Use VPD mode** — call `set_vpd_automation(device_id, port, target_vpd)` to let the
+- **Use VPD mode** — ask me to enable VPD mode on the port to let the
   controller manage VPD directly. Start with the midpoint of your stage range.
 
 **Step 3 — Diagnose LOW VPD (below target range)**
@@ -3998,9 +3998,9 @@ Low VPD means the air is too humid. Stomata close, CO2 uptake drops, mould risk 
 Signs: soft growth, mould, bud rot risk in flower.
 
 Fixes (choose one or both):
-- **Raise temperature** — increase the min_c threshold in `set_temperature_automation`.
-- **Lower humidity** — decrease the max_rh in `set_humidity_automation`.
-- Increase airflow with `set_port_speed(device_id, port, speed)`.
+- **Raise temperature** — ask me to raise the temperature minimum threshold.
+- **Lower humidity** — ask me to lower the maximum humidity threshold.
+- Ask me to increase the fan speed on that port.
 
 **Target ranges by stage**
 | Stage | VPD (kPa) | Temp (°F) |
@@ -4011,8 +4011,8 @@ Fixes (choose one or both):
 | mid flower | 1.2–2.0 | 64–77 |
 | late flower | 1.2–1.8 | 64–75 |
 
-**One-click solution:** `apply_grow_stage_template(device_id, port, stage)` sets VPD,
-temperature, and humidity automation in one call. Use `dry_run=True` first to preview.
+**One-click solution:** Ask me to apply a grow stage template — I'll show you the planned
+settings before making any changes.
 """
 
 
@@ -4026,38 +4026,27 @@ Welcome! Here is how to connect your AC Infinity controller and get your environ
 dialled in with automation in four steps.
 
 **Step 1 — Discover your devices**
-```
-discover_devices()
-```
-Returns all controllers on your account. Copy the `device_id` (e.g. `"C58ZA"`) — you
-need it for every other tool.
+Ask me: "Show me my AC Infinity devices." I'll list every controller on your account with
+its device code, current readings, and port states. You'll need the device code
+(e.g. "C58ZA") for every other request.
 
 **Step 2 — Check current readings**
-```
-get_device_reading(device_id)
-```
-Shows live temperature, humidity, VPD, and the current speed of each port. Verify the
-numbers match your physical environment before making any changes.
+Ask me to show the current readings for your device. I'll report live temperature, humidity,
+VPD, and the current speed of each port. Verify the numbers match your physical environment
+before making any changes.
 
-**Step 3 — Apply a grow stage template (dry_run first)**
-```
-apply_grow_stage_template(device_id, port=1, stage="veg", dry_run=True)
-```
-Preview the automation settings — VPD target, temperature range, humidity range —
-without writing anything. When the numbers look right:
-```
-apply_grow_stage_template(device_id, port=1, stage="veg", dry_run=False)
-```
+**Step 3 — Apply a grow stage template**
+Ask me to apply a grow stage template to a port — for example, "Set Port 1 on Veg Tent to
+veg stage settings." I'll show you the exact VPD target, temperature range, and humidity
+range before writing anything. Confirm when you're ready and I'll apply it.
 Available stages: `clones`, `seedling`, `veg`, `early_flower`, `mid_flower`, `late_flower`.
 
 **Step 4 — Check your environment health score**
-```
-get_environment_health(device_id, stage="veg")
-```
-Returns a 0–100 score and letter grade (A–F) with a per-metric breakdown and the top
-recommendation. Run this after applying automation to confirm the environment is responding.
+Ask me for an environment health report on your device. I'll return a 0–100 score and
+letter grade (A–F) with a per-metric breakdown and the single most impactful recommendation.
+Run this after applying automation to confirm the environment is responding.
 
-**Tip:** Use `check_vpd_drift(device_id, stage)` any time you want a quick status check
+**Tip:** Ask me to check VPD drift any time you want a quick status check
 (OK / HIGH / LOW) without the full health report.
 
 **Tip:** If anything looks wrong, see the `vpd_troubleshooting` prompt for step-by-step
@@ -4073,7 +4062,7 @@ def environment_alert_interpretation() -> str:
 
 ### check_vpd_drift — Status Field
 
-`check_vpd_drift(device_id, stage)` returns a `status` field:
+Asking me to check VPD drift returns a `status` field:
 
 | Status | Meaning | Typical action |
 |---|---|---|
@@ -4089,7 +4078,7 @@ means above the upper bound; negative means below the lower bound.
 
 ### get_environment_health — Score and Grade
 
-`get_environment_health(device_id, stage)` returns a composite score:
+Asking me for an environment health report returns a composite score:
 
 | Grade | Score | Interpretation |
 |---|---|---|
@@ -4118,12 +4107,12 @@ below 60 on any metric is the most likely root cause of a low overall score.
 
 ### Quick Action Reference
 
-| Situation | Tool to call |
+| Situation | What to ask |
 |---|---|
-| VPD HIGH or LOW | `set_vpd_automation`, `set_temperature_automation`, `set_humidity_automation` |
-| Health score C or below | Follow `top_recommendation`; use `apply_grow_stage_template` |
-| Unsure where to start | `vpd_troubleshooting` prompt |
-| First time setup | `new_grower_setup` prompt |
+| VPD HIGH or LOW | Ask me to set VPD automation, temperature automation, or humidity automation |
+| Health score C or below | Follow `top_recommendation`; ask me to apply a grow stage template |
+| Unsure where to start | See the `vpd_troubleshooting` prompt |
+| First time setup | See the `new_grower_setup` prompt |
 """
 
 

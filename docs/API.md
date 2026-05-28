@@ -1667,16 +1667,16 @@ resolve the governing automation name (graceful degradation if the secondary cal
 | `device_id` | `str` | Device code from `discover_devices` (e.g. `"C58ZA"`) |
 | `port` | `int` | 1-based port number |
 
-**Response (port off, unpowered):**
+**Response (port off, unpowered — default-named port only):**
 ```json
 {
   "device_id": "C58ZA",
   "port": 1,
-  "port_name": "Humidifier",
+  "port_name": "Port 1",
   "power_level": 0,
   "mode": "OFF",
   "plug_status": "not powered",
-  "human_summary": "Humidifier (Port 1) is OFF (speed 0)."
+  "human_summary": "Port 1 is OFF (speed 0)."
 }
 ```
 
@@ -1732,7 +1732,7 @@ resolve the governing automation name (graceful degradation if the secondary cal
 
 **Field notes:**
 - `power_level` — actual current power level 0–10 from `speak` API field
-- `plug_status` *(conditional)* — `"not powered"` when BOTH `loadState == 0` AND `speak == 0`; field is **omitted entirely** when the port is running. Indicates the port is not drawing power — either off by design or nothing connected.
+- `plug_status` *(conditional)* — `"not powered"` when `loadState == 0` AND `speak == 0` AND the port still has its **default name** (`"Port N"`). Custom-named ports are excluded — a user-assigned name implies a device was intentionally connected, and `loadState=0` alone cannot distinguish "nothing plugged in" from "device is off" for on/off devices (see Quirk 26). Field is **omitted entirely** otherwise. Matches the identical signal in `get_device_reading`.
 - `mode` — one of: `OFF`, `ON`, `AUTO`, `VPD`, `TIMER_TO_ON`, `TIMER_TO_OFF`, `CYCLE`, `SCHEDULE`, `Automation`. `Automation` replaces the raw internal label `ADVANCE` and means the port is governed by a named Advance Automation program. The `Automation` value is returned any time `isOpenAutomation==1` in the device list (Quirk 17/19), regardless of whether the secondary automation-name lookup succeeds.
 - `automation_name` *(optional)* — present only when `mode == "Automation"` AND the governing automation was successfully identified via the secondary `getGroups` call. Absent when the secondary call fails, the port is not covered by any automation's port-group bitmask, or `devId` is absent from the device record.
 - `remain_time_seconds` *(conditional)* — countdown timer seconds remaining from `remainTime` API field; **omitted entirely** when no timer is active (value would be 0). Only present when a TIMER_TO_ON or TIMER_TO_OFF countdown is running.

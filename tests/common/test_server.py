@@ -5381,20 +5381,26 @@ def test_vpd_troubleshooting_prompt():
     assert isinstance(result, str)
     assert len(result) > 200
     assert "VPD" in result
-    assert "set_vpd_automation" in result
     assert "HIGH" in result
     assert "LOW" in result
-    assert "apply_grow_stage_template" in result
+    assert "VPD mode" in result
+    assert "grow stage template" in result
+    # must not contain Python call syntax or dry_run
+    assert "set_vpd_automation(" not in result
+    assert "dry_run" not in result
 
 
 def test_new_grower_setup_prompt():
     result = new_grower_setup()
     assert isinstance(result, str)
     assert len(result) > 200
-    assert "discover_devices" in result
-    assert "apply_grow_stage_template" in result
-    assert "get_environment_health" in result
-    assert "dry_run" in result
+    assert "AC Infinity devices" in result
+    assert "grow stage template" in result
+    assert "health" in result
+    # must not contain Python call syntax or dry_run
+    assert "discover_devices(" not in result
+    assert "apply_grow_stage_template(" not in result
+    assert "dry_run" not in result
 
 
 def test_environment_alert_interpretation_prompt():

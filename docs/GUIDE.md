@@ -248,7 +248,7 @@ Ask about the current operating state of any specific port — what mode it's in
 
 The automation name appears when it was successfully retrieved from your controller. If the name is absent, the port may still be under automation control — the controller just wasn't able to return the name at that moment.
 
-The "not powered" flag appears when a port is off and not drawing power.
+Note: this flag only appears on ports that still have their default name (like "Port 7" or "Port 8") when reading device-level data. If you've given a port a custom name, it will show as off regardless — a custom name implies a device was intentionally connected. Single-port reads apply the same rule.
 
 ### Full port settings
 
@@ -651,7 +651,7 @@ Verify your credentials are correct and check that your devices are paired in th
 AI+ controllers (like the 89 AI+) are read-only in v1.0. Preview mode works fully — you can see exactly what would happen. Live changes are not yet supported. Write support for AI+ is planned for v2.0.
 
 **HTTP security note**
-The AC Infinity API doesn't use HTTPS. Your credentials and sensor data travel over the network without encryption. Keep your config file private and avoid running on untrusted networks. This is an upstream limitation of the AC Infinity service.
+The AC Infinity API doesn't use HTTPS. Your credentials and sensor data travel over the network without encryption. Keep your config file private and avoid running on untrusted networks. This is an upstream limitation of the AC Infinity service. If you need to run on a less-trusted network, see DEPLOYMENT.md for HTTPS reverse-proxy options.
 
 **Port stuck in automation mode**
 See [Taking Back Manual Control](#taking-back-manual-control) in Section 9.
