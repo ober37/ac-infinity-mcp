@@ -71,7 +71,11 @@ def mock_client():
     (e.g. ``mock_client.parse_device_data.return_value["vpd"] = 0.5``) does not
     leak state to other tests. Without the copy, the shared module-level dict
     would carry the mutation across test boundaries (P2-F016).
+
+    Wires the mock into the server via setup() so tests don't need
+    ``with patch("ac_infinity_mcp.server.aci_client", mock_client):``.
     """
+    from ac_infinity_mcp.server import setup
     client = MagicMock()
     client.get_devices.return_value = [copy.deepcopy(MOCK_DEVICE_LEGACY)]
     client.parse_device_data.return_value = copy.deepcopy({
@@ -93,4 +97,6 @@ def mock_client():
     client.disable_advance_automation.return_value = {"code": 200}
     client.create_advance_automation.return_value = {"advId": 2302819}
     client.delete_advance_automation.return_value = {"code": 200}
-    return client
+    setup(client)
+    yield client
+    setup(MagicMock())
