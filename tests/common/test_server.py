@@ -5892,13 +5892,30 @@ async def test_list_advance_automations_device_not_found(mock_client):
     assert "error" in data
 
 
-async def test_list_advance_automations_api_error(mock_client):
+async def test_list_advance_automations_api_error(mock_client, caplog):
+    import logging
     mock_client.get_advance_automations.side_effect = ACInfinityAPIError("fail")
-    with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        result = await list_advance_automations("C58ZA")
+    with caplog.at_level(logging.ERROR, logger="ac_infinity_mcp.server"):
+        with patch("ac_infinity_mcp.server.aci_client", mock_client):
+            result = await list_advance_automations("C58ZA")
     data = json.loads(result)
     assert data["error"] == "API error"
     assert "detail" in data
+    assert any(r.levelname == "ERROR" and "api" in r.message.lower() for r in caplog.records)
+
+
+async def test_list_advance_automations_auth_error(mock_client, caplog):
+    import logging
+    mock_client.get_advance_automations.side_effect = ACInfinityAuthError("test")
+    with caplog.at_level(logging.WARNING, logger="ac_infinity_mcp.server"):
+        with patch("ac_infinity_mcp.server.aci_client", mock_client):
+            result = await list_advance_automations("C58ZA")
+    data = json.loads(result)
+    assert any(
+        r.levelname == "WARNING" and "auth" in r.message.lower()
+        for r in caplog.records
+    )
+    assert "Authentication failed — check AC_INFINITY_EMAIL" in data["error"]
 
 
 # ============ get_advance_automation ============
@@ -5946,6 +5963,31 @@ async def test_get_advance_automation_invalid_id(mock_client):
     assert "Invalid automation_id" in data["error"]
 
 
+async def test_get_advance_automation_api_error(mock_client, caplog):
+    import logging
+    mock_client.get_advance_automations.side_effect = ACInfinityAPIError("fail")
+    with caplog.at_level(logging.ERROR, logger="ac_infinity_mcp.server"):
+        with patch("ac_infinity_mcp.server.aci_client", mock_client):
+            result = await get_advance_automation("C58ZA", "1342758")
+    data = json.loads(result)
+    assert data["error"] == "API error"
+    assert any(r.levelname == "ERROR" and "api" in r.message.lower() for r in caplog.records)
+
+
+async def test_get_advance_automation_auth_error(mock_client, caplog):
+    import logging
+    mock_client.get_advance_automations.side_effect = ACInfinityAuthError("test")
+    with caplog.at_level(logging.WARNING, logger="ac_infinity_mcp.server"):
+        with patch("ac_infinity_mcp.server.aci_client", mock_client):
+            result = await get_advance_automation("C58ZA", "1342758")
+    data = json.loads(result)
+    assert any(
+        r.levelname == "WARNING" and "auth" in r.message.lower()
+        for r in caplog.records
+    )
+    assert "Authentication failed — check AC_INFINITY_EMAIL" in data["error"]
+
+
 # ============ enable_advance_automation ============
 
 async def test_enable_advance_automation_dry_run(mock_client):
@@ -5983,6 +6025,31 @@ async def test_enable_advance_automation_invalid_id(mock_client):
         result = await enable_advance_automation("C58ZA", "bad-id")
     data = json.loads(result)
     assert "error" in data
+
+
+async def test_enable_advance_automation_api_error(mock_client, caplog):
+    import logging
+    mock_client.get_advance_automations.side_effect = ACInfinityAPIError("fail")
+    with caplog.at_level(logging.ERROR, logger="ac_infinity_mcp.server"):
+        with patch("ac_infinity_mcp.server.aci_client", mock_client):
+            result = await enable_advance_automation("C58ZA", "1342758", dry_run=False)
+    data = json.loads(result)
+    assert data["error"] == "API error"
+    assert any(r.levelname == "ERROR" and "api" in r.message.lower() for r in caplog.records)
+
+
+async def test_enable_advance_automation_auth_error(mock_client, caplog):
+    import logging
+    mock_client.get_advance_automations.side_effect = ACInfinityAuthError("test")
+    with caplog.at_level(logging.WARNING, logger="ac_infinity_mcp.server"):
+        with patch("ac_infinity_mcp.server.aci_client", mock_client):
+            result = await enable_advance_automation("C58ZA", "1342758", dry_run=False)
+    data = json.loads(result)
+    assert any(
+        r.levelname == "WARNING" and "auth" in r.message.lower()
+        for r in caplog.records
+    )
+    assert "Authentication failed — check AC_INFINITY_EMAIL" in data["error"]
 
 
 # ============ disable_advance_automation ============
@@ -6110,6 +6177,31 @@ async def test_disable_advance_automation_invalid_id(mock_client):
     assert "error" in data
 
 
+async def test_disable_advance_automation_api_error(mock_client, caplog):
+    import logging
+    mock_client.get_advance_automations.side_effect = ACInfinityAPIError("fail")
+    with caplog.at_level(logging.ERROR, logger="ac_infinity_mcp.server"):
+        with patch("ac_infinity_mcp.server.aci_client", mock_client):
+            result = await disable_advance_automation("C58ZA", "1342758", dry_run=False)
+    data = json.loads(result)
+    assert data["error"] == "API error"
+    assert any(r.levelname == "ERROR" and "api" in r.message.lower() for r in caplog.records)
+
+
+async def test_disable_advance_automation_auth_error(mock_client, caplog):
+    import logging
+    mock_client.get_advance_automations.side_effect = ACInfinityAuthError("test")
+    with caplog.at_level(logging.WARNING, logger="ac_infinity_mcp.server"):
+        with patch("ac_infinity_mcp.server.aci_client", mock_client):
+            result = await disable_advance_automation("C58ZA", "1342758", dry_run=False)
+    data = json.loads(result)
+    assert any(
+        r.levelname == "WARNING" and "auth" in r.message.lower()
+        for r in caplog.records
+    )
+    assert "Authentication failed — check AC_INFINITY_EMAIL" in data["error"]
+
+
 @pytest.mark.asyncio
 async def test_disable_advance_automation_governed_ports_default_name_no_redundancy(mock_client):
     """disable_advance_automation governed_ports uses plain 'Port N' for default-named ports."""
@@ -6223,6 +6315,31 @@ async def test_delete_advance_automation_invalid_id(mock_client):
         result = await delete_advance_automation("C58ZA", "bad-id")
     data = json.loads(result)
     assert "error" in data
+
+
+async def test_delete_advance_automation_api_error(mock_client, caplog):
+    import logging
+    mock_client.get_advance_automations.side_effect = ACInfinityAPIError("fail")
+    with caplog.at_level(logging.ERROR, logger="ac_infinity_mcp.server"):
+        with patch("ac_infinity_mcp.server.aci_client", mock_client):
+            result = await delete_advance_automation("C58ZA", "1342758", dry_run=False)
+    data = json.loads(result)
+    assert data["error"] == "API error"
+    assert any(r.levelname == "ERROR" and "api" in r.message.lower() for r in caplog.records)
+
+
+async def test_delete_advance_automation_auth_error(mock_client, caplog):
+    import logging
+    mock_client.get_advance_automations.side_effect = ACInfinityAuthError("test")
+    with caplog.at_level(logging.WARNING, logger="ac_infinity_mcp.server"):
+        with patch("ac_infinity_mcp.server.aci_client", mock_client):
+            result = await delete_advance_automation("C58ZA", "1342758", dry_run=False)
+    data = json.loads(result)
+    assert any(
+        r.levelname == "WARNING" and "auth" in r.message.lower()
+        for r in caplog.records
+    )
+    assert "Authentication failed — check AC_INFINITY_EMAIL" in data["error"]
 
 
 # ============ break_out_of_automation ============
@@ -6381,6 +6498,37 @@ async def test_break_out_live_human_summary(mock_client):
     assert data.get("sent") is True
     assert "human_summary" in data
     assert "manually" in data["human_summary"]
+
+
+async def test_break_out_of_automation_api_error(mock_client, caplog):
+    import logging
+    # get_mode_settings must return ADVANCE mode (modeType=15) so the function
+    # proceeds to call get_advance_automations before hitting the outer error handler.
+    mock_client.get_mode_settings.return_value = {"modeType": 15}
+    mock_client.get_advance_automations.side_effect = ACInfinityAPIError("fail")
+    with caplog.at_level(logging.ERROR, logger="ac_infinity_mcp.server"):
+        with patch("ac_infinity_mcp.server.aci_client", mock_client):
+            result = await break_out_of_automation("C58ZA", port=1, dry_run=False)
+    data = json.loads(result)
+    assert data["error"] == "API error"
+    assert any(r.levelname == "ERROR" and "api" in r.message.lower() for r in caplog.records)
+
+
+async def test_break_out_of_automation_auth_error(mock_client, caplog):
+    import logging
+    # get_mode_settings must return ADVANCE mode (modeType=15) so the function
+    # proceeds to call get_advance_automations before hitting the outer error handler.
+    mock_client.get_mode_settings.return_value = {"modeType": 15}
+    mock_client.get_advance_automations.side_effect = ACInfinityAuthError("test")
+    with caplog.at_level(logging.WARNING, logger="ac_infinity_mcp.server"):
+        with patch("ac_infinity_mcp.server.aci_client", mock_client):
+            result = await break_out_of_automation("C58ZA", port=1, dry_run=False)
+    data = json.loads(result)
+    assert any(
+        r.levelname == "WARNING" and "auth" in r.message.lower()
+        for r in caplog.records
+    )
+    assert "Authentication failed — check AC_INFINITY_EMAIL" in data["error"]
 
 
 # ============ dry_run_never_writes parametrize ============
@@ -7994,16 +8142,19 @@ async def test_create_advance_automation_live_missing_adv_id(mock_client):
     assert data.get("automation_id") is None
 
 
-async def test_create_advance_automation_live_api_error(mock_client):
+async def test_create_advance_automation_live_api_error(mock_client, caplog):
     """ACInfinityAPIError → {"error": "API error", "detail": "see server logs"}."""
+    import logging
     mock_client.create_advance_automation.side_effect = ACInfinityAPIError("boom")
-    with patch("ac_infinity_mcp.server.aci_client", mock_client):
-        result = await create_advance_automation(
-            "C58ZA", "Test", on_speed=5, port=1, dry_run=False
-        )
+    with caplog.at_level(logging.ERROR, logger="ac_infinity_mcp.server"):
+        with patch("ac_infinity_mcp.server.aci_client", mock_client):
+            result = await create_advance_automation(
+                "C58ZA", "Test", on_speed=5, port=1, dry_run=False
+            )
     data = json.loads(result)
     assert data["error"] == "API error"
     assert data["detail"] == "see server logs"
+    assert any(r.levelname == "ERROR" and "api" in r.message.lower() for r in caplog.records)
 
 
 async def test_create_advance_automation_live_auth_error(mock_client):
@@ -8014,7 +8165,7 @@ async def test_create_advance_automation_live_auth_error(mock_client):
             "C58ZA", "Test", on_speed=5, port=1, dry_run=False
         )
     data = json.loads(result)
-    assert data["error"] == "Authentication failed"
+    assert "Authentication failed — check AC_INFINITY_EMAIL" in data["error"]
     assert data["detail"] == "see server logs"
 
 
