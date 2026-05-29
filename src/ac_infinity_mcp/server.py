@@ -3714,7 +3714,7 @@ async def break_out_of_automation(
 
         # Step 2: Identify co-governed ports from the governing automation's bitmasks.
         # Only ports in the same automation are locked — ports in other automations or
-        # empty/disconnected ports (portResistance==65535) are excluded.
+        # empty/disconnected ports (via _is_port_empty) are excluded.
         automation_port_nums: set[int] = set()
         for pg in automation.get("port_groups", []):
             bitmask = int(pg.get("grp_dev_type") or 0)

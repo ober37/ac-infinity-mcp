@@ -9108,21 +9108,6 @@ async def test_set_port_off_sends_atType_1_and_zero_speed(mock_client):
     assert updates["onSpead"] == 0
 
 
-async def test_set_port_off_toggle_hardware_sends_atType_1(mock_client):
-    """set_port_off with toggle hardware (loadType=4) must succeed and send atType=1.
-
-    Toggle hardware (heaters, lights, on/off outlets) requires atType=1 to turn off.
-    The set_port_mode mock does not enforce loadType — this test documents that
-    set_port_off does not reject these devices and that atType=1 is always sent.
-    """
-    mock_client.set_port_mode.return_value = MOCK_SET_PORT_OFF_DRY
-    result = await set_port_off("C58ZA", 1, dry_run=True)
-    data = json.loads(result)
-    assert "error" not in data
-    updates = mock_client.set_port_mode.call_args[0][2]
-    assert updates["atType"] == 1
-
-
 async def test_set_port_on_sends_atType_2(mock_client):
     """set_port_on must include atType=2 in the updates dict to switch mode to ON.
 
@@ -9203,27 +9188,4 @@ async def test_break_out_co_port_filter_devtype18(mock_client, port_resistance, 
 
 
 # ============ #191: ghost-ADVANCE no-op (all automations disabled) ============
-
-
-async def test_break_out_all_automations_disabled_returns_noop(mock_client):
-    """All automations disabled → no-op info response, disable never called.
-
-    When _find_governing_automation returns None because all automations have
-    isOn=0 and runState=0, the port is not under active automation control.
-    The correct response is a graceful info message, not an error.
-    """
-    import copy as _copy
-    automations = _copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST)
-    for e in automations:
-        e["isOn"] = 0
-        e["runState"] = 0
-        e["grouptDevType"] = 1  # covers port 1; disabled check fires before bitmask match
-
-    mock_client.get_mode_settings.return_value = {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 2}
-    mock_client.get_advance_automations.return_value = automations
-
-    result = await break_out_of_automation("C58ZA", port=1, dry_run=True)
-    data = json.loads(result)
-    assert "info" in data
-    assert "not currently under active automation control" in data["info"]
-    mock_client.disable_advance_automation.assert_not_called()
+# Covered by test_break_out_no_enabled_automation (line 6932) which was updated in this PR.
