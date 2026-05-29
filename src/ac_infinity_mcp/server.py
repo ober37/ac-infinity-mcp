@@ -3862,7 +3862,30 @@ async def break_out_of_automation(
                     "detail": "see server logs",
                 })
 
-            # Step B: Lock co-governed ports to their current speeds.
+            # Step B: Re-fetch device data so isOpenAutomation flags reflect the disable.
+            # The pre-write guard in _set_port_mode_inner reads isOpenAutomation from the
+            # device dict — using the pre-disable snapshot would still show isOpenAutomation=1
+            # and cause ACInfinityAdvanceConflictError on every co-port lock write.
+            _invalidate_device_cache()
+            device, err = await _get_device(device_id)
+            if err:
+                logger.error(
+                    "break_out_of_automation could not re-fetch device after disable "
+                    "(device=%s) — rollback: re-enabling automation", device_id,
+                )
+                try:
+                    await asyncio.to_thread(
+                        _client().enable_advance_automation, str(dev_id), adv_ids[0]
+                    )
+                except Exception:
+                    pass
+                return json.dumps({
+                    "error": "Automation disabled but re-fetch failed — automation re-enabled",
+                    "detail": "see server logs",
+                })
+            assert device is not None
+
+            # Step C: Lock co-governed ports to their current speeds.
             co_ports_locked: list[dict] = []
             failed_port = None
             for cp in co_ports:
