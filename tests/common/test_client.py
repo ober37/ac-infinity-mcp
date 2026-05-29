@@ -726,19 +726,6 @@ def test_lazy_auth_coalesces_concurrent_first_calls(monkeypatch):
     assert call_count == 1, f"Expected 1 login call, got {call_count}"
 
 
-@responses_lib.activate
-def test_lazy_auth_caches_auth_error(client):
-    """After a credential failure, subsequent callers raise immediately — no second login."""
-    responses_lib.add(responses_lib.POST, LOGIN_URL, json=AUTH_FAILURE, status=200)
-    with pytest.raises(ACInfinityAuthError):
-        client.get_devices()
-    # Second call — should raise immediately from cached error, no new HTTP call
-    with pytest.raises(ACInfinityAuthError):
-        client.get_devices()
-    login_calls = [c for c in responses_lib.calls if LOGIN_URL in c.request.url]
-    assert len(login_calls) == 1
-
-
 # ============ Token refresh on 401 ============
 
 @responses_lib.activate

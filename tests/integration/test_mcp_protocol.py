@@ -426,6 +426,8 @@ async def test_first_tool_call_returns_auth_error_on_bad_credentials() -> None:
         assert "error" in data
         assert "Authentication" in data["error"]
         assert data.get("detail") == "see server logs"
+        login_calls = [c for c in responses_lib.calls if "appUserLogin" in c.request.url]
+        assert len(login_calls) == 1, "lazy-auth preamble must have fired (not inner guard)"
     finally:
         srv._aci_client = None
         srv._invalidate_device_cache()
