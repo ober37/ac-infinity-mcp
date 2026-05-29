@@ -3943,6 +3943,31 @@ async def break_out_of_automation(
                     ],
                 })
 
+            # Step D: Lock the target port to its pre-release running speed so the
+            # grower sees no unexpected state change. The port is now under manual control;
+            # they can adjust from this baseline. Uses pre-disable ports_data for the speed
+            # (post-disable, the controller may already report speak=0 for the freed port).
+            target_port_data = next((p for p in ports_data if p.get("port") == port), None)
+            target_speed = target_port_data.get("speak", 0) if target_port_data else 0
+            if target_speed > 0:
+                target_lock_updates: dict = {"atType": 2, "onSpead": target_speed}
+            else:
+                target_lock_updates = {"atType": 1, "onSpead": 0}
+            try:
+                await asyncio.to_thread(
+                    _client().set_port_mode, device, port, target_lock_updates, False
+                )
+            except Exception as tgt_exc:
+                logger.warning(
+                    "break_out_of_automation: could not lock target port %s to speed %s "
+                    "(device=%s): %s", port, target_speed, device_id, tgt_exc,
+                )
+                # Non-fatal: automation is disabled and port is free from automation control
+                # even if the baseline speed lock failed.
+
+        _target_speed_note = (
+            f" at speed {target_speed}" if target_speed > 0 else " (currently off)"
+        )
         return json.dumps({
             "action": f"release {_target_label} from '{auto_name}' automation",
             "dry_run": False,
@@ -3951,9 +3976,10 @@ async def break_out_of_automation(
             "co_ports_locked": co_ports_locked,
             "target_port": port,
             "target_port_freed": True,
+            "target_port_locked_to_speed": target_speed,
             "human_summary": (
-                f"Released {_target_label} from the '{auto_name}' automation. "
-                "You can now control it manually."
+                f"Released {_target_label} from the '{auto_name}' automation"
+                f"{_target_speed_note}. You can now control it manually."
             ),
             "sent": True,
         }, indent=2)
