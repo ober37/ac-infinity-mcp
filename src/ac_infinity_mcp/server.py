@@ -3943,12 +3943,13 @@ async def break_out_of_automation(
                     ],
                 })
 
-            # Step D: Lock the target port to its pre-release running speed so the
-            # grower sees no unexpected state change. The port is now under manual control;
-            # they can adjust from this baseline. Uses pre-disable ports_data for the speed
-            # (post-disable, the controller may already report speak=0 for the freed port).
-            target_port_data = next((p for p in ports_data if p.get("port") == port), None)
-            target_speed = target_port_data.get("speak", 0) if target_port_data else 0
+            # Step D: Lock the target port to its automation-controlled speed so the grower
+            # sees no unexpected state change. The port is now under manual control; they
+            # can adjust from this baseline.
+            # Use the governing automation's on_speed (not ports_data["speak"]) because
+            # speak stores the last manually-set speed, not the automation-controlled speed.
+            governing_pg = _find_governing_port_group(automation, port)
+            target_speed = governing_pg.get("on_speed", 0) if governing_pg else 0
             if target_speed > 0:
                 target_lock_updates: dict = {"atType": 2, "onSpead": target_speed}
             else:
