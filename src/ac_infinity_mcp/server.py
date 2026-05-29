@@ -3862,10 +3862,13 @@ async def break_out_of_automation(
                     "detail": "see server logs",
                 })
 
-            # Step B: Re-fetch device data so isOpenAutomation flags reflect the disable.
-            # The pre-write guard in _set_port_mode_inner reads isOpenAutomation from the
-            # device dict — using the pre-disable snapshot would still show isOpenAutomation=1
-            # and cause ACInfinityAdvanceConflictError on every co-port lock write.
+            # Step B: Wait briefly for the AC Infinity cloud to propagate the disable, then
+            # re-fetch device data. Two guards in _set_port_mode_inner check ADVANCE state:
+            # Guard 1 reads isOpenAutomation from devInfoListAll (the device dict we pass);
+            # Guard 2 reads modeType/isOpenAutomation from getdevModeSettingList (a fresh API
+            # call inside the write layer). Both return stale state immediately after the
+            # disable — the sleep allows both to settle before the co-port lock writes.
+            await asyncio.sleep(2.0)
             _invalidate_device_cache()
             device, err = await _get_device(device_id)
             if err:
