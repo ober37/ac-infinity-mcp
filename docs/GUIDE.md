@@ -76,6 +76,25 @@ Edit your Claude Desktop config file to add your AC Infinity credentials as envi
 - `AC_INFINITY_EMAIL` — your AC Infinity account email address
 - `AC_INFINITY_PASSWORD` — your AC Infinity account password
 
+**Option A — uvx (no separate install step):**
+
+```json
+{
+  "mcpServers": {
+    "ac-infinity": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/ober37/ac-infinity-mcp.git", "ac-infinity-mcp"],
+      "env": {
+        "AC_INFINITY_EMAIL": "you@example.com",
+        "AC_INFINITY_PASSWORD": "yourpassword"
+      }
+    }
+  }
+}
+```
+
+**Option B — pip install (use the path from `which ac-infinity-mcp`):**
+
 ```json
 {
   "mcpServers": {
