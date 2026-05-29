@@ -6930,18 +6930,20 @@ async def test_disable_advance_automation_live_human_summary(mock_client):
 
 
 async def test_break_out_no_enabled_automation(mock_client):
-    """Port is ADVANCE but no enabled automations found → structured error."""
+    """All automations disabled → ghost-state no-op info response."""
     import copy
     automations = copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST)
     for e in automations:
         e["isOn"] = 0
         e["runState"] = 0
+        e["grouptDevType"] = 1  # covers port 1 so _find_governing_automation returns None
+                                # only because of the enabled check, not bitmask mismatch
     mock_client.get_mode_settings.return_value = {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 2}
     mock_client.get_advance_automations.return_value = automations
     result = await break_out_of_automation("C58ZA", port=1, dry_run=True)
     data = json.loads(result)
-    assert "error" in data
-    assert "No enabled or actively running" in data["error"]
+    assert "info" in data
+    assert "not currently under active automation control" in data["info"]
     mock_client.disable_advance_automation.assert_not_called()
 
 
@@ -9088,3 +9090,140 @@ async def test_device_cache_not_found_returns_error_json(mock_client):
     error_data = json.loads(error)
     assert "not found" in error_data["error"].lower()
     assert mock_client.get_devices.call_count == 1
+
+
+# ============ #232: set_port_off/on atType fix ============
+
+
+async def test_set_port_off_sends_atType_1_and_zero_speed(mock_client):
+    """set_port_off must include atType=1 in the updates dict to switch mode to OFF.
+
+    Sending only onSpead=0 without atType=1 leaves the port in ON mode (atType=2)
+    at speed zero — the device stays on. Explicit atType=1 forces the OFF state.
+    """
+    mock_client.set_port_mode.return_value = MOCK_SET_PORT_OFF_DRY
+    await set_port_off("C58ZA", 1, dry_run=True)
+    updates = mock_client.set_port_mode.call_args[0][2]
+    assert updates["atType"] == 1
+    assert updates["onSpead"] == 0
+
+
+async def test_set_port_off_toggle_hardware_sends_atType_1(mock_client):
+    """set_port_off with toggle hardware (loadType=4) must succeed and send atType=1.
+
+    Toggle hardware (heaters, lights, on/off outlets) requires atType=1 to turn off.
+    The set_port_mode mock does not enforce loadType — this test documents that
+    set_port_off does not reject these devices and that atType=1 is always sent.
+    """
+    mock_client.set_port_mode.return_value = MOCK_SET_PORT_OFF_DRY
+    result = await set_port_off("C58ZA", 1, dry_run=True)
+    data = json.loads(result)
+    assert "error" not in data
+    updates = mock_client.set_port_mode.call_args[0][2]
+    assert updates["atType"] == 1
+
+
+async def test_set_port_on_sends_atType_2(mock_client):
+    """set_port_on must include atType=2 in the updates dict to switch mode to ON.
+
+    After a set_port_off call, current_settings has atType=1. A subsequent set_port_on
+    with only onSpead=10 would merge atType=1 and send the device ON at speed zero.
+    Explicit atType=2 closes this gap.
+    """
+    mock_client.set_port_mode.return_value = MOCK_SET_PORT_ON_DRY
+    await set_port_on("C58ZA", 1, dry_run=True)
+    updates = mock_client.set_port_mode.call_args[0][2]
+    assert updates["atType"] == 2
+    assert updates["onSpead"] == 10
+
+
+# ============ #190: break_out co-port filter devType=18 ============
+
+
+@pytest.mark.parametrize("port_resistance,expect_locked", [
+    (None, False),    # portResistance absent (devType=18 old firmware) → excluded
+    (7500, True),     # portResistance present and non-65535 → included
+])
+async def test_break_out_co_port_filter_devtype18(mock_client, port_resistance, expect_locked):
+    """Co-port filter must use _is_port_empty, not portResistance==65535.
+
+    devType=18 (Willie's Tent) omits portResistance on disconnected ports.
+    The old portResistance==65535 check passes None==65535 as False, so empty
+    ports were not filtered and received lock writes the API rejects.
+    _is_port_empty handles the absent-portResistance case via the fallback heuristic
+    (default port name + portsLoad==0).
+    """
+    import copy as _copy
+    device = _copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device["devType"] = 18
+
+    # Port 5 is the target port (covered by grouptDevType=16 = bit 4 = port 5).
+    # Port 1 is a co-port (covered by grouptDevType=17 = bits 0+4 = ports 1+5).
+    port_1_data: dict = {
+        "port": 1,
+        "portName": "Port 1",   # default name → fallback heuristic applies
+        "speak": 0,
+        "portsLoad": 0,
+        "loadState": 0,
+        "curMode": 1,
+        "remainTime": 0,
+    }
+    if port_resistance is not None:
+        port_1_data["portResistance"] = port_resistance
+
+    port_5_data: dict = {
+        "port": 5,
+        "portName": "Heater",
+        "speak": 3,
+        "portsLoad": 1,
+        "loadState": 1,
+        "curMode": 2,
+        "remainTime": 0,
+        "portResistance": 15800,
+    }
+    device["deviceInfo"]["ports"] = [port_1_data, port_5_data]
+    mock_client.get_devices.return_value = [device]
+
+    # Automation covers ports 1 and 5 (bitmask 1+16=17)
+    auto = _copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST[0])
+    auto["grouptDevType"] = 17
+    mock_client.get_advance_automations.return_value = [auto]
+    mock_client.get_mode_settings.return_value = {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 3}
+
+    result = await break_out_of_automation("C58ZA", port=5, dry_run=True)
+    data = json.loads(result)
+    assert "error" not in data, f"Unexpected error: {data.get('error')}"
+
+    co_ports = data.get("co_ports_to_lock", [])
+    port_1_locked = any(cp.get("port") == 1 for cp in co_ports)
+    assert port_1_locked is expect_locked, (
+        f"port_resistance={port_resistance!r}: expected port 1 locked={expect_locked}, "
+        f"got co_ports_to_lock={co_ports}"
+    )
+
+
+# ============ #191: ghost-ADVANCE no-op (all automations disabled) ============
+
+
+async def test_break_out_all_automations_disabled_returns_noop(mock_client):
+    """All automations disabled → no-op info response, disable never called.
+
+    When _find_governing_automation returns None because all automations have
+    isOn=0 and runState=0, the port is not under active automation control.
+    The correct response is a graceful info message, not an error.
+    """
+    import copy as _copy
+    automations = _copy.deepcopy(MOCK_ADVANCE_AUTOMATIONS_LIST)
+    for e in automations:
+        e["isOn"] = 0
+        e["runState"] = 0
+        e["grouptDevType"] = 1  # covers port 1; disabled check fires before bitmask match
+
+    mock_client.get_mode_settings.return_value = {"modeType": _ADVANCE_MODE_TYPE, "onSpead": 2}
+    mock_client.get_advance_automations.return_value = automations
+
+    result = await break_out_of_automation("C58ZA", port=1, dry_run=True)
+    data = json.loads(result)
+    assert "info" in data
+    assert "not currently under active automation control" in data["info"]
+    mock_client.disable_advance_automation.assert_not_called()

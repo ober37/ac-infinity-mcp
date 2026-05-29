@@ -1987,7 +1987,7 @@ async def set_port_on(
         assert device is not None
 
         write_result = await asyncio.to_thread(
-            _client().set_port_mode, device, port, {"onSpead": 10}, dry_run
+            _client().set_port_mode, device, port, {"atType": 2, "onSpead": 10}, dry_run
         )
 
         if write_result.get("ai_plus_write_unsupported"):
@@ -2043,16 +2043,11 @@ async def set_port_off(
     port: int,
     dry_run: bool = True,
 ) -> str:
-    """Zero a port's speed (onSpead=0).
+    """Sets mode to OFF (atType=1) and zeros speed (onSpead=0).
 
-    Sends onSpead=0 only — the port's active automation mode (atType) is left
-    unchanged. If the port is in AUTO or VPD mode, the controller's automation
-    logic may re-engage the port when its trigger condition is next met. To
-    keep the port off until manually re-enabled, switch the mode to OFF first
-    via ``set_port_mode(device_id, port, mode="OFF")``.
-
-    Uses read-before-write. Defaults to dry_run=True — set dry_run=False to
-    write to the device.
+    Works for all device types including toggle hardware (heaters, lights,
+    on/off outlets). Uses read-before-write. Defaults to dry_run=True — set
+    dry_run=False to write to the device.
 
     Args:
         device_id: Device code from discover_devices (e.g. "C58ZA").
@@ -2080,7 +2075,7 @@ async def set_port_off(
         assert device is not None
 
         write_result = await asyncio.to_thread(
-            _client().set_port_mode, device, port, {"onSpead": 0}, dry_run
+            _client().set_port_mode, device, port, {"onSpead": 0, "atType": 1}, dry_run
         )
 
         if write_result.get("ai_plus_write_unsupported"):
@@ -3700,18 +3695,9 @@ async def break_out_of_automation(
         automation = _find_governing_automation(grouped, port)
 
         if automation is None:
-            if grouped:
-                has_active = any(g.get("enabled") or g.get("run_state") for g in grouped)
-                if not has_active:
-                    # All automations disabled (Quirk 19) — port stuck in disabled automation.
-                    return json.dumps({
-                        "error": (
-                            "Could not identify governing automation. "
-                            "No enabled or actively running automations found on this device."
-                        ),
-                    })
-            # Ghost state: either no automations at all, or active automations exist but none
-            # covers this port — modeType=15 flag is stale from a deleted automation.
+            # Ghost state: no active automation covers this port — modeType=15 flag is stale
+            # from a deleted or fully-disabled automation. Either way the port is not under
+            # active automation control, so the correct response is a no-op info message.
             _port_display = (
                 f"{port_name} (Port {port})" if port_name != f"Port {port}" else port_name
             )
@@ -3742,7 +3728,7 @@ async def break_out_of_automation(
             p_num = p_data.get("port")
             if p_num not in automation_port_nums:
                 continue
-            if p_data.get("portResistance") == 65535:  # empty/disconnected — skip
+            if _is_port_empty(p_data, p_num, device):  # empty/disconnected — skip
                 continue
             raw_p_name = p_data.get("portName")
             p_name = _sanitize_api_string(raw_p_name, 64) if raw_p_name else f"Port {p_num}"
@@ -3868,7 +3854,7 @@ async def break_out_of_automation(
             except Exception as disable_exc:
                 logger.error(
                     "break_out_of_automation failed at disable step "
-                    "(device=%s auto=%s): %s", device_id, auto_name, disable_exc,
+                    "(device=%s): %s", device_id, disable_exc,
                 )
                 return json.dumps({
                     "error": "Failed to disable automation",
