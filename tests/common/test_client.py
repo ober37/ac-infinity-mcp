@@ -673,6 +673,72 @@ def test_authenticate_generic_exception_returns_false(client):
     assert result is False
 
 
+# ============ Lazy auth ============
+
+@responses_lib.activate
+def test_lazy_auth_coalesces_concurrent_first_calls(monkeypatch):
+    """N concurrent callers with token=None trigger exactly 1 login attempt."""
+    import threading
+    call_count = 0
+    original_inner = ACInfinityClient._authenticate_inner
+
+    def counting_inner(self):
+        nonlocal call_count
+        call_count += 1
+        original_inner(self)
+
+    monkeypatch.setattr(ACInfinityClient, "_authenticate_inner", counting_inner)
+    responses_lib.add(responses_lib.POST, LOGIN_URL, json=AUTH_SUCCESS, status=200)
+    responses_lib.add(
+        responses_lib.POST, DEVICES_URL, json=DEVICES_SUCCESS, status=200, match_querystring=False
+    )
+    responses_lib.add(
+        responses_lib.POST, DEVICES_URL, json=DEVICES_SUCCESS, status=200, match_querystring=False
+    )
+    responses_lib.add(
+        responses_lib.POST, DEVICES_URL, json=DEVICES_SUCCESS, status=200, match_querystring=False
+    )
+    responses_lib.add(
+        responses_lib.POST, DEVICES_URL, json=DEVICES_SUCCESS, status=200, match_querystring=False
+    )
+    responses_lib.add(
+        responses_lib.POST, DEVICES_URL, json=DEVICES_SUCCESS, status=200, match_querystring=False
+    )
+
+    c = ACInfinityClient("test@example.com", "password123")
+    barrier = threading.Barrier(5)
+    errors = []
+
+    def call_get_devices():
+        try:
+            barrier.wait()
+            c.get_devices()
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=call_get_devices) for _ in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == [], f"Unexpected errors: {errors}"
+    assert call_count == 1, f"Expected 1 login call, got {call_count}"
+
+
+@responses_lib.activate
+def test_lazy_auth_caches_auth_error(client):
+    """After a credential failure, subsequent callers raise immediately — no second login."""
+    responses_lib.add(responses_lib.POST, LOGIN_URL, json=AUTH_FAILURE, status=200)
+    with pytest.raises(ACInfinityAuthError):
+        client.get_devices()
+    # Second call — should raise immediately from cached error, no new HTTP call
+    with pytest.raises(ACInfinityAuthError):
+        client.get_devices()
+    login_calls = [c for c in responses_lib.calls if LOGIN_URL in c.request.url]
+    assert len(login_calls) == 1
+
+
 # ============ Token refresh on 401 ============
 
 @responses_lib.activate
@@ -716,14 +782,13 @@ def test_get_devices_second_401_after_refresh_raises(authed_client):
 
 
 @responses_lib.activate
-def test_get_devices_no_refresh_when_unauthenticated(client):
-    """If client was never authenticated, AuthError raises without attempting refresh."""
-    # client fixture has no token set
+def test_get_devices_lazy_auth_fires_on_first_call(client):
+    """First call with no token triggers a login attempt (lazy auth preamble)."""
+    responses_lib.add(responses_lib.POST, LOGIN_URL, json=AUTH_FAILURE, status=200)
     with pytest.raises(ACInfinityAuthError):
         client.get_devices()
-    # No login call should have been made
     login_calls = [c for c in responses_lib.calls if LOGIN_URL in c.request.url]
-    assert len(login_calls) == 0
+    assert len(login_calls) == 1
 
 
 @responses_lib.activate
@@ -908,7 +973,9 @@ def test_get_devices_empty(authed_client):
     assert result == []
 
 
+@responses_lib.activate
 def test_get_devices_not_authenticated(client):
+    responses_lib.add(responses_lib.POST, LOGIN_URL, json=AUTH_FAILURE, status=200)
     with pytest.raises(ACInfinityAuthError):
         client.get_devices()
 
@@ -951,13 +1018,18 @@ def test_get_devices_code_500_raises_api_error(authed_client):
         authed_client.get_devices()
 
 
-def test_get_devices_auth_error_makes_no_http_call(client):
-    """Token=None check happens before any HTTP call."""
-    import responses as _r
-    with _r.RequestsMock() as rsps:
-        with pytest.raises(ACInfinityAuthError):
-            client.get_devices()
-        assert len(rsps.calls) == 0
+@responses_lib.activate
+def test_get_devices_auth_error_cached_after_first_failure(client):
+    """After the first auth failure, subsequent calls raise immediately — no second login."""
+    responses_lib.add(responses_lib.POST, LOGIN_URL, json=AUTH_FAILURE, status=200)
+    # First call triggers preamble — 1 login attempt
+    with pytest.raises(ACInfinityAuthError):
+        client.get_devices()
+    # Second call uses cached _auth_error — no additional login call
+    with pytest.raises(ACInfinityAuthError):
+        client.get_devices()
+    login_calls = [c for c in responses_lib.calls if LOGIN_URL in c.request.url]
+    assert len(login_calls) == 1
 
 
 # ============ get_historical_data ============
@@ -1054,7 +1126,9 @@ def test_get_historical_data_empty(authed_client):
     assert result == []
 
 
+@responses_lib.activate
 def test_get_historical_data_not_authenticated(client):
+    responses_lib.add(responses_lib.POST, LOGIN_URL, json=AUTH_FAILURE, status=200)
     with pytest.raises(ACInfinityAuthError):
         client.get_historical_data(
             dev_id="12345", start_timestamp=1714000000, end_timestamp=1714086400
@@ -1127,7 +1201,9 @@ def test_get_mode_settings_returns_dict_not_list(authed_client):
     assert isinstance(result, dict)
 
 
+@responses_lib.activate
 def test_get_mode_settings_no_token_raises_auth_error(client):
+    responses_lib.add(responses_lib.POST, LOGIN_URL, json=AUTH_FAILURE, status=200)
     with pytest.raises(ACInfinityAuthError):
         client.get_mode_settings("12345", port=1)
 
@@ -1234,7 +1310,9 @@ def test_set_port_mode_dry_run_ai_plus(authed_client):
     assert result["payload"]["onSpead"] == 3
 
 
+@responses_lib.activate
 def test_set_port_mode_no_token_raises_auth_error(client):
+    responses_lib.add(responses_lib.POST, LOGIN_URL, json=AUTH_FAILURE, status=200)
     with pytest.raises(ACInfinityAuthError):
         client.set_port_mode(LEGACY_DEVICE_DATA, port=1, updates={}, dry_run=True)
 

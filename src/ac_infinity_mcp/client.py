@@ -185,6 +185,7 @@ class ACInfinityClient:
         self._last_write_time: float = 0.0
         self._write_lock = threading.Lock()
         self._auth_lock = threading.Lock()
+        self._auth_error: ACInfinityAuthError | None = None
 
     def _raise_for_api_code(self, code: int | None, error_msg: str, context: str) -> None:
         """Map API response code to the appropriate exception."""
@@ -193,11 +194,26 @@ class ACInfinityClient:
         raise ACInfinityAPIError(f"{context} API error {code}: {error_msg}")
 
     def _call_with_token_refresh(self, fn, *args, **kwargs):
-        """Call fn(); on a 401 ACInfinityAuthError, re-authenticate once and retry.
+        """Lazy-auth preamble + 401-refresh.
 
-        Long-running servers can outlive the API's token TTL. Rather than failing
-        the call (forcing a server restart), refresh the token transparently.
+        On the first tool call (token is None), authenticate before calling fn().
+        Subsequent calls skip the preamble. On a 401 mid-session, re-authenticate
+        once and retry transparently.
+
+        _auth_error is set on the first credential failure so that concurrent
+        callers and subsequent callers raise immediately without hitting the
+        login endpoint again.
         """
+        if not self.token:
+            with self._auth_lock:
+                if self._auth_error is not None:
+                    raise self._auth_error  # cached failure — don't retry
+                if not self.token:
+                    try:
+                        self._authenticate_inner()
+                    except ACInfinityAuthError as exc:
+                        self._auth_error = exc
+                        raise
         token_at_start = self.token
         try:
             return fn(*args, **kwargs)

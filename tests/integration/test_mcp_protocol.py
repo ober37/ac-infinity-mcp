@@ -10,9 +10,12 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+import responses as responses_lib
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from ac_infinity_mcp import server as srv
+from ac_infinity_mcp.client import ACInfinityClient
+from ac_infinity_mcp.schema import ACInfinityAuthError
 from ac_infinity_mcp.server import mcp_server
 
 # ---------------------------------------------------------------------------
@@ -115,23 +118,6 @@ _CLEAN_ENV: dict[str, str] = {
     for k, v in os.environ.items()
     if k not in ("AC_INFINITY_EMAIL", "AC_INFINITY_PASSWORD")
 }
-
-# Cycle 2 P2-C2-F001: the earlier one-liner form chained a compound `with`
-# statement after semicolons, which Python parses as SyntaxError before
-# srv.main() runs. The subprocess used to exit 1 from SyntaxError (matching
-# the rc==1 assertion) and the "authenticate" word appeared in the parser's
-# echo of the source line — so the test passed for the wrong reason.
-# Use a proper multi-line script via subprocess input or `exec()` so the
-# `with` block is valid Python and srv.main() actually executes.
-_BAD_CREDS_SCRIPT = (
-    "exec(\"\"\"\n"
-    "from unittest.mock import patch\n"
-    "import ac_infinity_mcp.server as srv\n"
-    "with patch('ac_infinity_mcp.server.ACInfinityClient') as M:\n"
-    "    M.return_value.authenticate.return_value = False\n"
-    "    srv.main()\n"
-    "\"\"\")"
-)
 
 
 # ---------------------------------------------------------------------------
@@ -422,38 +408,83 @@ def test_main_exits_1_missing_password() -> None:
     assert "Missing" in result.stderr or "AC_INFINITY" in result.stderr
 
 
-def test_main_exits_1_bad_credentials() -> None:
-    env = {**_CLEAN_ENV, "AC_INFINITY_EMAIL": "x@example.com", "AC_INFINITY_PASSWORD": "badpass"}
-    result = subprocess.run(
-        [sys.executable, "-c", _BAD_CREDS_SCRIPT],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=10,
+@responses_lib.activate
+async def test_first_tool_call_returns_auth_error_on_bad_credentials() -> None:
+    """Bad credentials surface as an auth-error tool response, not a process crash."""
+    responses_lib.add(
+        responses_lib.POST,
+        "https://www.acinfinityserver.com/api/user/appUserLogin",
+        json={"code": 400, "msg": "Email or password is wrong"},
+        status=200,
     )
-    # Defensive checks added during Cycle 2 (P2-C2-F001): pin that we exited
-    # via the auth-failure path, not via a SyntaxError that happened to also
-    # exit 1. The auth-failure log line in main() contains "Failed to
-    # authenticate"; SyntaxError exits would not.
-    assert result.returncode == 1
-    assert "SyntaxError" not in result.stderr, (
-        f"_BAD_CREDS_SCRIPT failed to parse — fix the script:\n{result.stderr}"
-    )
-    assert "Failed to authenticate" in result.stderr
+    real_client = ACInfinityClient("bad@example.com", "wrongpass")
+    srv.setup(real_client)
+    try:
+        async with create_connected_server_and_client_session(srv.mcp_server) as session:
+            result = await session.call_tool("discover_devices", {})
+        data = json.loads(result.content[0].text)
+        assert "error" in data
+        assert "Authentication" in data["error"]
+        assert data.get("detail") == "see server logs"
+    finally:
+        srv._aci_client = None
+        srv._invalidate_device_cache()
 
 
-def test_main_stderr_contains_no_credentials() -> None:
+def test_main_starts_with_placeholder_credentials() -> None:
+    """Server responds to MCP initialize with placeholder creds — the Glama build check."""
     env = {
         **_CLEAN_ENV,
-        "AC_INFINITY_EMAIL": "secret@example.com",
-        "AC_INFINITY_PASSWORD": "supersecret999",
+        "AC_INFINITY_EMAIL": "test@test.com",
+        "AC_INFINITY_PASSWORD": "placeholder",
     }
+    initialize_msg = (
+        '{"jsonrpc":"2.0","id":1,"method":"initialize",'
+        '"params":{"protocolVersion":"2024-11-05","capabilities":{},'
+        '"clientInfo":{"name":"test","version":"0.1"}}}\n'
+    )
     result = subprocess.run(
-        [sys.executable, "-c", _BAD_CREDS_SCRIPT],
+        [sys.executable, "-m", "ac_infinity_mcp.server"],
         env=env,
+        input=initialize_msg,
         capture_output=True,
         text=True,
         timeout=10,
     )
-    assert "secret@example.com" not in result.stderr
-    assert "supersecret999" not in result.stderr
+    assert result.returncode == 0
+    assert '"result"' in result.stdout
+    assert '"protocolVersion"' in result.stdout
+
+
+@responses_lib.activate
+def test_main_stderr_contains_no_credentials(caplog: pytest.LogCaptureFixture) -> None:
+    """Credentials must never appear in log output even when auth fails."""
+    responses_lib.add(
+        responses_lib.POST,
+        "https://www.acinfinityserver.com/api/user/appUserLogin",
+        json={"code": 400, "msg": "Email or password is wrong"},
+        status=200,
+    )
+    import logging
+    real_client = ACInfinityClient("secret@example.com", "supersecret999")
+    with caplog.at_level(logging.DEBUG):
+        # Trigger auth failure by calling the client directly
+        with pytest.raises(ACInfinityAuthError):
+            real_client.get_devices()
+    assert "secret@example.com" not in caplog.text
+    assert "supersecret999" not in caplog.text
+
+
+async def test_main_no_api_calls_on_introspection() -> None:
+    """MCP tools/list must not trigger any AC Infinity API calls."""
+    real_client = ACInfinityClient("test@test.com", "placeholder")
+    srv.setup(real_client)
+    try:
+        with patch.object(real_client, "_authenticate_inner") as mock_auth:
+            async with create_connected_server_and_client_session(srv.mcp_server) as session:
+                result = await session.list_tools()
+            assert len(result.tools) == 25
+            mock_auth.assert_not_called()
+    finally:
+        srv._aci_client = None
+        srv._invalidate_device_cache()

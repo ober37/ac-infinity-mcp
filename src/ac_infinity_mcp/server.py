@@ -4171,9 +4171,6 @@ def main() -> None:  # pragma: no cover
         sys.exit(1)
 
     setup(ACInfinityClient(email, password))
-    if not _client().authenticate():
-        logger.error("Failed to authenticate with AC Infinity")
-        sys.exit(1)
 
     async def _run() -> None:
         logger.info("AC Infinity MCP Server ready (stdio)")
