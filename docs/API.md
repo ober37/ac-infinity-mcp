@@ -4,7 +4,7 @@ New to the server? The [Grower's Guide](GUIDE.md) walks through every tool with 
 
 ## Overview
 
-- **Base URL:** `http://www.acinfinityserver.com/api` (HTTP only — see Security Note)
+- **Base URL:** `https://www.acinfinityserver.com/api` (HTTPS — TLSv1.3, DigiCert certificate)
 - **Auth:** form-POST to `/user/appUserLogin`; session token returned in `data.appId` field
 - **All requests:** `Content-Type: application/x-www-form-urlencoded; charset=utf-8`
 - **All responses:** `{"code": 200, "msg": "...", "data": ...}`
@@ -12,9 +12,8 @@ New to the server? The [Grower's Guide](GUIDE.md) walks through every tool with 
 
 ## Security Note
 
-The AC Infinity cloud API uses HTTP only (no TLS). This is a known upstream limitation
-and is an accepted risk for local/trusted network deployments. See `docs/DEPLOYMENT.md`
-for HTTPS reverse-proxy setup options.
+The AC Infinity cloud API supports HTTPS (TLSv1.3) with a valid DigiCert certificate
+(verified 2026-05-29). Credentials and session tokens are encrypted in transit.
 
 Additionally, device list responses include the authenticated user's email address in the
 `appEmail` field. Never log raw device API responses at any log level.
@@ -611,12 +610,12 @@ integer inside `deviceInfo`. Both represent the same value.
 
 ---
 
-### Quirk 8 — HTTP only (no TLS)
+### Quirk 8 — HTTPS confirmed (TLSv1.3)
 
-The base URL `http://www.acinfinityserver.com/api` uses plain HTTP. The upstream AC
-Infinity app does not support HTTPS. Session tokens and sensor data are transmitted
-unencrypted. This is an accepted risk for local/trusted network use. See
-`docs/DEPLOYMENT.md` for HTTPS reverse-proxy options if exposure is a concern.
+The base URL `https://www.acinfinityserver.com/api` supports HTTPS. TLS handshake
+verified 2026-05-29: TLSv1.3, DigiCert Encryption Everywhere DV TLS CA certificate,
+`SSL certificate verify ok`, valid until 2026-11-18. Credentials and session tokens
+are encrypted in transit.
 
 ---
 
@@ -1263,9 +1262,9 @@ fallback). Always treat absence as "unknown" — never as 0 Ω (short circuit).
 
 ## v2.0 API Endpoints Reference
 
-All endpoints below use the base URL `http://www.acinfinityserver.com/api` and require
+All endpoints below use the base URL `https://www.acinfinityserver.com/api` and require
 `Content-Type: application/x-www-form-urlencoded; charset=utf-8` plus `token: <appId>` header.
-All use plain HTTP (same accepted risk as legacy endpoints — see Quirk 8 and `docs/SECURITY-RISKS.md`).
+All use HTTPS (TLSv1.3 — see Quirk 8).
 
 ### Automation Management
 

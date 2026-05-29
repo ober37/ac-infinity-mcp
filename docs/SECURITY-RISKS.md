@@ -2,7 +2,7 @@
 
 This file documents two categories of accepted risk:
 
-1. **Accepted Risk — HTTP only:** all upstream AC Infinity API endpoints use plain HTTP.
+1. **Note — HTTPS confirmed:** all upstream AC Infinity API endpoints support HTTPS (TLSv1.3, verified 2026-05-29).
 2. **Accepted Dependency CVEs:** CVEs in transitive or direct dependencies that are
    documented as accepted-risk. Each entry explains why the CVE does not affect this
    codebase in practice, and includes a re-evaluation date so the ignore is not permanent.
@@ -13,24 +13,23 @@ an issue, evaluate the exposure, and only ignore after a documented finding.
 
 ---
 
-## Accepted Risk — HTTP only (no TLS)
+## HTTPS confirmed (TLSv1.3)
 
-**Base URL:** `http://www.acinfinityserver.com/api`
+**Base URL:** `https://www.acinfinityserver.com/api`
 
-The AC Infinity cloud API communicates over plain HTTP. Session tokens, credentials,
-and sensor data are transmitted unencrypted. This is an upstream limitation of the
-AC Infinity platform; no HTTPS alternative is available. The risk is accepted for
-local/trusted network deployments. See `docs/DEPLOYMENT.md` for HTTPS reverse-proxy
-options if external exposure is a concern.
+The AC Infinity cloud API supports HTTPS. TLS handshake verified 2026-05-29: TLSv1.3,
+DigiCert Encryption Everywhere DV TLS CA certificate, valid until 2026-11-18.
+Credentials and session tokens are encrypted in transit. This supersedes the previous
+HTTP-only accepted risk documented before 2026-05-29.
 
-All endpoints below are subject to this accepted risk. This list was updated via
-network capture (Phase 17, 2026-05-22) to include all confirmed v2.0 endpoints.
+All endpoints below are confirmed over HTTPS. This list was updated via network capture
+(Phase 17, 2026-05-22) to include all confirmed v2.0 endpoints.
 
 ### Legacy-path endpoints (confirmed)
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /user/appUserLogin` | Authentication — transmits credentials in plaintext |
+| `POST /user/appUserLogin` | Authentication — credentials encrypted via TLS |
 | `POST /user/devInfoListAll` | Device list — response includes user email (`appEmail`) |
 | `POST /log/dataPage` | Historical sensor and port data |
 | `POST /dev/getdevModeSettingList` | Read current port mode settings |

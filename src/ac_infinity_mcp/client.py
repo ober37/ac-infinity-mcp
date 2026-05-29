@@ -159,7 +159,7 @@ def build_add_groups_payload(
 class ACInfinityClient:
     """Client for AC Infinity cloud API"""
 
-    BASE_URL = "http://www.acinfinityserver.com/api"
+    BASE_URL = "https://www.acinfinityserver.com/api"
     LOGIN_ENDPOINT = f"{BASE_URL}/user/appUserLogin"
     DEVICES_ENDPOINT = f"{BASE_URL}/user/devInfoListAll"
     HISTORY_ENDPOINT = f"{BASE_URL}/log/dataPage"
@@ -169,7 +169,7 @@ class ACInfinityClient:
 
     # v2.0 Automation management endpoints. The path prefix embeds the version
     # string as a literal path segment, which is an unusual but confirmed API design.
-    V2_BASE_URL = "http://www.acinfinityserver.com"
+    V2_BASE_URL = "https://www.acinfinityserver.com"
     V2_GET_GROUPS_ENDPOINT = f"{V2_BASE_URL}/api/version=2.0/dev/getGroups"
     V2_ADD_GROUPS_ENDPOINT = f"{V2_BASE_URL}/api/version=2.0/dev/addGroups"
     V2_UPDATE_GROUPS_IS_ON_ENDPOINT = f"{V2_BASE_URL}/api/version=2.0/dev/updateGroupsIsOn"

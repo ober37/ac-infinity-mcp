@@ -25,11 +25,11 @@ from tests.fixtures.mock_api_responses import (
 from tests.fixtures.mock_mode_settings_ai_plus import MOCK_MODE_SETTINGS_AI_PLUS_PORT1
 from tests.fixtures.mock_mode_settings_legacy import MOCK_MODE_SETTINGS_LEGACY_PORT1
 
-LOGIN_URL = "http://www.acinfinityserver.com/api/user/appUserLogin"
-DEVICES_URL = "http://www.acinfinityserver.com/api/user/devInfoListAll"
-HISTORY_URL = "http://www.acinfinityserver.com/api/log/dataPage"
-MODE_SETTINGS_URL = "http://www.acinfinityserver.com/api/dev/getdevModeSettingList"
-ADD_DEV_MODE_URL = "http://www.acinfinityserver.com/api/dev/addDevMode"
+LOGIN_URL = "https://www.acinfinityserver.com/api/user/appUserLogin"
+DEVICES_URL = "https://www.acinfinityserver.com/api/user/devInfoListAll"
+HISTORY_URL = "https://www.acinfinityserver.com/api/log/dataPage"
+MODE_SETTINGS_URL = "https://www.acinfinityserver.com/api/dev/getdevModeSettingList"
+ADD_DEV_MODE_URL = "https://www.acinfinityserver.com/api/dev/addDevMode"
 
 
 @pytest.fixture
@@ -37,13 +37,11 @@ def client():
     return ACInfinityClient("test@example.com", "password123")
 
 
-def test_base_url_is_http_only():
-    """docs/API.md Quirk 8: upstream serves HTTP only. A well-meaning "fix" to
-    https would silently break compatibility because the upstream server does
-    not serve TLS. Guards the invariant so a regression fails CI (P2-F007).
+def test_base_url_is_https():
+    """docs/API.md Quirk 8: HTTPS confirmed 2026-05-29 (TLSv1.3, DigiCert). Guards the
+    scheme invariant so a regression to plain HTTP fails CI (P2-F007).
     """
-    assert ACInfinityClient.BASE_URL.startswith("http://")
-    assert not ACInfinityClient.BASE_URL.startswith("https://")
+    assert ACInfinityClient.BASE_URL.startswith("https://")
     # Confirm derived endpoints inherit the scheme
     for endpoint in (
         ACInfinityClient.LOGIN_ENDPOINT,
@@ -53,7 +51,7 @@ def test_base_url_is_http_only():
         ACInfinityClient.ADD_DEV_MODE_ENDPOINT,
         ACInfinityClient.MODE_AND_SETTING_ENDPOINT,
     ):
-        assert endpoint.startswith("http://")
+        assert endpoint.startswith("https://")
 
 
 @pytest.fixture
