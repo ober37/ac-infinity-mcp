@@ -177,7 +177,15 @@ class ACInfinityClient:
 
     def __init__(self, email: str, password: str):
         self.email = email
-        self.password = password[:25]  # API silently truncates to 25 chars
+        if len(password) > 25:
+            logger.warning(
+                "Password length %d exceeds the 25-character AC Infinity API limit "
+                "(Quirk 2 in docs/API.md); using the first 25 characters only. "
+                "If authentication fails, recreate your AC Infinity account password "
+                "with 25 or fewer characters and update AC_INFINITY_PASSWORD.",
+                len(password),
+            )
+        self.password = password[:25]  # API silently truncates to 25 chars (Quirk 2)
         self.token: str | None = None
         # Shared across asyncio.to_thread calls. urllib3 pool is thread-safe;
         # cookie jar thread safety is moot because this API uses header tokens only.
