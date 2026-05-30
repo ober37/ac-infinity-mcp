@@ -59,6 +59,23 @@ def _should_include_sensor(s: dict) -> bool:
     return (s.get("sensorData") or 0) != 0  # unrecognized high type: include if non-zero
 
 
+def _sensor_value(s: dict) -> float | int:
+    """Scale a raw sensor reading to its real-world value.
+
+    AC Infinity encodes ``sensorPrecision`` as a decimal-place exponent, not a
+    literal divisor: the real value is ``sensorData / 10**(precision - 1)``.
+    Precision <= 1 (or absent) means the raw integer is already the value, and
+    is returned as-is to avoid spurious floats (e.g. CO2 ``500`` stays ``500``,
+    not ``500.0``). Mirrors the AC Infinity app and the HA ``ac_infinity``
+    integration so a 0-100% light reading (sensorType 12) is not mis-scaled.
+    """
+    data = s.get("sensorData") or 0
+    precision = s.get("sensorPrecision")
+    if precision is None:
+        precision = 1
+    return data / (10 ** (precision - 1)) if precision > 1 else data
+
+
 _SCHEDULE_ALWAYS_ACTIVE: int = 255
 
 
@@ -1080,7 +1097,7 @@ class ACInfinityClient:
                         "sensor_id": f"{s.get('accessPort')}.{s.get('sensorType')}",
                         "sensor_type": s.get("sensorType"),
                         "sensor_type_label": _sensor_label(s.get("sensorType")),
-                        "value": s.get("sensorData", 0) / (s.get("sensorPrecision") or 100),
+                        "value": _sensor_value(s),
                     }
                     for s in sensors
                     if _should_include_sensor(s)

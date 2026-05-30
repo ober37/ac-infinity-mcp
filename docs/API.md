@@ -1267,6 +1267,55 @@ fallback). Always treat absence as "unknown" — never as 0 Ω (short circuit).
 
 ---
 
+### Quirk 28 — `sensorPrecision` is a decimal-place exponent, not a literal divisor
+
+**Field location:** `devInfoListAll.deviceInfo.sensors[N].sensorPrecision`
+
+**What it is:** `sensorPrecision` is the number of decimal places encoded into the integer
+`sensorData`, exactly like Python's `round()` precision argument. The real-world value is:
+
+```
+value = sensorData / 10 ** (sensorPrecision - 1)
+```
+
+A precision of `1` (or a missing/zero field) means `sensorData` is already the real value and
+is returned **as-is** — no division, no spurious float (CO2 `793` stays `793`, not `793.0`).
+
+| `sensorPrecision` | Real value | Example |
+|---|---|---|
+| absent / 0 / 1 | `sensorData` (raw passthrough) | CO2: `793` → `793` ppm |
+| 2 | `sensorData / 10` | pH: `65` → `6.5` |
+| 3 | `sensorData / 100` | temp: `2450` → `24.5` °C |
+| 4 | `sensorData / 1000` | (3-decimal sensors) |
+
+**Why it matters:** The original implementation divided by `sensorPrecision or 100` (a literal
+divisor). That happened to be correct only for CO2 (`sensorType` 11, precision 1, where both
+formulas yield the raw value), which masked the bug. Every other external sensor — light, pH,
+EC, TDS, water temperature — was mis-scaled. The most visible case is the **light sensor
+(`sensorType` 12), a 0–100% reading** (`device_class power_factor`, unit `%` per the AC Infinity
+app and the HA `ac_infinity` integration): at precision 2 the old formula reported `1000 / 2 =
+500%`, an impossible value, instead of `1000 / 10 = 100%`.
+
+**Confirmed against:** the AC Infinity official app and the open-source HA `ac_infinity`
+integration (`custom_components/ac_infinity/sensor.py`,
+`__get_value_fn_sensor_value_default`), which reads the same `devInfoListAll` `sensors` array.
+
+**Implementation:**
+
+```python
+def _sensor_value(s: dict) -> float | int:
+    data = s.get("sensorData") or 0
+    precision = s.get("sensorPrecision")
+    if precision is None:
+        precision = 1
+    return data / (10 ** (precision - 1)) if precision > 1 else data
+```
+
+**Out of scope (tracked separately):** `sensorUnit` is present on every sensor entry but not
+yet read — readings are emitted without unit labels. See issue #255.
+
+---
+
 ## v2.0 API Endpoints Reference
 
 All endpoints below use the base URL `https://www.acinfinityserver.com/api` and require

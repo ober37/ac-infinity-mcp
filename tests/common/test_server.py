@@ -5510,7 +5510,7 @@ def test_external_sensor_type_label_soil_moisture():
     from ac_infinity_mcp.client import ACInfinityClient
     client = ACInfinityClient("test@example.com", "pw")
     device = _device_with_sensors([
-        {"accessPort": 1, "sensorType": 10, "sensorData": 500, "sensorPrecision": 10},
+        {"accessPort": 1, "sensorType": 10, "sensorData": 455, "sensorPrecision": 2},
     ])
     parsed = client.parse_device_data(device)
     assert parsed["external_sensors"][0]["sensor_type_label"] == "soil_moisture"
@@ -5521,43 +5521,74 @@ def test_external_sensor_type_label_unknown():
     from ac_infinity_mcp.client import ACInfinityClient
     client = ACInfinityClient("test@example.com", "pw")
     device = _device_with_sensors([
-        {"accessPort": 1, "sensorType": 99, "sensorData": 100, "sensorPrecision": 100},
+        {"accessPort": 1, "sensorType": 99, "sensorData": 100, "sensorPrecision": 1},
     ])
     parsed = client.parse_device_data(device)
     assert parsed["external_sensors"][0]["sensor_type_label"] == "unrecognized (type 99)"
 
 
-def test_external_sensor_precision_used():
-    """value = sensorData / sensorPrecision (1150 / 1000 = 1.15)."""
+def test_external_sensor_precision_1_passthrough():
+    """sensorPrecision=1 → raw passthrough, returned as int (CO2 793 ppm stays 793)."""
     from ac_infinity_mcp.client import ACInfinityClient
     client = ACInfinityClient("test@example.com", "pw")
     device = _device_with_sensors([
-        {"accessPort": 1, "sensorType": 11, "sensorData": 1150, "sensorPrecision": 1000},
+        {"accessPort": 1, "sensorType": 11, "sensorData": 793, "sensorPrecision": 1},
     ])
     parsed = client.parse_device_data(device)
-    assert parsed["external_sensors"][0]["value"] == pytest.approx(1.15)
+    value = parsed["external_sensors"][0]["value"]
+    assert value == 793
+    assert isinstance(value, int)  # precision <= 1 must not introduce a float
 
 
-def test_external_sensor_precision_zero_falls_back_to_100():
-    """sensorPrecision=0 → fallback divisor of 100 (guard against ZeroDivisionError)."""
+def test_external_sensor_precision_2_divides_by_ten():
+    """sensorPrecision=2 → sensorData / 10**(2-1) = data / 10 (pH 65 → 6.5)."""
+    from ac_infinity_mcp.client import ACInfinityClient
+    client = ACInfinityClient("test@example.com", "pw")
+    device = _device_with_sensors([
+        {"accessPort": 1, "sensorType": 13, "sensorData": 65, "sensorPrecision": 2},
+    ])
+    parsed = client.parse_device_data(device)
+    assert parsed["external_sensors"][0]["value"] == pytest.approx(6.5)
+
+
+def test_external_sensor_precision_zero_passthrough():
+    """sensorPrecision=0 → raw passthrough (NOT data/100). Also guards ZeroDivisionError."""
     from ac_infinity_mcp.client import ACInfinityClient
     client = ACInfinityClient("test@example.com", "pw")
     device = _device_with_sensors([
         {"accessPort": 1, "sensorType": 11, "sensorData": 500, "sensorPrecision": 0},
     ])
     parsed = client.parse_device_data(device)
-    assert parsed["external_sensors"][0]["value"] == pytest.approx(5.0)
+    assert parsed["external_sensors"][0]["value"] == 500
 
 
-def test_external_sensor_precision_absent_falls_back_to_100():
-    """Missing sensorPrecision key → fallback divisor of 100."""
+def test_external_sensor_precision_absent_passthrough():
+    """Missing sensorPrecision → defaults to precision 1 → raw passthrough (NOT data/100)."""
     from ac_infinity_mcp.client import ACInfinityClient
     client = ACInfinityClient("test@example.com", "pw")
     device = _device_with_sensors([
         {"accessPort": 1, "sensorType": 11, "sensorData": 200},
     ])
     parsed = client.parse_device_data(device)
-    assert parsed["external_sensors"][0]["value"] == pytest.approx(2.0)
+    assert parsed["external_sensors"][0]["value"] == 200
+
+
+def test_external_sensor_light_type_12_is_percentage():
+    """Light (sensorType 12) is a 0-100% reading: precision 2, sensorData 1000 → 100.0.
+
+    The old literal-divisor formula gave 1000 / 2 = 500 — an impossible light %.
+    Ground-truthed against the HA ac_infinity integration (type 12 = power_factor / %).
+    """
+    from ac_infinity_mcp.client import ACInfinityClient
+    client = ACInfinityClient("test@example.com", "pw")
+    device = _device_with_sensors([
+        {"accessPort": 1, "sensorType": 12, "sensorData": 1000, "sensorPrecision": 2},
+    ])
+    parsed = client.parse_device_data(device)
+    sensor = parsed["external_sensors"][0]
+    assert sensor["sensor_type_label"] == "light"
+    assert sensor["value"] == pytest.approx(100.0)
+    assert 0 <= sensor["value"] <= 100
 
 
 # ============ Advance Automation helper unit tests ============

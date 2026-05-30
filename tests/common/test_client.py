@@ -213,20 +213,21 @@ def test_parse_device_data_with_external_sensors(client):
             "vpdnums": 150,
             "ports": [],
             "sensors": [
-                {"accessPort": 1, "sensorType": 11, "sensorData": 85000},
+                {"accessPort": 1, "sensorType": 11, "sensorData": 850},
             ],
         },
     }
     result = client.parse_device_data(device)
     assert len(result["external_sensors"]) == 1
     assert result["external_sensors"][0]["sensor_id"] == "1.11"
-    assert result["external_sensors"][0]["value"] == pytest.approx(850.0, abs=0.1)
+    # No sensorPrecision → defaults to 1 → raw passthrough (850 ppm CO2).
+    assert result["external_sensors"][0]["value"] == 850
 
 
 # ============ parse_device_data — phantom sensor filtering ============
 
 
-def _sensor_entry(sensor_type, sensor_data=0, precision=100, access_port=1):
+def _sensor_entry(sensor_type, sensor_data=0, precision=1, access_port=1):
     return {
         "sensorType": sensor_type,
         "sensorData": sensor_data,
@@ -263,7 +264,8 @@ def test_parse_device_data_unrecognized_nonzero_included(client):
     result = client.parse_device_data(device)
     assert len(result["external_sensors"]) == 1
     assert result["external_sensors"][0]["sensor_type_label"] == "unrecognized (type 99)"
-    assert result["external_sensors"][0]["value"] == pytest.approx(99.0)
+    # precision defaults to 1 → raw passthrough.
+    assert result["external_sensors"][0]["value"] == 9900
 
 
 def test_parse_device_data_recognized_zero_included(client):
@@ -300,9 +302,9 @@ def test_parse_device_data_mixed_sensor_list(client):
     """Mixed sensor list: phantom excluded, recognized/nonzero-unrecognized included."""
     sensors = [
         _sensor_entry(sensor_type=99, sensor_data=0, access_port=1),  # phantom — excluded
-        _sensor_entry(sensor_type=11, sensor_data=45000, precision=100, access_port=2),  # included
+        _sensor_entry(sensor_type=11, sensor_data=450, precision=1, access_port=2),  # included
         _sensor_entry(sensor_type=None, sensor_data=500, access_port=3),  # no type — excluded
-        _sensor_entry(sensor_type=21, sensor_data=8550, precision=100, access_port=4),  # included
+        _sensor_entry(sensor_type=21, sensor_data=855, precision=2, access_port=4),  # included
     ]
     device = _device_with_sensor_list(sensors)
     result = client.parse_device_data(device)
@@ -311,8 +313,8 @@ def test_parse_device_data_mixed_sensor_list(client):
     assert labels[11] == "co2"
     assert labels[21] == "unrecognized (type 21)"
     values = {s["sensor_type"]: s["value"] for s in result["external_sensors"]}
-    assert values[11] == pytest.approx(450.0)
-    assert values[21] == pytest.approx(85.5)
+    assert values[11] == 450  # precision 1 → raw passthrough (450 ppm)
+    assert values[21] == pytest.approx(85.5)  # precision 2 → 855 / 10
 
 
 # devType=22 phantom sensor fixture (real field values from Proxyman capture)
@@ -338,7 +340,7 @@ def test_should_include_sensor_devtype22_phantoms_excluded(client):
 def test_should_include_sensor_any_lt10_not_in_label_dict_excluded(client):
     """Any sensorType < 10 not in _SENSOR_TYPE_LABELS → excluded regardless of sensorData."""
     for st in range(1, 10):
-        entry = {"sensorType": st, "sensorData": 9999, "sensorPrecision": 100, "accessPort": 1}
+        entry = {"sensorType": st, "sensorData": 9999, "sensorPrecision": 1, "accessPort": 1}
         device = _device_with_sensor_list([entry])
         result = client.parse_device_data(device)
         assert result["external_sensors"] == [], f"sensorType={st} should be excluded"
@@ -346,7 +348,7 @@ def test_should_include_sensor_any_lt10_not_in_label_dict_excluded(client):
 
 def test_should_include_sensor_recognized_type_zero_still_included(client):
     """sensorType=10 (soil_moisture), sensorData=0 → always included even at zero."""
-    entry = {"sensorType": 10, "sensorData": 0, "sensorPrecision": 100, "accessPort": 1}
+    entry = {"sensorType": 10, "sensorData": 0, "sensorPrecision": 1, "accessPort": 1}
     device = _device_with_sensor_list([entry])
     result = client.parse_device_data(device)
     assert len(result["external_sensors"]) == 1
