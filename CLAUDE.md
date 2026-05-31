@@ -177,6 +177,12 @@ The Documentation Agent reports: `N items updated. N items already current. Gaps
 The PR is not considered complete until the Documentation Agent reports no gaps in the
 internal docs.
 
+**The Documentation Agent must commit its own changes.** After writing or updating any
+file, run `git add <files> && git commit` on the feature branch before reporting completion.
+Public-doc changes that are not committed to the branch will not ship with the PR and will
+be left as silent working-tree drift — the exact failure mode that produced the #233
+API.md follow-up (PR #267). The agent must end with `git status` confirming a clean tree.
+
 ---
 
 ## Session Start Protocol
@@ -187,7 +193,12 @@ At the start of every phase session, in order:
 2. Confirm the current Claude model name (for `Co-Authored-By` attribution)
 3. **Check for `.env`** — credentials live in `.env` at the repo root. Read it before
    any live API call or Gate 5 smoke test. Never commit it; it is already in `.gitignore`.
-4. Begin the Phase Planning Session (see below) before writing any code
+4. **Check for working-tree drift** — run `git status` and inspect any modified files.
+   Uncommitted changes are almost always leftover documentation from a prior session's
+   Stage 4 agent that failed to commit. Identify the owning PR/issue, commit the changes
+   to a dedicated fix branch, and raise a follow-up PR before starting new work. Never
+   carry forward silent working-tree drift into a new branch.
+5. Begin the Phase Planning Session (see below) before writing any code
 
 ---
 

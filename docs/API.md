@@ -920,6 +920,13 @@ ADVANCE conflict guard even after the automation was disabled, making it impossi
 manually control ports on a controller that ever had an automation. After the fix, the
 guard only fires when the automation is confirmed active (`isOpenAutomation != 0`).
 
+**Ghost state in `break_out_of_automation` (issue #191, PR #233):** When `modeType=15`
+is set on a port but no active automation's `grouptDevType` bitmask covers that port
+(stale configuration marker from a deleted or fully-disabled automation), the tool now
+returns an idempotent info response rather than an error. The port is not under active
+automation control — the `modeType=15` flag is a historical artifact and no write-guard
+should block manual control of the port.
+
 ---
 
 ### Quirk 20 — Phantom external sensor entries in `devInfoListAll`
@@ -1952,7 +1959,26 @@ both warning messages are concatenated in the same `warning` field.
 
 ### `set_port_on(device_id, port, dry_run=True)`
 
-Turn a port on at full speed (`onSpead=10`). Works for fan-type and on/off toggle devices.
+Turn a port on at full speed (`onSpead=10`). Sets `atType=2` (ON mode) explicitly. Works for
+fan-type and on/off toggle devices. Uses read-before-write.
+
+**Parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `device_id` | `str` | Device code from `discover_devices` |
+| `port` | `int` | 1-based port number |
+| `dry_run` | `bool` | Default `True` — returns payload without writing |
+
+**Payload fields set:** `atType=2` (ON mode), `onSpead=10`.
+
+**Response:** Same structure as `set_port_speed` without the `speed` field; `action` uses the port's name and number, e.g. `"turn Intake Fan (Port 1) on"` (or `"turn Port 1 on"` when no custom name is configured). Includes a `warning` field when the port appears to have nothing connected (Quirk 26).
+
+---
+
+### `set_port_off(device_id, port, dry_run=True)`
+
+Turn a port off. Sets `atType=1` (OFF mode) explicitly and zeros the speed (`onSpead=0`).
+Works for all device types including toggle hardware (heaters, lights, on/off outlets).
 Uses read-before-write.
 
 **Parameters:**
@@ -1962,20 +1988,9 @@ Uses read-before-write.
 | `port` | `int` | 1-based port number |
 | `dry_run` | `bool` | Default `True` — returns payload without writing |
 
-**Response:** Same structure as `set_port_speed` without the `speed` field; `action` uses the port's name and number, e.g. `"turn Intake Fan (Port 1) on"` (or `"turn Port 1 on"` when no custom name is configured). Includes a `warning` field when the port appears to have nothing connected (Quirk 26).
-
----
-
-### `set_port_off(device_id, port, dry_run=True)`
-
-Turn a port off (`onSpead=0`). Uses read-before-write.
-
-**Parameters:**
-| Parameter | Type | Description |
-|---|---|---|
-| `device_id` | `str` | Device code from `discover_devices` |
-| `port` | `int` | 1-based port number |
-| `dry_run` | `bool` | Default `True` — returns payload without writing |
+**Payload fields set:** `atType=1` (OFF mode), `onSpead=0`. Sending `atType=1` is required for
+toggle hardware — zeroing speed alone leaves the mode as ON, causing the device to remain
+energized (issue #232, fixed in PR #233).
 
 **Response:** Same structure as `set_port_speed` without the `speed` field; `action` uses the port's name and number, e.g. `"turn Intake Fan (Port 1) off"` (or `"turn Port 1 off"` when no custom name is configured). Includes a `warning` field when the port appears to have nothing connected (Quirk 26).
 
@@ -2683,13 +2698,24 @@ manual control. Ports in other automations are unaffected.
 **Field notes:**
 - Locks only the co-ports within the governing automation (ports that share the same automation
   as the target port). Ports governed by other automations, or empty ports
-  (`portResistance == 65535`), are unaffected.
+  (`portResistance == 65535`), are unaffected. Empty-port detection uses `_is_port_empty()`,
+  which handles devices where `portResistance` is absent and `devType=18` does not expose
+  `portResistance` (issue #190, fixed in PR #233).
 - On devices with multiple active automations, only the automation whose bitmask covers the
   target port is disabled and its co-ports locked — other automations continue running.
 - `confirm_automation_name` match is case-insensitive; required for live execution as a safety gate
-- When all automations on the device are disabled (Quirk 19), returns an error rather than the
-  ghost-state no-op — the port is stuck in a disabled automation and the user needs to take
-  explicit action to clear it.
+- **Ghost state no-op (issue #191, fixed in PR #233):** When `modeType=15` is set but no active
+  automation's bitmask covers the port (stale flag from a deleted or fully-disabled automation),
+  the tool returns an idempotent info response — `{"info": "... No action taken."}` — rather
+  than an error. This is the correct behavior: the port is not under active automation control.
+- **2s propagation wait after disable (issue #234, fixed in PR #233):** After the automation is
+  disabled, the server waits 2 seconds and invalidates the device cache before re-fetching. Both
+  ADVANCE guards (pre-write `isOpenAutomation` and `getdevModeSettingList`) need this settling
+  time; otherwise the co-port lock writes see stale state and are blocked by the conflict guard.
+- **Target port locked to automation speed (issue #235, fixed in PR #233):** After co-port locks
+  are applied, the target port itself is written to its automation-controlled `on_speed` (from
+  the governing port group). This ensures the grower sees no unexpected speed change after release
+  — the port starts manual control from its previous automation-controlled baseline speed.
 
 ---
 
