@@ -1,0 +1,6 @@
+{
+  "$schema": "https://glama.ai/mcp/glama.schema.json",
+  "name": "AC Infinity MCP",
+  "description": "Monitor sensors, control ports, and manage automations on AC Infinity grow-tent controllers through Claude and any MCP-compatible AI assistant.",
+  "license": "MIT"
+}
