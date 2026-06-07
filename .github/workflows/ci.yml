@@ -32,6 +32,12 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
+      - name: Upgrade pip
+        # The runner toolcache can ship a pip with known CVEs (PYSEC-2026-196 in
+        # 26.1.1 broke the pip-audit gate). Always audit against latest pip so
+        # fixable pip CVEs self-heal instead of failing every CI run. Issue #270.
+        run: python -m pip install --upgrade pip
+
       - name: Install project and dev dependencies
         run: pip install -e ".[dev]"
 
