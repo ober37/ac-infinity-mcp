@@ -6,7 +6,10 @@ WORKDIR /build
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
 
-RUN pip install --no-cache-dir --prefix=/install .
+# Upgrade pip before use — the base image can ship a pip with known CVEs
+# (PYSEC-2026-196 in 26.1.1). pip is only invoked in this builder stage. #270
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir --prefix=/install .
 
 
 FROM python:3.11-slim@sha256:2c285c669cc837aa3bcf1af23ea1932b7b5214f9c9d3aad22417446ad91cb4fb AS runtime
