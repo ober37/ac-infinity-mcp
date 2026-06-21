@@ -59,6 +59,11 @@ def _should_include_sensor(s: dict) -> bool:
     return (s.get("sensorData") or 0) != 0  # unrecognized high type: include if non-zero
 
 
+# Real AC Infinity sensorPrecision values are 1-3; anything well above this is a
+# malformed response, not a 4+ decimal sensor. Cap generously to passthrough.
+_MAX_SENSOR_PRECISION: int = 6
+
+
 def _sensor_value(s: dict) -> float | int:
     """Scale a raw sensor reading to its real-world value.
 
@@ -68,10 +73,22 @@ def _sensor_value(s: dict) -> float | int:
     is returned as-is to avoid spurious floats (e.g. CO2 ``500`` stays ``500``,
     not ``500.0``). Mirrors the AC Infinity app and the HA ``ac_infinity``
     integration so a 0-100% light reading (sensorType 12) is not mis-scaled.
+
+    Real precision values are 1-3. An implausibly large value (a malformed API
+    response) would otherwise yield a silent near-zero reading that looks like a
+    dead sensor; such values are logged and treated as raw passthrough instead.
     """
     data = s.get("sensorData") or 0
     precision = s.get("sensorPrecision")
     if precision is None:
+        precision = 1
+    if precision > _MAX_SENSOR_PRECISION:
+        logger.warning(
+            "Implausible sensorPrecision %d (sensorType=%s); real values are 1-3. "
+            "Treating the reading as raw to avoid a silent near-zero value.",
+            precision,
+            s.get("sensorType"),
+        )
         precision = 1
     return data / (10 ** (precision - 1)) if precision > 1 else data
 

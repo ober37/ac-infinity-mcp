@@ -503,7 +503,7 @@ devId=REDACTED_DEV_ID&externalPort=1&onSpead=5&modeType=2&offSpead=0&...
 
 ---
 
-## All 27 Known API Quirks
+## All 28 Known API Quirks
 
 ### Quirk 1 — Auth typo: `appPasswordl`
 
@@ -1303,10 +1303,16 @@ integration (`custom_components/ac_infinity/sensor.py`,
 **Implementation:**
 
 ```python
+_MAX_SENSOR_PRECISION = 6  # real values are 1-3; anything well above is malformed
+
 def _sensor_value(s: dict) -> float | int:
     data = s.get("sensorData") or 0
     precision = s.get("sensorPrecision")
     if precision is None:
+        precision = 1
+    if precision > _MAX_SENSOR_PRECISION:
+        # Implausible precision (malformed response) would yield a silent
+        # near-zero reading; log it and treat the value as raw instead.
         precision = 1
     return data / (10 ** (precision - 1)) if precision > 1 else data
 ```

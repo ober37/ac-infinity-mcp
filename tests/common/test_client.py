@@ -224,6 +224,49 @@ def test_parse_device_data_with_external_sensors(client):
     assert result["external_sensors"][0]["value"] == 850
 
 
+# ============ _sensor_value — precision scaling (Quirk 28) ============
+
+
+@pytest.mark.parametrize(
+    "precision,data,expected",
+    [
+        (None, 793, 793),   # absent → passthrough
+        (0, 793, 793),      # zero   → passthrough
+        (1, 793, 793),      # 1      → passthrough
+        (2, 65, 6.5),       # 2      → data / 10
+        (3, 2450, 24.5),    # 3      → data / 100 (temperature sensor)
+    ],
+)
+def test_sensor_value(precision, data, expected):
+    """Direct coverage of every precision branch, including the precision=3
+    (data/100) tier documented in Quirk 28 but otherwise untested.
+    """
+    from ac_infinity_mcp.client import _sensor_value
+
+    s: dict = {"sensorData": data}
+    if precision is not None:
+        s["sensorPrecision"] = precision
+    result = _sensor_value(s)
+    assert result == pytest.approx(expected)
+    # precision <= 1 must stay int — no spurious float on raw passthrough
+    if precision in (None, 0, 1):
+        assert isinstance(result, int)
+
+
+def test_sensor_value_implausible_precision_passthrough(caplog):
+    """A malformed, implausibly large sensorPrecision is logged and treated as
+    raw passthrough rather than yielding a silent near-zero reading.
+    """
+    import logging
+
+    from ac_infinity_mcp.client import _sensor_value
+
+    with caplog.at_level(logging.WARNING, logger="ac_infinity_mcp.client"):
+        result = _sensor_value({"sensorData": 793, "sensorType": 11, "sensorPrecision": 99})
+    assert result == 793
+    assert "Implausible sensorPrecision 99" in caplog.text
+
+
 # ============ parse_device_data — phantom sensor filtering ============
 
 
