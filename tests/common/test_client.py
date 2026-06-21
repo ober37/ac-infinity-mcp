@@ -57,19 +57,45 @@ def test_base_url_is_https():
 # ============ Password length (Quirk 2) ============
 
 
-def test_password_under_limit_no_warning(caplog):
-    """A password of 25 chars or fewer triggers no warning (the truncation is
-    a no-op so there's nothing the user needs to know about).
+def test_password_below_limit_no_warning(caplog):
+    """A genuinely sub-limit password (24 chars) triggers no warning — the
+    truncation is a no-op so there's nothing the user needs to know about.
     """
     import logging
 
     with caplog.at_level(logging.WARNING, logger="ac_infinity_mcp.client"):
-        ACInfinityClient("user@example.com", "a" * 25)
+        client = ACInfinityClient("user@example.com", "a" * 24)
+    assert client.password == "a" * 24
     assert "exceeds the 25-character" not in caplog.text
 
 
+def test_password_at_exactly_25_no_warning(caplog):
+    """Lower boundary: exactly 25 chars is the limit, not over it — no warning.
+    Guards against a `> 25` → `>= 25` regression.
+    """
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="ac_infinity_mcp.client"):
+        client = ACInfinityClient("user@example.com", "x" * 25)
+    assert client.password == "x" * 25
+    assert "exceeds the 25-character" not in caplog.text
+
+
+def test_password_just_over_limit_warns(caplog):
+    """Upper boundary: 26 chars is one over the limit — warns and truncates.
+    Guards against a `> 25` → `> 26` regression that would silently suppress
+    the warning for passwords just past the limit.
+    """
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="ac_infinity_mcp.client"):
+        client = ACInfinityClient("user@example.com", "a" * 26)
+    assert client.password == "a" * 25
+    assert "Password length 26 exceeds the 25-character" in caplog.text
+
+
 def test_password_over_limit_warns(caplog):
-    """Passwords longer than 25 chars are still truncated (preserves Quirk 2
+    """Passwords well over 25 chars are still truncated (preserves Quirk 2
     parity with the AC Infinity API's own server-side behavior) but the user
     now gets a warning in the log so silent auth failures are diagnosable.
     """
@@ -81,16 +107,6 @@ def test_password_over_limit_warns(caplog):
     assert client.password == "a" * 25
     # And the user is told about it
     assert "Password length 30 exceeds the 25-character" in caplog.text
-
-
-def test_password_at_exactly_25_no_warning(caplog):
-    """Boundary case: exactly 25 chars is fine, no warning."""
-    import logging
-
-    with caplog.at_level(logging.WARNING, logger="ac_infinity_mcp.client"):
-        client = ACInfinityClient("user@example.com", "x" * 25)
-    assert client.password == "x" * 25
-    assert "exceeds the 25-character" not in caplog.text
 
 
 @pytest.fixture

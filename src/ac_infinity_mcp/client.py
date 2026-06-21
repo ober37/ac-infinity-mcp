@@ -181,8 +181,8 @@ class ACInfinityClient:
             logger.warning(
                 "Password length %d exceeds the 25-character AC Infinity API limit "
                 "(Quirk 2 in docs/API.md); using the first 25 characters only. "
-                "If authentication fails, recreate your AC Infinity account password "
-                "with 25 or fewer characters and update AC_INFINITY_PASSWORD.",
+                "If authentication fails, change your AC Infinity account password "
+                "to 25 or fewer characters and update AC_INFINITY_PASSWORD.",
                 len(password),
             )
         self.password = password[:25]  # API silently truncates to 25 chars (Quirk 2)
