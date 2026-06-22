@@ -153,7 +153,7 @@ async def _get_device(
     if not device:
         return None, json.dumps({"error": f"Device {device_id} not found"})
     if for_write and device.get("isShare") == 1:
-        name = _sanitize_api_string(device.get("devName") or "", 64) or "This controller"
+        name = _sanitize_api_string(device.get("devName"), 64)  # "(unnamed)" if missing
         return None, json.dumps(
             {
                 "error": (

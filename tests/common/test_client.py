@@ -1421,30 +1421,39 @@ def test_get_historical_data_pagination(authed_client):
 @responses_lib.activate
 def test_get_historical_data_pagination_three_plus_chunks(authed_client):
     """#248: multi-day history assembles across MANY chunks via the time cursor (the API
-    caps a page at ~96 rows). Exercises repeated cursor advances, crosses the 96-row mark,
-    and proves no records are dropped or duplicated at chunk boundaries."""
+    caps a page at ~96 rows). The mock slices a single canonical dataset by the request's
+    'time' cursor, so the result is correct ONLY if the cursor advances correctly — a
+    no-advance or off-by-one cursor produces duplicates or dropped rows and fails this."""
+    import json
+    from urllib.parse import parse_qs
+
     base_ts = 1714000000
     page_size = 96
-    chunk_sizes = [96, 96, 96, 50]  # 3 full chunks + a short final chunk (clean stop) = 338 rows
-    next_ts = base_ts
-    for size in chunk_sizes:
-        rows = [
-            {
-                "createTime": next_ts + i,
-                "temperature": 2400,
-                "fTemperature": 7520,
-                "humidity": 5500,
-                "vpdNums": 150,
-                "portSpead": 0,
-                "portStatus": 0,
-                "devPortCount": 2,
-            }
-            for i in range(size)
-        ]
-        next_ts += size  # strictly increasing across the boundary — no overlap
-        responses_lib.add(
-            responses_lib.POST, HISTORY_URL, json={"code": 200, "data": {"rows": rows}}, status=200
-        )
+    total = 338  # > 96, spans 4 pages of 96/96/96/50
+    dataset = [
+        {
+            "createTime": base_ts + i,
+            "temperature": 2400,
+            "fTemperature": 7520,
+            "humidity": 5500,
+            "vpdNums": 150,
+            "portSpead": 0,
+            "portStatus": 0,
+            "devPortCount": 2,
+        }
+        for i in range(total)
+    ]
+
+    def cursor_callback(request):
+        # The client sends the cursor as the form field 'time'; return the next
+        # page_size rows whose createTime >= cursor (what the real endpoint does).
+        cursor = int(parse_qs(request.body)["time"][0])
+        rows = [r for r in dataset if r["createTime"] >= cursor][:page_size]
+        return (200, {}, json.dumps({"code": 200, "data": {"rows": rows}}))
+
+    responses_lib.add_callback(
+        responses_lib.POST, HISTORY_URL, callback=cursor_callback, content_type="application/json"
+    )
 
     result = authed_client.get_historical_data(
         dev_id="12345",
@@ -1452,11 +1461,11 @@ def test_get_historical_data_pagination_three_plus_chunks(authed_client):
         end_timestamp=base_ts + 86400,
         page_size=page_size,
     )
-    assert len(result) == 338  # nothing dropped across 4 chunks (> 96 total)
     create_times = [r["createTime"] for r in result]
-    assert len(set(create_times)) == len(create_times)  # no duplicates at chunk boundaries
+    assert len(result) == total  # every row assembled, nothing dropped
+    assert len(set(create_times)) == total  # no duplicates at chunk boundaries
     assert create_times == sorted(create_times)  # cursor advanced monotonically
-    assert len(responses_lib.calls) == 4  # one request per chunk, stopped on the short chunk
+    assert len(responses_lib.calls) == 4  # 96 + 96 + 96 + 50, then the short page stops it
 
 
 @responses_lib.activate
