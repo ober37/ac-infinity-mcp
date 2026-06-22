@@ -526,6 +526,16 @@ across sessions:
 self.password = password[:25]  # applied in ACInfinityClient.__init__
 ```
 
+**Truncation counts by code point, not byte.** The client mirrors the 25-character limit
+with `password[:25]`, which slices by Python `len()` — i.e. by Unicode **code point**, not
+UTF-8 byte. Whether the AC Infinity server itself counts bytes or code points is
+**unverified** (no hardware available to confirm), so a password whose first 25 code points
+exceed 25 bytes may still be truncated differently server-side. A password longer than 25
+characters will fail to authenticate.
+
+Since #262, the auth-failure message surfaced to the MCP client cites this 25-character
+limit so a grower (who does not watch server logs) has a diagnostic path.
+
 ---
 
 ### Quirk 3 — `pageNum` ignored; use time-cursor pagination
