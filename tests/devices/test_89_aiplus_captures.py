@@ -11,6 +11,7 @@ test directly, and lock in the corrected findings from the source-triangulation 
 import pytest
 
 from ac_infinity_mcp.controller import ControllerType, detect_controller_type
+from ac_infinity_mcp.ports import _is_port_empty
 from tests.fixtures.captures import CAPTURE_DATES, load_89_aiplus_capture
 
 _EMPTY_PORT_SENTINEL = 65535  # portResistance / open-circuit sentinel (Quirk 26/27)
@@ -82,6 +83,21 @@ def test_empty_ports_use_portresistance_sentinel(device):
             assert pv["portResistance"] < _EMPTY_PORT_SENTINEL, (
                 f"port {ps['port']} online but portResistance == sentinel"
             )
+
+
+def test_is_port_empty_classifies_aiplus_ports_correctly(device):
+    """The production `_is_port_empty` (Quirk 26/27 portResistance==65535) already classifies
+    devType=20 ports correctly — no AI-controller-specific logic needed. Online ports are
+    reported connected; offline ports empty. This is the #243 verification: existing
+    detection covers AI controllers; the original loadId-sentinel theory was unnecessary.
+    """
+    for ps in _ports(device):
+        pv = ps["portValuesInList"]
+        expected_empty = pv["online"] == 0
+        assert _is_port_empty(pv, ps["port"], device) is expected_empty, (
+            f"port {ps['port']} (online={pv['online']}, "
+            f"portResistance={pv['portResistance']}) misclassified by _is_port_empty"
+        )
 
 
 def test_loadId_is_not_an_empty_port_sentinel(device):
