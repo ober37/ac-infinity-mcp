@@ -957,6 +957,175 @@ def test_get_historical_data_refreshes_token_on_401(authed_client):
     assert result == []
 
 
+# ============ #252 — session-expiry (code 10003) re-auth, read/write asymmetric ============
+
+
+@pytest.mark.parametrize(
+    "code,session_refreshable,expected",
+    [
+        (401, True, ACInfinityAuthError),  # 401 is always auth (read path)
+        (401, False, ACInfinityAuthError),  # 401 is always auth (write path too)
+        (10003, True, ACInfinityAuthError),  # session-expiry on a READ → refreshable auth error
+        (10003, False, ACInfinityAPIError),  # session-expiry on a WRITE → API error (no replay)
+        (500, True, ACInfinityAPIError),  # unrelated codes stay API errors
+        (500, False, ACInfinityAPIError),
+    ],
+)
+def test_raise_for_api_code_session_mapping(client, code, session_refreshable, expected):
+    """Per-direction code mapping: 10003 is an auth error only on reads (so the token
+    refresh fires); on writes it stays an API error so the write is never replayed. 401
+    remains an auth error on every path. Covers the mapping for all call sites, which all
+    delegate here."""
+    with pytest.raises(expected):
+        client._raise_for_api_code(code, "msg", "Ctx", session_refreshable=session_refreshable)
+
+
+@responses_lib.activate
+def test_get_devices_refreshes_token_on_10003(authed_client):
+    """A READ that returns session-expiry code 10003 transparently re-auths and retries."""
+    responses_lib.add(
+        responses_lib.POST, DEVICES_URL, json={"code": 10003, "msg": "session expired"}, status=200
+    )
+    responses_lib.add(
+        responses_lib.POST,
+        LOGIN_URL,
+        json={"code": 200, "data": {"appId": "fresh_token_10003"}},
+        status=200,
+    )
+    responses_lib.add(responses_lib.POST, DEVICES_URL, json=DEVICES_SUCCESS, status=200)
+
+    devices = authed_client.get_devices()
+    assert len(devices) >= 1
+    assert authed_client.token == "fresh_token_10003"
+    login_calls = [c for c in responses_lib.calls if "appUserLogin" in c.request.url]
+    assert len(login_calls) == 1  # exactly one refresh
+
+
+@responses_lib.activate
+def test_get_devices_10003_refresh_failure_caches_and_short_circuits(authed_client):
+    """When the 10003-triggered refresh login fails, the failure is cached: the call
+    raises AuthError and a SUBSEQUENT call short-circuits without re-hitting login
+    (bounds re-auth to one attempt — no credential-stuffing / lockout shape)."""
+    responses_lib.add(
+        responses_lib.POST, DEVICES_URL, json={"code": 10003, "msg": "session expired"}, status=200
+    )
+    responses_lib.add(responses_lib.POST, LOGIN_URL, json=AUTH_FAILURE, status=200)
+
+    with pytest.raises(ACInfinityAuthError):
+        authed_client.get_devices()
+    # Second call: must NOT attempt another login (cached failure short-circuits).
+    with pytest.raises(ACInfinityAuthError):
+        authed_client.get_devices()
+    login_calls = [c for c in responses_lib.calls if "appUserLogin" in c.request.url]
+    assert len(login_calls) == 1  # only the first refresh attempted a login
+
+
+def test_refresh_network_failure_is_not_cached(authed_client, monkeypatch):
+    """A transient network failure during the refresh login must NOT be cached as a
+    permanent auth error — otherwise a momentary outage would pin a false lockout until
+    process restart. The original auth rejection still surfaces (consistent error type),
+    but only genuine credential failures are cached."""
+    monkeypatch.setattr(
+        authed_client,
+        "_authenticate_inner",
+        lambda: (_ for _ in ()).throw(requests.exceptions.ConnectionError("boom")),
+    )
+
+    def fake_devices_inner():
+        raise ACInfinityAuthError("Token rejected by API (code 10003): session expired")
+
+    with pytest.raises(ACInfinityAuthError):
+        authed_client._call_with_token_refresh(fake_devices_inner)
+    assert authed_client._auth_error is None  # network blip not cached
+    assert authed_client.token is not None  # stale token NOT cleared on a transient failure
+
+
+@responses_lib.activate
+def test_set_port_mode_write_10003_not_replayed(authed_client):
+    """#252 double-apply guard: a session-expiry code on a WRITE surfaces as an API error
+    after exactly ONE write POST, with NO token refresh — the write is never replayed (a
+    10003 in a 200 body proves the server received the write)."""
+    responses_lib.add(responses_lib.POST, MODE_SETTINGS_URL, json=MODE_SETTINGS_SUCCESS, status=200)
+    responses_lib.add(
+        responses_lib.POST,
+        ADD_DEV_MODE_URL,
+        json={"code": 10003, "msg": "session expired"},
+        status=200,
+    )
+    with patch.object(authed_client, "_enforce_write_rate_limit"):
+        with pytest.raises(ACInfinityAPIError):
+            authed_client.set_port_mode(LEGACY_DEVICE_DATA, port=1, updates={}, dry_run=False)
+    write_calls = [c for c in responses_lib.calls if "addDevMode" in c.request.url]
+    login_calls = [c for c in responses_lib.calls if "appUserLogin" in c.request.url]
+    assert len(write_calls) == 1  # no replay
+    assert len(login_calls) == 0  # no refresh on a write
+
+
+@pytest.mark.parametrize(
+    "method,url_fragment,call",
+    [
+        (
+            "enable_advance_automation",
+            "updateGroupsIsOn",
+            lambda c: c.enable_advance_automation("12345", 99),
+        ),
+        (
+            "disable_advance_automation",
+            "updateGroupsIsOn",
+            lambda c: c.disable_advance_automation("12345", 99),
+        ),
+        (
+            "create_advance_automation",
+            "addGroups",
+            lambda c: c.create_advance_automation("12345", {}),
+        ),
+        (
+            "delete_advance_automation",
+            "delByid",
+            lambda c: c.delete_advance_automation("12345", 99),
+        ),
+    ],
+)
+@responses_lib.activate
+def test_v2_write_10003_not_replayed(authed_client, method, url_fragment, call):
+    """Every v2 automation WRITE site passes session_refreshable=False: a 10003 surfaces
+    as an API error with no replay and no token refresh."""
+    url = f"https://www.acinfinityserver.com/api/version=2.0/dev/{url_fragment}"
+    responses_lib.add(
+        responses_lib.POST, url, json={"code": 10003, "msg": "session expired"}, status=200
+    )
+    with patch.object(authed_client, "_enforce_write_rate_limit"):
+        with pytest.raises(ACInfinityAPIError):
+            call(authed_client)
+    write_calls = [c for c in responses_lib.calls if url_fragment in c.request.url]
+    login_calls = [c for c in responses_lib.calls if "appUserLogin" in c.request.url]
+    assert len(write_calls) == 1, f"{method} replayed the write"
+    assert len(login_calls) == 0, f"{method} refreshed token on a write"
+
+
+# ============ #251 — app User-Agent header (not the default python-requests UA) ============
+
+
+@responses_lib.activate
+def test_user_agent_header_per_endpoint(client):
+    """The client sends an AC-app User-Agent on every endpoint, never the default
+    python-requests UA (which CloudFront may fingerprint-block on server ASNs)."""
+    responses_lib.add(
+        responses_lib.POST, LOGIN_URL, json={"code": 200, "data": {"appId": "tok"}}, status=200
+    )
+    responses_lib.add(responses_lib.POST, DEVICES_URL, json=DEVICES_SUCCESS, status=200)
+    client.authenticate()
+    client.get_devices()
+    ua_by_url = {}
+    for c in responses_lib.calls:
+        ua_by_url.setdefault(c.request.url, c.request.headers.get("User-Agent", ""))
+    login_ua = next(ua for url, ua in ua_by_url.items() if "appUserLogin" in url)
+    devices_ua = next(ua for url, ua in ua_by_url.items() if "devInfoListAll" in url)
+    assert login_ua == "ACController/1.8.2 (com.acinfinity.humiture; build:489; iOS 16.5.1)"
+    assert devices_ua == "okhttp/3.10.0"
+    assert all("python-requests" not in ua for ua in (login_ua, devices_ua))
+
+
 def test_call_with_token_refresh_serializes_concurrent_401s(authed_client):
     """Concurrent 401s must coalesce into a SINGLE re-authentication.
 
@@ -978,12 +1147,13 @@ def test_call_with_token_refresh_serializes_concurrent_401s(authed_client):
     auth_call_count = 0
     auth_count_lock = threading.Lock()
 
-    def fake_authenticate() -> bool:
+    def fake_authenticate_inner() -> None:
+        # The refresh path calls _authenticate_inner() (mirrors the lazy-auth preamble),
+        # so patch that rather than the public authenticate() wrapper.
         nonlocal auth_call_count
         with auth_count_lock:
             auth_call_count += 1
         authed_client.token = f"fresh_token_{auth_call_count}"
-        return True
 
     def fake_inner() -> list[dict]:
         attempt = getattr(thread_local, "attempt", 0)
@@ -1007,7 +1177,7 @@ def test_call_with_token_refresh_serializes_concurrent_401s(authed_client):
         except Exception as e:  # pragma: no cover — only fires on test failure
             errors.append(e)
 
-    with patch.object(authed_client, "authenticate", side_effect=fake_authenticate):
+    with patch.object(authed_client, "_authenticate_inner", side_effect=fake_authenticate_inner):
         with patch.object(authed_client, "_get_devices_inner", side_effect=fake_inner):
             threads = [threading.Thread(target=call) for _ in range(n_threads)]
             for t in threads:
@@ -1246,6 +1416,47 @@ def test_get_historical_data_pagination(authed_client):
     assert result is not None
     assert len(result) == 5
     assert len(responses_lib.calls) == 2
+
+
+@responses_lib.activate
+def test_get_historical_data_pagination_three_plus_chunks(authed_client):
+    """#248: multi-day history assembles across MANY chunks via the time cursor (the API
+    caps a page at ~96 rows). Exercises repeated cursor advances, crosses the 96-row mark,
+    and proves no records are dropped or duplicated at chunk boundaries."""
+    base_ts = 1714000000
+    page_size = 96
+    chunk_sizes = [96, 96, 96, 50]  # 3 full chunks + a short final chunk (clean stop) = 338 rows
+    next_ts = base_ts
+    for size in chunk_sizes:
+        rows = [
+            {
+                "createTime": next_ts + i,
+                "temperature": 2400,
+                "fTemperature": 7520,
+                "humidity": 5500,
+                "vpdNums": 150,
+                "portSpead": 0,
+                "portStatus": 0,
+                "devPortCount": 2,
+            }
+            for i in range(size)
+        ]
+        next_ts += size  # strictly increasing across the boundary — no overlap
+        responses_lib.add(
+            responses_lib.POST, HISTORY_URL, json={"code": 200, "data": {"rows": rows}}, status=200
+        )
+
+    result = authed_client.get_historical_data(
+        dev_id="12345",
+        start_timestamp=base_ts,
+        end_timestamp=base_ts + 86400,
+        page_size=page_size,
+    )
+    assert len(result) == 338  # nothing dropped across 4 chunks (> 96 total)
+    create_times = [r["createTime"] for r in result]
+    assert len(set(create_times)) == len(create_times)  # no duplicates at chunk boundaries
+    assert create_times == sorted(create_times)  # cursor advanced monotonically
+    assert len(responses_lib.calls) == 4  # one request per chunk, stopped on the short chunk
 
 
 @responses_lib.activate

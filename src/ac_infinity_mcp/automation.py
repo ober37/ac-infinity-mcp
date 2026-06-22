@@ -208,7 +208,9 @@ async def _build_advance_conflict_response(
         )
         human_summary = (
             f"'{auto_name}' is actively controlling this port at target speed {current_auto_speed}."
-            " To make manual adjustments, you need to resolve this automation conflict first."
+            " Changing its speed by hand repeatedly can throw off the pattern the controller is"
+            " learning for your grow, so I've left it on automation. To make manual adjustments,"
+            " you need to resolve this automation conflict first."
         )
         if requested_speed is not None:
             suggested_reply = (

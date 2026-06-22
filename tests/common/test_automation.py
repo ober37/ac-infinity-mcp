@@ -242,6 +242,17 @@ async def test_build_conflict_sub_path_a_has_expected_options():
     assert data["automation_name"] == "Night Cycle"
 
 
+async def test_build_conflict_sub_path_a_human_summary_explains_learning():
+    """#250: the governed-port conflict explains WHY manual override is blocked — to
+    protect the pattern the controller is learning — so a grower understands it is not
+    arbitrary obstruction (and won't try to force repeated manual overrides)."""
+    raw = [_make_raw_entry(101, "Night Cycle", is_on=1, run_state=1, bitmask=1)]
+    client = _make_mock_client(raw)
+    result = await _build_advance_conflict_response(client, "C58ZA", 123456, 1, "Filter")
+    data = json.loads(result)
+    assert "pattern the controller is learning" in data["human_summary"]
+
+
 async def test_build_conflict_sub_path_a_with_requested_speed_has_update_option():
     """requested_speed provided → 0_update_speed option present."""
     raw = [_make_raw_entry(101, "Night Cycle", is_on=1, run_state=1, bitmask=1)]

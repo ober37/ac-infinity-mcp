@@ -95,6 +95,13 @@ def _sensor_value(s: dict) -> float | int:
 
 _SCHEDULE_ALWAYS_ACTIVE: int = 255
 
+# API response codes that mean "session expired — re-authenticate" (HTTP body code,
+# distinct from HTTP 401). On a READ these trigger a transparent token refresh + retry;
+# on a WRITE the code surfaces as an API error instead (no replay — double-apply guard).
+# 10003 is documented by the AC Infinity community as the session-expired code; treated
+# defensively (the refresh-failure cache bounds re-login to one attempt regardless).
+_SESSION_EXPIRED_API_CODES: frozenset[int] = frozenset({10003})
+
 
 def build_add_groups_payload(
     dev_id: str,
@@ -229,22 +236,43 @@ class ACInfinityClient:
         self._auth_lock = threading.Lock()
         self._auth_error: ACInfinityAuthError | None = None
 
-    def _raise_for_api_code(self, code: int | None, error_msg: str, context: str) -> None:
-        """Map API response code to the appropriate exception."""
-        if code == 401:
-            raise ACInfinityAuthError(f"Token rejected by API (code 401): {error_msg}")
+    def _raise_for_api_code(
+        self,
+        code: int | None,
+        error_msg: str,
+        context: str,
+        *,
+        session_refreshable: bool = True,
+    ) -> None:
+        """Map an API response code to the appropriate exception.
+
+        ``session_refreshable`` (default ``True``, used by reads) controls whether a
+        session-expiry code is raised as ACInfinityAuthError so the caller's token
+        refresh-and-retry path fires. Write paths pass ``False``: a write that comes
+        back with a session-expiry code must NOT be transparently replayed — the
+        server may already have applied it, so a retry would double-apply state (same
+        rationale as excluding Timeout from write retries). On a write, the
+        session-expiry code surfaces as a plain ACInfinityAPIError instead.
+
+        ``401`` is always treated as an auth failure (unchanged on every path).
+        """
+        if code == 401 or (session_refreshable and code in _SESSION_EXPIRED_API_CODES):
+            raise ACInfinityAuthError(f"Token rejected by API (code {code}): {error_msg}")
         raise ACInfinityAPIError(f"{context} API error {code}: {error_msg}")
 
     def _call_with_token_refresh(self, fn, *args, **kwargs):
         """Lazy-auth preamble + 401-refresh.
 
         On the first tool call (token is None), authenticate before calling fn().
-        Subsequent calls skip the preamble. On a 401 mid-session, re-authenticate
-        once and retry transparently.
+        Subsequent calls skip the preamble. On an auth rejection mid-session
+        (HTTP 401 or a session-expiry body code on a read), re-authenticate once
+        and retry transparently.
 
-        _auth_error is set on the first credential failure so that concurrent
-        callers and subsequent callers raise immediately without hitting the
-        login endpoint again.
+        _auth_error is set on the first credential failure — both at the initial
+        login and on a failed mid-session refresh — so that concurrent callers and
+        subsequent callers raise immediately without re-hitting the login endpoint.
+        Only genuine credential failures are cached; transient network errors are
+        not, so a momentary outage cannot pin a permanent false lockout.
         """
         if not self.token:
             with self._auth_lock:
@@ -259,14 +287,26 @@ class ACInfinityClient:
         token_at_start = self.token
         try:
             return fn(*args, **kwargs)
-        except ACInfinityAuthError:
+        except ACInfinityAuthError as original_auth_error:
             if not self.token:
                 raise  # never authenticated; nothing to refresh
             with self._auth_lock:
                 if self.token == token_at_start:
                     logger.info("Token rejected by API — refreshing")
-                    if not self.authenticate():
+                    try:
+                        self._authenticate_inner()
+                    except ACInfinityAuthError as exc:
+                        # Genuine credential failure on refresh: cache it and drop the
+                        # stale token so subsequent calls short-circuit via the preamble
+                        # instead of re-hammering the login endpoint.
+                        self._auth_error = exc
+                        self.token = None
                         raise
+                    except Exception:
+                        # Transient failure during refresh (e.g. network): do NOT cache
+                        # (no false permanent lockout) and surface the original auth
+                        # rejection so callers see a consistent error type.
+                        raise original_auth_error from None
             return fn(*args, **kwargs)
 
     def _enforce_write_rate_limit(self) -> None:
@@ -769,7 +809,7 @@ class ACInfinityClient:
                 )
 
             logger.error("Write failed for devId=%s port=%s: %s", dev_id, port, error_msg)
-            self._raise_for_api_code(code, error_msg, "Write")
+            self._raise_for_api_code(code, error_msg, "Write", session_refreshable=False)
         else:  # pragma: no cover — defensive; current control flow always break/raise first
             # Defensive guard (P1-F017): the loop above must either break on
             # a 200 response or raise via _raise_for_api_code. If a future
@@ -909,7 +949,9 @@ class ACInfinityClient:
             logger.error(
                 "Failed to enable automation advId=%s (devId=%s): %s", adv_id, dev_id, error_msg
             )
-            self._raise_for_api_code(code, error_msg, "EnableAutomation")
+            self._raise_for_api_code(
+                code, error_msg, "EnableAutomation", session_refreshable=False
+            )
 
         logger.info("Toggled automation advId=%s to enabled (devId=%s)", adv_id, dev_id)
         return result
@@ -962,7 +1004,9 @@ class ACInfinityClient:
             logger.error(
                 "Failed to disable automation advId=%s (devId=%s): %s", adv_id, dev_id, error_msg
             )
-            self._raise_for_api_code(code, error_msg, "DisableAutomation")
+            self._raise_for_api_code(
+                code, error_msg, "DisableAutomation", session_refreshable=False
+            )
 
         logger.info("Toggled automation advId=%s to disabled (devId=%s)", adv_id, dev_id)
         return result
@@ -1013,7 +1057,9 @@ class ACInfinityClient:
             error_msg = result.get("msg", "Unknown error")
             code = result.get("code")
             logger.error("Failed to create automation (devId=%s): %s", dev_id, error_msg)
-            self._raise_for_api_code(code, error_msg, "CreateAutomation")
+            self._raise_for_api_code(
+                code, error_msg, "CreateAutomation", session_refreshable=False
+            )
 
         data = result.get("data") or {}
         logger.info("Created automation for devId=%s, advId=%s", dev_id, data.get("advId"))
@@ -1063,7 +1109,9 @@ class ACInfinityClient:
             logger.error(
                 "Failed to delete automation advId=%s (devId=%s): %s", adv_id, dev_id, error_msg
             )
-            self._raise_for_api_code(code, error_msg, "DeleteAutomation")
+            self._raise_for_api_code(
+                code, error_msg, "DeleteAutomation", session_refreshable=False
+            )
 
         logger.info("Deleted automation advId=%s (devId=%s)", adv_id, dev_id)
         return result

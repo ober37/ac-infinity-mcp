@@ -130,10 +130,19 @@ def _client() -> ACInfinityClient:
     return _aci_client
 
 
-async def _get_device(device_id: str) -> tuple[dict | None, str | None]:
+async def _get_device(
+    device_id: str, *, for_write: bool = False
+) -> tuple[dict | None, str | None]:
     """Fetch devices (from TTL cache if warm) and find the one matching device_id.
 
     Returns (device_dict, None) on success, (None, error_json) on not-found.
+
+    ``for_write`` (set by every write tool) rejects controllers shared from another
+    AC Infinity account (``isShare == 1``): the API returns "No Permission" on writes
+    to them, so we surface a grower-readable read-only message instead of attempting
+    the write. Read tools leave ``for_write=False`` so shared devices stay viewable.
+    The guard fires before any dry-run handling, so a shared device is blocked in
+    both preview and live paths.
     """
     global _device_cache, _device_cache_expires_at
     now = time.monotonic()
@@ -143,6 +152,17 @@ async def _get_device(device_id: str) -> tuple[dict | None, str | None]:
     device = next((d for d in _device_cache if d.get("devCode") == device_id), None)
     if not device:
         return None, json.dumps({"error": f"Device {device_id} not found"})
+    if for_write and device.get("isShare") == 1:
+        name = _sanitize_api_string(device.get("devName") or "", 64) or "This controller"
+        return None, json.dumps(
+            {
+                "error": (
+                    f"{name} is shared with you from another AC Infinity account, so it's "
+                    "view-only. You can see its readings, but only the account that owns it "
+                    "can change its settings. Ask the owner if you need control."
+                )
+            }
+        )
     return device, None
 
 
@@ -1885,7 +1905,7 @@ async def set_port_speed(
         if not 1 <= speed <= 10:
             return json.dumps({"error": "speed must be 1–10"})
 
-        device, err = await _get_device(device_id)
+        device, err = await _get_device(device_id, for_write=True)
         if err:
             return err
         assert device is not None
@@ -1982,7 +2002,7 @@ async def set_port_on(
         if port < 1:
             return json.dumps({"error": "port must be a positive integer"})
 
-        device, err = await _get_device(device_id)
+        device, err = await _get_device(device_id, for_write=True)
         if err:
             return err
         assert device is not None
@@ -2070,7 +2090,7 @@ async def set_port_off(
         if port < 1:
             return json.dumps({"error": "port must be a positive integer"})
 
-        device, err = await _get_device(device_id)
+        device, err = await _get_device(device_id, for_write=True)
         if err:
             return err
         assert device is not None
@@ -2178,7 +2198,7 @@ async def set_vpd_automation(
         if not 0.1 <= target_vpd <= 3.0:
             return json.dumps({"error": "target_vpd must be between 0.1 and 3.0 kPa"})
 
-        device, err = await _get_device(device_id)
+        device, err = await _get_device(device_id, for_write=True)
         if err:
             return err
         assert device is not None
@@ -2284,7 +2304,7 @@ async def set_temperature_automation(
         if port < 1:
             return json.dumps({"error": "port must be a positive integer"})
 
-        device, err = await _get_device(device_id)
+        device, err = await _get_device(device_id, for_write=True)
         if err:
             return err
         assert device is not None
@@ -2433,7 +2453,7 @@ async def set_humidity_automation(
         if min_rh >= max_rh:
             return json.dumps({"error": "min_rh must be less than max_rh"})
 
-        device, err = await _get_device(device_id)
+        device, err = await _get_device(device_id, for_write=True)
         if err:
             return err
         assert device is not None
@@ -2584,7 +2604,7 @@ async def set_port_mode(
             if timer_duration_seconds < 1:
                 return json.dumps({"error": "timer_duration_seconds must be >= 1"})
 
-        device, err = await _get_device(device_id)
+        device, err = await _get_device(device_id, for_write=True)
         if err:
             return err
         assert device is not None
@@ -2718,7 +2738,7 @@ async def apply_grow_stage_template(
     target_vpd_x10 = int(midpoint_x100 / 10 + 0.5)
 
     try:
-        device, err = await _get_device(device_id)
+        device, err = await _get_device(device_id, for_write=True)
     except ACInfinityAuthError as e:
         logger.warning(
             "Auth error fetching devices in apply_grow_stage_template (device=%s): %s",
@@ -3115,7 +3135,7 @@ async def enable_advance_automation(
         if adv_id_int is None:
             return json.dumps({"error": "Invalid automation_id format"})
 
-        device, err = await _get_device(device_id)
+        device, err = await _get_device(device_id, for_write=True)
         if err:
             return err
         assert device is not None
@@ -3213,7 +3233,7 @@ async def disable_advance_automation(
         if adv_id_int is None:
             return json.dumps({"error": "Invalid automation_id format"})
 
-        device, err = await _get_device(device_id)
+        device, err = await _get_device(device_id, for_write=True)
         if err:
             return err
         assert device is not None
@@ -3403,7 +3423,7 @@ async def create_advance_automation(
                 ),
             })
 
-        device, err = await _get_device(device_id)
+        device, err = await _get_device(device_id, for_write=True)
         if err:
             return err
         assert device is not None
@@ -3544,7 +3564,7 @@ async def delete_advance_automation(
         if adv_id_int is None:
             return json.dumps({"error": "Invalid automation_id format"})
 
-        device, err = await _get_device(device_id)
+        device, err = await _get_device(device_id, for_write=True)
         if err:
             return err
         assert device is not None
@@ -3654,7 +3674,7 @@ async def break_out_of_automation(
         if port < 1 or port > 8:
             return json.dumps({"error": f"port must be between 1 and 8 (got {port})"})
 
-        device, err = await _get_device(device_id)
+        device, err = await _get_device(device_id, for_write=True)
         if err:
             return err
         assert device is not None
@@ -3871,7 +3891,7 @@ async def break_out_of_automation(
             # disable — the sleep allows both to settle before the co-port lock writes.
             await asyncio.sleep(2.0)
             _invalidate_device_cache()
-            device, err = await _get_device(device_id)
+            device, err = await _get_device(device_id, for_write=True)
             if err:
                 logger.error(
                     "break_out_of_automation could not re-fetch device after disable "

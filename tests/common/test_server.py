@@ -9273,3 +9273,141 @@ def test_decode_mode_roundtrip_and_unknown():
     assert srv._decode_mode(15) == "UNKNOWN(15)"  # ADVANCE not a decodable label
     # Reverse map is consistent with the forward table.
     assert srv._MODE_AT_TYPES == {v: k for k, v in srv._MODE_LABELS.items()}
+
+
+# ============ #249 — shared (isShare=1) controllers are read-only for writes ============
+
+_SHARED_DEVICE = {**MOCK_DEVICE_LEGACY, "isShare": 1}
+
+
+async def test_get_device_for_write_blocks_shared(mock_client):
+    """A controller shared from another account (isShare=1) is rejected for writes with a
+    grower-readable read-only message that leaks no internal field name or id."""
+    mock_client.get_devices.return_value = [copy.deepcopy(_SHARED_DEVICE)]
+    device, err = await _get_device("C58ZA", for_write=True)
+    assert device is None
+    data = json.loads(err)
+    assert "shared" in data["error"] and "view-only" in data["error"]
+    assert "isShare" not in err and "devId" not in err  # no internal leakage
+
+
+async def test_get_device_read_allows_shared(mock_client):
+    """The same shared controller stays viewable for read tools (for_write=False)."""
+    mock_client.get_devices.return_value = [copy.deepcopy(_SHARED_DEVICE)]
+    device, err = await _get_device("C58ZA")  # default for_write=False
+    assert err is None
+    assert device is not None and device["devCode"] == "C58ZA"
+
+
+async def test_get_device_for_write_allows_when_isShare_absent(mock_client):
+    """Owned controllers carry no isShare field → writable (the common path)."""
+    mock_client.get_devices.return_value = [copy.deepcopy(MOCK_DEVICE_LEGACY)]
+    device, err = await _get_device("C58ZA", for_write=True)
+    assert err is None and device is not None
+
+
+async def test_get_device_for_write_allows_when_isShare_zero(mock_client):
+    """isShare=0 (explicitly not shared) → writable."""
+    mock_client.get_devices.return_value = [{**MOCK_DEVICE_LEGACY, "isShare": 0}]
+    device, err = await _get_device("C58ZA", for_write=True)
+    assert err is None and device is not None
+
+
+# Every write tool: (label, callable(dry_run), client write method that must NOT be called).
+_WRITE_TOOL_CASES = [
+    ("set_port_speed", lambda dr: set_port_speed("C58ZA", 1, 5, dry_run=dr), "set_port_mode"),
+    ("set_port_on", lambda dr: set_port_on("C58ZA", 1, dry_run=dr), "set_port_mode"),
+    ("set_port_off", lambda dr: set_port_off("C58ZA", 1, dry_run=dr), "set_port_mode"),
+    (
+        "set_vpd_automation",
+        lambda dr: set_vpd_automation("C58ZA", 1, 1.2, dry_run=dr),
+        "set_port_mode",
+    ),
+    (
+        "set_temperature_automation",
+        lambda dr: set_temperature_automation("C58ZA", 1, 20.0, 28.0, dry_run=dr),
+        "set_port_mode",
+    ),
+    (
+        "set_humidity_automation",
+        lambda dr: set_humidity_automation("C58ZA", 1, 40.0, 60.0, dry_run=dr),
+        "set_port_mode",
+    ),
+    ("set_port_mode", lambda dr: set_port_mode("C58ZA", 1, "ON", dry_run=dr), "set_port_mode"),
+    (
+        "apply_grow_stage_template",
+        lambda dr: apply_grow_stage_template("C58ZA", 1, "veg", dry_run=dr),
+        "set_port_mode",
+    ),
+    (
+        "enable_advance_automation",
+        lambda dr: enable_advance_automation("C58ZA", "1234567", dry_run=dr),
+        "enable_advance_automation",
+    ),
+    (
+        "disable_advance_automation",
+        lambda dr: disable_advance_automation("C58ZA", "1234567", dry_run=dr),
+        "disable_advance_automation",
+    ),
+    (
+        "create_advance_automation",
+        lambda dr: create_advance_automation("C58ZA", "Night", 5, 1, dry_run=dr),
+        "create_advance_automation",
+    ),
+    (
+        "delete_advance_automation",
+        lambda dr: delete_advance_automation("C58ZA", "1234567", dry_run=dr),
+        "delete_advance_automation",
+    ),
+    (
+        "break_out_of_automation",
+        lambda dr: break_out_of_automation("C58ZA", 1, dry_run=dr),
+        "disable_advance_automation",
+    ),
+]
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+@pytest.mark.parametrize(
+    "label,call,write_method", _WRITE_TOOL_CASES, ids=[c[0] for c in _WRITE_TOOL_CASES]
+)
+async def test_write_tool_blocks_shared_device(mock_client, label, call, write_method, dry_run):
+    """Every write tool refuses a shared controller (both preview and live) and never calls
+    its client write method — proving each passes for_write=True to _get_device."""
+    mock_client.get_devices.return_value = [copy.deepcopy(_SHARED_DEVICE)]
+    result = await call(dry_run)
+    data = json.loads(result)
+    assert "shared" in data.get("error", ""), f"{label} did not return the read-only message"
+    getattr(mock_client, write_method).assert_not_called()
+
+
+async def test_break_out_blocks_shared_before_lock_and_disable(mock_client):
+    """break_out_of_automation rejects a shared device before acquiring the per-device lock
+    or calling disable — no partial sequence on a controller we cannot write."""
+    mock_client.get_devices.return_value = [copy.deepcopy(_SHARED_DEVICE)]
+    result = await break_out_of_automation("C58ZA", 1, dry_run=False)
+    data = json.loads(result)
+    assert "shared" in data["error"]
+    mock_client.disable_advance_automation.assert_not_called()
+    mock_client.set_port_mode.assert_not_called()
+
+
+def test_all_write_tools_covered_by_shared_guard():
+    """Completeness guard: the parametrized shared-device test must cover EVERY registered
+    write tool (a tool whose signature has a dry_run parameter). A newly-added write tool
+    not in _WRITE_TOOL_CASES fails this test, forcing a conscious decision about the
+    isShare read-only guard rather than silently skipping it."""
+    import inspect
+
+    import ac_infinity_mcp.server as srv
+
+    covered = {c[0] for c in _WRITE_TOOL_CASES}
+    write_tools = set()
+    for tool in asyncio.run(srv.mcp_server.list_tools()):
+        fn = getattr(srv, tool.name, None)
+        if fn is not None and "dry_run" in inspect.signature(fn).parameters:
+            write_tools.add(tool.name)
+    assert write_tools, "expected to discover write tools via the dry_run signature"
+    assert write_tools == covered, (
+        f"uncovered write tools: {write_tools - covered}; stale cases: {covered - write_tools}"
+    )
