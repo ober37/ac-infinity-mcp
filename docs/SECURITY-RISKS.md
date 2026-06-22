@@ -66,6 +66,43 @@ All endpoints below are confirmed over HTTPS. This list was updated via network 
 
 ---
 
+## Single active session per account (accepted limitation, #252)
+
+AC Infinity permits only one active session per account. Authenticating through this server
+(initial login or a transparent session-expiry re-auth) can invalidate the user's AC Infinity
+mobile-app session, and vice versa. This is an upstream account-model constraint, not a
+defect in this server.
+
+- **Impact:** the user may be signed out of the mobile app while the server holds an active
+  session. The user's controllers, schedules, and settings are unaffected — logging back
+  into the app restores app access (and may in turn invalidate the server's token, which the
+  server re-acquires on the next read).
+- **Write safety:** session expiry (API body code `10003`) triggers transparent re-auth and
+  retry on **reads only**. On **writes** it is surfaced as an API error and never replayed,
+  because the write may have been processed server-side before the expiry response — a silent
+  retry could double-apply state. A refresh-failure cache bounds re-login to one attempt so a
+  bad credential does not hammer the login endpoint. See `docs/API.md` Quirk 31.
+- **Mitigation:** none required; documented so growers understand why app sign-outs occur.
+  The `discover_devices` tool docstring carries a grower-readable heads-up.
+
+---
+
+## Client User-Agent identification (#251)
+
+The client sends AC-app-style `User-Agent` headers rather than the default
+`python-requests` UA, so traffic is indistinguishable from the official mobile app:
+
+| Endpoint class | `User-Agent` |
+|---|---|
+| Login (`/user/appUserLogin`) | `ACController/1.8.2 (com.acinfinity.humiture; build:489; iOS 16.5.1)` |
+| Data / write endpoints | `okhttp/3.10.0` |
+
+These are spoofed identity strings sent to the upstream API; they contain no user data and
+no credentials. A regression test locks both values. This is an accepted-behavior note, not
+a vulnerability.
+
+---
+
 ## PYSEC-2025-183 — `mcp` package
 
 - **Package:** `mcp` (Model Context Protocol Python SDK; a direct dependency)

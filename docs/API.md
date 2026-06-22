@@ -69,7 +69,14 @@ appEmail=user%40example.com&appPasswordl=yourpassword
 - Store `data.appId` as the session token for all subsequent requests
 - Password is silently truncated to 25 characters server-side (Quirk 2)
 - Token does not expire on a fixed TTL in testing; it may expire if the mobile app
-  forces a re-login or after extended inactivity. Re-authenticate by restarting the server.
+  forces a re-login or after extended inactivity. When this happens the API returns a
+  session-expiry body code (`10003`) inside an otherwise HTTP-200 response. On **reads**
+  the client now re-authenticates transparently and retries once; on **writes** it does
+  **not** replay (see "Session-expiry re-authentication" below and Quirk 30).
+- **Single active session per account:** AC Infinity permits only one live session per
+  account. Authenticating through this server can invalidate the user's AC Infinity
+  mobile-app session (and vice versa). Logging back into the app does not affect the
+  user's controllers or schedules.
 
 ---
 
@@ -503,7 +510,7 @@ devId=REDACTED_DEV_ID&externalPort=1&onSpead=5&modeType=2&offSpead=0&...
 
 ---
 
-## All 29 Known API Quirks
+## All 31 Known API Quirks
 
 ### Quirk 1 — Auth typo: `appPasswordl`
 
@@ -555,6 +562,15 @@ Records within a page are returned oldest-first; advancing `time` past the
 newest `createTime` in the current page moves the cursor forward through
 history. The client's pagination test in `tests/common/test_client.py`
 exercises this ordering explicitly.
+
+**Large-range assembly (#248):** because pagination is driven by the `time` cursor and
+not by `pageNum`, the client assembles arbitrarily large date ranges by chaining chunks
+until a short page is returned. The community has reported a server-side per-page
+observation of roughly 96 rows; that observation does **not** truncate this server's
+results, because each chunk's last `createTime` becomes the next chunk's start cursor and
+the loop continues until the range is exhausted. `get_historical_readings` defaults to a
+`page_size` of 2000 and stitches the chunks together. A regression test locks this
+behavior so a future change to the cursor logic cannot silently re-introduce truncation.
 
 ---
 
@@ -1361,6 +1377,49 @@ affected by the typo. So the typo currently bites nothing.
 `modeTye` (with a `modeType` fallback for safety): `port.get("modeTye") or port.get("modeType")`.
 Note the device-list also carries a separate `curMode` field. (Originally raised as issue #242,
 closed as not-a-live-bug after audit; retained here as a guardrail.)
+
+---
+
+### Quirk 30 — Schedule/automation times are in the controller's local clock, not UTC
+
+AC controllers store all schedule and automation times (timer on/off times, schedule
+start/end, advance-automation begin/end) against the **controller's own internal clock**,
+which is set by the AC Infinity mobile app the last time the controller synced. These times
+are **not** UTC and **not** anchored to the phone or server timezone at read/write time.
+
+Consequences:
+
+- A schedule that fires at "6:00 AM" fires at 6:00 AM on the controller's last-synced
+  clock, regardless of where the API caller is.
+- Physically moving a controller to a new timezone does **not** auto-shift its schedules.
+  They keep firing at the same wall-clock hour on the old clock until the controller is
+  re-synced.
+- The remedy is always the same: open the AC Infinity app and let it re-sync the
+  controller's time. This server does not (and cannot reliably) rewrite the controller
+  clock, so it does not attempt timezone normalization on schedule fields.
+
+The `create_advance_automation` and `set_port_mode` (SCHEDULE/TIMER path) tool docstrings
+carry a grower-readable version of this caveat. (Issue #247.)
+
+---
+
+### Quirk 31 — Session-expiry body code `10003`; read-only-safe re-authentication
+
+When the session token expires, the API does **not** return HTTP 401 — it returns an
+HTTP-200 envelope with body `code` `10003` (the community-documented session-expired code).
+The client handles this asymmetrically to avoid double-applying writes:
+
+| Call type | Behavior on `10003` (or HTTP 401) |
+|---|---|
+| **Read** (`session_refreshable=True`) | Re-authenticate once transparently, then retry the read. |
+| **Write** (`session_refreshable=False`) | Surface as an API error; **never** replay. A write may have been processed server-side before the session-expiry response, so a silent retry could double-apply state. |
+
+A **refresh-failure cache** bounds re-login to a single attempt: a genuine credential
+failure during refresh is cached so concurrent and subsequent callers do not re-hammer the
+login endpoint. A transient (e.g. network) failure during refresh is **not** cached, so a
+later call can retry. See `_SESSION_EXPIRED_API_CODES` and `_call_with_token_refresh` in
+`client.py`. Because re-auth performs a fresh login, it can invalidate the user's mobile-app
+session (single-session limitation — see the login-endpoint notes above). (Issue #252.)
 
 ---
 
@@ -2389,6 +2448,39 @@ Same structure as above but **without** the `"0_update_speed"` key and with `sug
 - `options.1_break_out.available` — set to `governing.get("enabled", False) or governing.get("run_state", False)`; `true` when the automation is enabled OR actively running (handles mid-toggle transient state where `isOn=0` but `runState=1`)
 - The `isOpenAutomation` guard condition is documented in Quirk 19; the pre-write guard from devInfoListAll is documented in Quirk 25
 - **User-facing text rules:** All `instruction`, `description`, `suggested_reply`, and `switching_guidance` fields must use natural-language prose (no Python function call syntax, no `dry_run`, no `device_id=`, no raw numeric IDs). See `CLAUDE.md` § "User-facing text rules".
+- **Learning-protection rationale (#250):** for AI-automated ports, the conflict response explains that manual override is blocked specifically to protect the pattern the controller is actively learning, rather than presenting the block as a generic permission error. This frames the lock as intentional grow-protection so the grower understands why the change was deferred and what to do instead.
+
+---
+
+## Shared (read-only) controllers — write behavior (#249)
+
+Controllers shared from another AC Infinity account carry `isShare == 1` in the device-list
+response. The AC Infinity API rejects writes to these controllers with a "No Permission"
+error. Rather than attempting the write and surfacing the raw API error, every write tool
+checks `isShare` first (`for_write=True` in the shared device-list guard) and returns a
+grower-readable read-only message naming the controller:
+
+> "<Device> is shared with you from another AC Infinity account, so it's read-only — you
+> can view its readings but can't change its settings from here."
+
+Read tools leave the guard off (`for_write=False`), so shared controllers remain fully
+viewable. The guard fires before any dry-run handling, so a shared device is blocked even in
+preview mode. The shared-device guard lives in `server.py`.
+
+---
+
+## Per-endpoint User-Agent values (#251)
+
+The client deliberately sends AC-app-style `User-Agent` headers (not the default
+`python-requests` UA) so requests are indistinguishable from the official app:
+
+| Endpoint class | `User-Agent` |
+|---|---|
+| Login (`/user/appUserLogin`) | `ACController/1.8.2 (com.acinfinity.humiture; build:489; iOS 16.5.1)` |
+| Data / write endpoints (device list, history, mode read/write, automation) | `okhttp/3.10.0` |
+
+These values are also shown inline in each endpoint's **Headers** block above. A regression
+test locks both strings so a future refactor cannot silently revert to the default UA.
 
 ---
 

@@ -202,6 +202,10 @@ async def discover_devices() -> str:
     Returns device IDs, names, and online status.
     Use this to find device_ids for use in other tools.
 
+    Heads up: signing in through this assistant may sign you out of the AC Infinity
+    mobile app, since AC Infinity allows one active session at a time. Just log back
+    into the app when you need it — your controllers and schedules are unaffected.
+
     Returns:
         JSON example::
 
@@ -2555,6 +2559,11 @@ async def set_port_mode(
     ``set_vpd_automation`` (VPD mode), ``set_temperature_automation`` and
     ``set_humidity_automation`` (AUTO mode).
 
+    Scheduled times run on the clock set in the controller itself, not your phone or
+    any other timezone. If you move the controller to a new timezone, your schedules
+    won't shift automatically — open the AC Infinity app and update the controller's
+    time so your schedule lands at the hour you expect.
+
     Args:
         device_id: Device code from discover_devices (e.g. "C58ZA").
         port: 1-based port number.
@@ -3355,6 +3364,11 @@ async def create_advance_automation(
     Defaults to dry_run=True for safety. Set dry_run=False to send the automation
     to the device. The port bitmask (grouptDevType) is computed automatically from
     the port number (Port N → 2^(N-1)).
+
+    Scheduled times run on the clock set in the controller itself, not your phone or
+    any other timezone. If you move the controller to a new timezone, your schedules
+    won't shift automatically — open the AC Infinity app and update the controller's
+    time so your schedule lands at the hour you expect.
 
     Args:
         device_id: The AC Infinity device code (from discover_devices).
