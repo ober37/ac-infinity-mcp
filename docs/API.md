@@ -503,7 +503,7 @@ devId=REDACTED_DEV_ID&externalPort=1&onSpead=5&modeType=2&offSpead=0&...
 
 ---
 
-## All 28 Known API Quirks
+## All 29 Known API Quirks
 
 ### Quirk 1 — Auth typo: `appPasswordl`
 
@@ -1319,6 +1319,38 @@ def _sensor_value(s: dict) -> float | int:
 
 **Out of scope (tracked separately):** `sensorUnit` is present on every sensor entry but not
 yet read — readings are emitted without unit labels. See issue #255.
+
+---
+
+### Quirk 29 — Per-port mode field is `modeTye` (typo) on the device-list, `modeType` on settings
+
+**Field location:** per-port objects in the device-list response (`devInfoListAll` /
+`portValuesInList`) vs. the per-port settings response (`getdevModeSettingList`).
+
+AC Infinity's API spells the per-port mode field **two different ways depending on the endpoint**:
+
+| Source response | Field spelling |
+|---|---|
+| Device-list / `devInfoListAll` per-port object | **`modeTye`** (missing the `p`) |
+| `getdevModeSettingList` per-port settings object | **`modeType`** (correct) |
+
+The misspelling is in AC's firmware itself — confirmed in AC's own decompiled app
+(`NetDeviceInfo.java`: `public byte modeTye;`), independent third-party clients
+(i8beef's `PortInfo.cs`: `[JsonPropertyName("modeTye")]`), and real `devType=20` captures
+(`tests/fixtures/captures/`). It is the same family of typo as `appPasswordl` on the login
+endpoint (Quirk 1). Reading `modeType` (correct spelling) from a **device-list** payload
+silently returns `None`.
+
+**How this server handles it:** we deliberately read the per-port mode **only from
+`getdevModeSettingList`** (correctly spelled `modeType`), never from the device-list. From the
+device-list we read only `isOpenAutomation`, `speak`, and `loadState` — none of which are
+affected by the typo. So the typo currently bites nothing.
+
+**Guardrail for future work:** if any future change reads the per-port mode from the device-list
+(e.g. to skip a `getdevModeSettingList` round-trip — see issue #277), it **must** read
+`modeTye` (with a `modeType` fallback for safety): `port.get("modeTye") or port.get("modeType")`.
+Note the device-list also carries a separate `curMode` field. (Originally raised as issue #242,
+closed as not-a-live-bug after audit; retained here as a guardrail.)
 
 ---
 
