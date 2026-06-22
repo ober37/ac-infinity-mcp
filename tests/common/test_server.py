@@ -6567,8 +6567,13 @@ async def test_build_advance_conflict_response_auth_error(mock_client):
     result = await set_port_speed("C58ZA", port=1, speed=5, dry_run=False)
     data = json.loads(result)
     assert data.get("error") == (
-        "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD"
+        "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD "
+        "(note: AC Infinity passwords are limited to 25 characters; longer ones are "
+        "truncated and login will fail)"
     )
+    # #262: the auth-failure message must surface the 25-character password limit so a
+    # grower (who never sees the server log) has a diagnostic path from Claude's reply alone.
+    assert "25 characters" in data["error"]
     assert data.get("detail") == "see server logs"
     assert "conflict" not in data
     assert "options" not in data

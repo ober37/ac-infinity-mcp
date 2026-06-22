@@ -57,6 +57,7 @@ from ac_infinity_mcp.ports import (
 )
 from ac_infinity_mcp.schema import (
     _ADVANCE_MODE_TYPE,
+    _AUTH_ERROR_MSG,
     ACInfinityAdvanceConflictError,
     ACInfinityAPIError,
     ACInfinityAuthError,
@@ -245,7 +246,7 @@ async def discover_devices() -> str:
     except ACInfinityAuthError as e:
         logger.warning("Auth error in discover_devices: %s", e)
         return json.dumps({
-            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "error": _AUTH_ERROR_MSG,
             "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
@@ -336,7 +337,7 @@ async def get_device_reading(device_id: str) -> str:
     except ACInfinityAuthError as e:
         logger.warning("Auth error in get_device_reading: %s", e)
         return json.dumps({
-            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "error": _AUTH_ERROR_MSG,
             "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
@@ -552,7 +553,7 @@ async def get_historical_readings(
     except ACInfinityAuthError as e:
         logger.warning("Auth error in get_historical_readings: %s", e)
         return json.dumps({
-            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "error": _AUTH_ERROR_MSG,
             "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
@@ -651,7 +652,7 @@ async def check_vpd_drift(device_id: str, stage: str = "veg") -> str:
     except ACInfinityAuthError as e:
         logger.warning("Auth error in check_vpd_drift: %s", e)
         return json.dumps({
-            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "error": _AUTH_ERROR_MSG,
             "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
@@ -737,7 +738,7 @@ async def get_all_device_readings() -> str:
     except ACInfinityAuthError as e:
         logger.warning("Auth error in get_all_device_readings: %s", e)
         return json.dumps({
-            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "error": _AUTH_ERROR_MSG,
             "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
@@ -792,7 +793,7 @@ async def get_environment_health(device_id: str, stage: str = "veg") -> str:
     except ACInfinityAuthError as e:
         logger.warning("Auth error in get_environment_health: %s", e)
         return json.dumps({
-            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "error": _AUTH_ERROR_MSG,
             "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
@@ -911,7 +912,7 @@ async def detect_environment_trends(device_id: str, days: int = 7) -> str:
     except ACInfinityAuthError as e:
         logger.warning("Auth error in detect_environment_trends: %s", e)
         return json.dumps({
-            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "error": _AUTH_ERROR_MSG,
             "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
@@ -1228,7 +1229,7 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
     except ACInfinityAuthError as e:
         logger.warning("Auth error in get_port_activity_report: %s", e)
         return json.dumps({
-            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "error": _AUTH_ERROR_MSG,
             "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
@@ -1503,7 +1504,7 @@ async def get_port_status(device_id: str, port: int) -> str:
     except ACInfinityAuthError as e:
         logger.warning("Auth error in get_port_status: %s", e)
         return json.dumps({
-            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "error": _AUTH_ERROR_MSG,
             "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
@@ -1818,7 +1819,7 @@ async def get_port_settings(device_id: str, port: int) -> str:
     except ACInfinityAuthError as e:
         logger.warning("Auth error in get_port_settings: %s", e)
         return json.dumps({
-            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "error": _AUTH_ERROR_MSG,
             "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
@@ -1927,7 +1928,7 @@ async def set_port_speed(
     except ACInfinityAuthError as e:
         logger.warning("Auth error in set_port_speed (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({
-            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "error": _AUTH_ERROR_MSG,
             "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
@@ -2014,7 +2015,7 @@ async def set_port_on(
     except ACInfinityAuthError as e:
         logger.warning("Auth error in set_port_on (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({
-            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "error": _AUTH_ERROR_MSG,
             "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
@@ -2102,7 +2103,7 @@ async def set_port_off(
     except ACInfinityAuthError as e:
         logger.warning("Auth error in set_port_off (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({
-            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "error": _AUTH_ERROR_MSG,
             "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
@@ -2218,7 +2219,7 @@ async def set_vpd_automation(
             device_id, port, e,
         )
         return json.dumps({
-            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "error": _AUTH_ERROR_MSG,
             "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
@@ -2366,7 +2367,7 @@ async def set_temperature_automation(
             device_id, port, e,
         )
         return json.dumps({
-            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "error": _AUTH_ERROR_MSG,
             "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
@@ -2477,7 +2478,7 @@ async def set_humidity_automation(
             device_id, port, e,
         )
         return json.dumps({
-            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "error": _AUTH_ERROR_MSG,
             "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
@@ -2639,7 +2640,7 @@ async def set_port_mode(
     except ACInfinityAuthError as e:
         logger.warning("Auth error in set_port_mode (device=%s port=%s): %s", device_id, port, e)
         return json.dumps({
-            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "error": _AUTH_ERROR_MSG,
             "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
@@ -2724,7 +2725,7 @@ async def apply_grow_stage_template(
             device_id, e,
         )
         return json.dumps({
-            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "error": _AUTH_ERROR_MSG,
             "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
@@ -2772,7 +2773,7 @@ async def apply_grow_stage_template(
             device_id, port, stage, e,
         )
         return json.dumps({
-            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "error": _AUTH_ERROR_MSG,
             "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
@@ -2876,7 +2877,7 @@ async def list_advance_automations(device_id: str) -> str:
     except ACInfinityAuthError as e:
         logger.warning("Auth error in list_advance_automations: %s", e)
         return json.dumps({
-            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "error": _AUTH_ERROR_MSG,
             "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
@@ -3071,7 +3072,7 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
     except ACInfinityAuthError as e:
         logger.warning("Auth error in get_advance_automation: %s", e)
         return json.dumps({
-            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "error": _AUTH_ERROR_MSG,
             "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
@@ -3166,7 +3167,7 @@ async def enable_advance_automation(
     except ACInfinityAuthError as e:
         logger.warning("Auth error in enable_advance_automation: %s", e)
         return json.dumps({
-            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "error": _AUTH_ERROR_MSG,
             "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
@@ -3304,7 +3305,7 @@ async def disable_advance_automation(
     except ACInfinityAuthError as e:
         logger.warning("Auth error in disable_advance_automation: %s", e)
         return json.dumps({
-            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "error": _AUTH_ERROR_MSG,
             "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
@@ -3504,7 +3505,7 @@ async def create_advance_automation(
     except ACInfinityAuthError as e:
         logger.warning("Auth error in create_advance_automation: %s", e)
         return json.dumps({
-            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "error": _AUTH_ERROR_MSG,
             "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
@@ -3597,7 +3598,7 @@ async def delete_advance_automation(
     except ACInfinityAuthError as e:
         logger.warning("Auth error in delete_advance_automation: %s", e)
         return json.dumps({
-            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "error": _AUTH_ERROR_MSG,
             "detail": "see server logs",
         })
     except ACInfinityAPIError as e:
@@ -3988,7 +3989,7 @@ async def break_out_of_automation(
     except ACInfinityAuthError as e:
         logger.warning("Auth error in break_out_of_automation: %s", e)
         return json.dumps({
-            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "error": _AUTH_ERROR_MSG,
             "detail": "see server logs",
         })
     except ACInfinityAPIError as e:

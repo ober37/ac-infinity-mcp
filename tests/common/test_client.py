@@ -109,6 +109,50 @@ def test_password_over_limit_warns(caplog):
     assert "Password length 30 exceeds the 25-character" in caplog.text
 
 
+def test_password_empty_string_no_warning(caplog):
+    """Empty-string password (#263): len("") > 25 is False, so no warning fires and
+    ""[:25] is "". The client constructs without raising; auth fails later at the
+    first API call (with the 25-char note), not at construction time.
+    """
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="ac_infinity_mcp.client"):
+        client = ACInfinityClient("user@example.com", "")
+    assert client.password == ""
+    assert "exceeds the 25-character" not in caplog.text
+
+
+def test_password_unicode_at_25_codepoints_no_warning(caplog):
+    """Unicode at exactly 25 code points (#263): len() counts code points, not UTF-8
+    bytes, so 25 multibyte chars (here 50 bytes) is len()==25 — not over the limit.
+    No warning, no truncation. Using a multibyte char proves code-point semantics:
+    an ASCII×25 case would pass even under a hypothetical byte-count implementation.
+    """
+    import logging
+
+    pw = "é" * 25  # 25 code points, 50 UTF-8 bytes
+    assert len(pw) == 25
+    with caplog.at_level(logging.WARNING, logger="ac_infinity_mcp.client"):
+        client = ACInfinityClient("user@example.com", pw)
+    assert client.password == pw  # truncation is a no-op
+    assert "exceeds the 25-character" not in caplog.text
+
+
+def test_password_unicode_over_25_codepoints_truncates_by_codepoint(caplog):
+    """Mirror case (#263): 26 multibyte code points is over the limit — warns and
+    truncates to 25 *code points* (password[:25]), not 25 bytes. Locks code-point
+    slicing semantics from the over-limit side; guards against a regression to a
+    byte-based length check or slice.
+    """
+    import logging
+
+    pw = "é" * 26  # 26 code points, 52 UTF-8 bytes
+    with caplog.at_level(logging.WARNING, logger="ac_infinity_mcp.client"):
+        client = ACInfinityClient("user@example.com", pw)
+    assert client.password == "é" * 25  # sliced by code point, not byte
+    assert "Password length 26 exceeds the 25-character" in caplog.text
+
+
 @pytest.fixture
 def authed_client():
     c = ACInfinityClient("test@example.com", "password123")

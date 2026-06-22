@@ -32,6 +32,20 @@ class ACInfinityConfigError(ACInfinityError):
     pass
 
 
+# Single source of truth for the auth-failure message returned to the MCP client.
+# Lives here (the shared leaf module) so every tool in server.py AND the conflict
+# helper in automation.py emit identical wording. The 25-character note surfaces
+# Quirk 2 (the API silently truncates longer passwords) to growers, who typically
+# don't watch server logs and so never see the operator-facing warning from
+# client.py. AC_INFINITY_EMAIL/PASSWORD are env-var names the self-hosting grower
+# sets themselves — safe to name; no credential value is included.
+_AUTH_ERROR_MSG = (
+    "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD "
+    "(note: AC Infinity passwords are limited to 25 characters; longer ones are "
+    "truncated and login will fail)"
+)
+
+
 # ============ Advance Automation Constants ============
 
 # modeType value that indicates a port is under Advance Automation control.

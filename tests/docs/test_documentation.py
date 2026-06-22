@@ -100,3 +100,18 @@ def test_api_md_quirk_count() -> None:
     assert header_count == entry_count, (
         f"API.md header says {header_count} quirks but found {entry_count} '### Quirk N' entries"
     )
+
+
+def test_api_md_quirk2_documents_25_char_limit() -> None:
+    """Quirk 2 must keep documenting the 25-character password limit (#262/#263).
+
+    The auth-failure message surfaced to growers cites this limit; this pins the
+    documented value to the Quirk 2 section so the two cannot silently drift apart.
+    """
+    section = re.search(
+        r"^### Quirk 2 .*?(?=^### Quirk 3)", API_MD, re.MULTILINE | re.DOTALL
+    )
+    assert section, "Could not isolate the Quirk 2 section in API.md"
+    assert "25 character" in section.group(0), (
+        "Quirk 2 section no longer documents the 25-character password limit"
+    )

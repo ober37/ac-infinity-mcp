@@ -13,7 +13,7 @@ import unicodedata
 
 from ac_infinity_mcp.analytics import _ZERO_LOAD_DEV_TYPES
 from ac_infinity_mcp.client import ACInfinityClient
-from ac_infinity_mcp.schema import ACInfinityAuthError
+from ac_infinity_mcp.schema import _AUTH_ERROR_MSG, ACInfinityAuthError
 
 logger = logging.getLogger(__name__)
 
@@ -180,7 +180,7 @@ async def _build_advance_conflict_response(
             "Auth error in _build_advance_conflict_response (device=%s)", device_id
         )
         return json.dumps({
-            "error": "Authentication failed — check AC_INFINITY_EMAIL and AC_INFINITY_PASSWORD",
+            "error": _AUTH_ERROR_MSG,
             "detail": "see server logs",
         })
     except Exception as exc:
