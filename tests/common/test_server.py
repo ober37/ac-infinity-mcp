@@ -9220,3 +9220,51 @@ async def test_break_out_co_port_filter_devtype18(mock_client, port_resistance, 
 
 # ============ #191: ghost-ADVANCE no-op (all automations disabled) ============
 # Covered by test_break_out_no_enabled_automation (line 6932) which was updated in this PR.
+
+
+# ============ #245: atType mode table is the verified numbering, not MifsHub's ============
+
+
+def test_mode_labels_match_verified_attype_numbering():
+    """Lock _MODE_LABELS to the numbering corroborated by the HA ac_infinity integration,
+    Brysshmurda's client, and the devType=20 captures. The original #245 issue body (from a
+    single community source) proposed a mis-indexed table (0=OFF, 7=VPD, 8=SCHEDULE, 15=ADVANCE);
+    this guards against anyone "correcting" our right table to that wrong one.
+    See .claude/internal/CONTROLLER_89_AIPLUS_RESEARCH.md.
+    """
+    import ac_infinity_mcp.server as srv
+
+    assert srv._MODE_LABELS == {
+        1: "OFF",
+        2: "ON",
+        3: "AUTO",
+        4: "TIMER_TO_ON",
+        5: "TIMER_TO_OFF",
+        6: "CYCLE",
+        7: "SCHEDULE",
+        8: "VPD",
+    }
+
+
+def test_advance_mode_type_excluded_from_writable_modes():
+    """atType=15 (ADVANCE) must never be a writable mode — writing it returns API 999999.
+    It is intentionally absent from _MODE_LABELS / _MODE_AT_TYPES.
+    """
+    import ac_infinity_mcp.server as srv
+
+    assert 15 not in srv._MODE_LABELS
+    assert "ADVANCE" not in srv._MODE_AT_TYPES
+    # And there is no spurious atType=0 ("OFF" is 1, not 0).
+    assert 0 not in srv._MODE_LABELS
+
+
+def test_decode_mode_roundtrip_and_unknown():
+    import ac_infinity_mcp.server as srv
+
+    assert srv._decode_mode(1) == "OFF"
+    assert srv._decode_mode(2) == "ON"
+    assert srv._decode_mode(8) == "VPD"
+    assert srv._decode_mode(None) == "UNKNOWN"
+    assert srv._decode_mode(15) == "UNKNOWN(15)"  # ADVANCE not a decodable label
+    # Reverse map is consistent with the forward table.
+    assert srv._MODE_AT_TYPES == {v: k for k, v in srv._MODE_LABELS.items()}
