@@ -20,6 +20,7 @@ from ac_infinity_mcp.schema import (
 from ac_infinity_mcp.server import (
     _check_advance_mode,
     _decode_mode,
+    _decode_rule,
     _empty_port_advisory,
     _filter_readings_by_time,
     _find_governing_automation,
@@ -38,6 +39,8 @@ from ac_infinity_mcp.server import (
     _short_date,
     _utc_hour_to_local,
     _validate_automation_id,
+    _validate_rule_inputs,
+    add_automation_rule,
     apply_grow_stage_template,
     apply_sampling,
     average_readings,
@@ -45,6 +48,7 @@ from ac_infinity_mcp.server import (
     check_vpd_drift,
     create_advance_automation,
     delete_advance_automation,
+    delete_automation_rule,
     detect_environment_trends,
     disable_advance_automation,
     discover_devices,
@@ -68,12 +72,16 @@ from ac_infinity_mcp.server import (
     set_port_speed,
     set_temperature_automation,
     set_vpd_automation,
+    update_automation_rule,
     vpd_troubleshooting,
 )
 from tests.conftest import MOCK_DEVICE_LEGACY
 from tests.fixtures.advance_automation_fixtures import (
     MOCK_ADVANCE_AUTOMATIONS_LIST,
     MOCK_ADVANCE_AUTOMATIONS_SINGLE,
+    MOCK_RULE_HUMIDITY_SETPOINT,
+    MOCK_RULE_TEMPERATURE_TRIGGER,
+    MOCK_RULE_VPD,
 )
 
 
@@ -9364,6 +9372,21 @@ _WRITE_TOOL_CASES = [
         lambda dr: break_out_of_automation("C58ZA", 1, dry_run=dr),
         "disable_advance_automation",
     ),
+    (
+        "add_automation_rule",
+        lambda dr: add_automation_rule("C58ZA", "Seedling", [1], "on", dry_run=dr),
+        "create_advance_automation",
+    ),
+    (
+        "update_automation_rule",
+        lambda dr: update_automation_rule("C58ZA", "Seedling", [1], speed=3, dry_run=dr),
+        "update_advance_automation",
+    ),
+    (
+        "delete_automation_rule",
+        lambda dr: delete_automation_rule("C58ZA", "Seedling", [1], dry_run=dr),
+        "delete_advance_automation",
+    ),
 ]
 
 
@@ -9411,3 +9434,644 @@ def test_all_write_tools_covered_by_shared_guard():
     assert write_tools == covered, (
         f"uncovered write tools: {write_tools - covered}; stale cases: {covered - write_tools}"
     )
+
+
+# ============ Issue #284 — automation rule CRUD tools ============
+
+
+def _seedling_program():
+    """Seedling program: two port-1 rules (different windows) + one port-2 temp rule."""
+    return [
+        {**copy.deepcopy(MOCK_RULE_VPD), "advName": "Seedling", "grouptDevType": 1,
+         "beginTime": 540, "endTime": 180, "runState": 1, "advId": 5001},
+        {**copy.deepcopy(MOCK_RULE_HUMIDITY_SETPOINT), "advName": "Seedling",
+         "grouptDevType": 1, "beginTime": 180, "endTime": 540, "runState": 0, "advId": 5002},
+        {**copy.deepcopy(MOCK_RULE_TEMPERATURE_TRIGGER), "advName": "Seedling",
+         "grouptDevType": 2, "beginTime": 540, "endTime": 180, "runState": 1, "advId": 5003},
+    ]
+
+
+# ---- add_automation_rule ----
+
+async def test_add_automation_rule_dry_run_humidity(mock_client):
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await add_automation_rule(
+        "C58ZA", "Seedling", [1], "humidity", target=65, speed=2,
+        begin_time=180, end_time=540, dry_run=True,
+    )
+    data = json.loads(result)
+    assert data["dry_run"] is True
+    assert data["sent"] is False
+    assert data["rule"]["control"] == "hold humidity at 65%"
+    assert data["rule"]["ports"] == "Intake Fan (Port 1)"
+    assert data["rule"]["_mode"] == "humidity"
+    mock_client.create_advance_automation.assert_not_called()
+
+
+async def test_add_automation_rule_wrap_around_window_allowed(mock_client):
+    """Wrap-around (begin > end) is permitted for rule tools (two-window pattern)."""
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await add_automation_rule(
+        "C58ZA", "Seedling", [1], "vpd", target_kpa=0.9, speed=2,
+        begin_time=540, end_time=180, dry_run=True,
+    )
+    data = json.loads(result)
+    assert "error" not in data
+    assert data["rule"]["control"] == "hold VPD at 0.9 kPa"
+
+
+async def test_add_automation_rule_program_not_found(mock_client):
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await add_automation_rule(
+        "C58ZA", "Nonexistent", [1], "on", speed=3, dry_run=True,
+    )
+    data = json.loads(result)
+    assert "error" in data
+    assert "existing_programs" in data
+    assert "Seedling" in data["existing_programs"]
+
+
+async def test_add_automation_rule_live_sends(mock_client):
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await add_automation_rule(
+        "C58ZA", "Seedling", [1], "on", speed=4, dry_run=False,
+    )
+    data = json.loads(result)
+    assert data["sent"] is True
+    mock_client.create_advance_automation.assert_called_once()
+
+
+async def test_add_automation_rule_cross_mode_param_rejected(mock_client):
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await add_automation_rule(
+        "C58ZA", "Seedling", [1], "on", cycle_on_minutes=30, dry_run=True,
+    )
+    data = json.loads(result)
+    assert "error" in data
+    mock_client.create_advance_automation.assert_not_called()
+
+
+async def test_add_automation_rule_bad_direction_rejected(mock_client):
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await add_automation_rule(
+        "C58ZA", "Seedling", [2], "temperature", high_f=82, direction="sideways", dry_run=True,
+    )
+    data = json.loads(result)
+    assert "error" in data
+    mock_client.create_advance_automation.assert_not_called()
+
+
+async def test_add_automation_rule_port_not_on_device(mock_client):
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await add_automation_rule(
+        "C58ZA", "Seedling", [7], "on", speed=3, dry_run=True,
+    )
+    data = json.loads(result)
+    assert "error" in data
+    assert "available_ports" in data
+
+
+# ---- update_automation_rule: selector 0/1/many ----
+
+async def test_update_rule_disambiguation_no_advid(mock_client):
+    """Two port-1 rules, no window selector → disambiguation list with NO advId present."""
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await update_automation_rule(
+        "C58ZA", "Seedling", [1], speed=5, dry_run=True,
+    )
+    data = json.loads(result)
+    assert "matching_rules" in data
+    assert len(data["matching_rules"]) == 2
+    blob = json.dumps(data)
+    assert "advId" not in blob
+    assert "adv_id" not in blob
+    mock_client.update_advance_automation.assert_not_called()
+
+
+async def test_update_rule_one_match_via_window(mock_client):
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await update_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=180, end_time=540, speed=4, dry_run=True,
+    )
+    data = json.loads(result)
+    assert "error" not in data
+    assert data["rule"]["speed"] == 4
+    assert data["rule"]["control"] == "hold humidity at 65%"  # unchanged mode preserved
+
+
+async def test_update_rule_zero_match(mock_client):
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await update_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=999, end_time=1000, speed=4, dry_run=True,
+    )
+    data = json.loads(result)
+    assert "error" in data
+    assert "existing_rules" in data
+
+
+async def test_update_rule_no_op_rejected(mock_client):
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await update_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=180, end_time=540, dry_run=True,
+    )
+    data = json.loads(result)
+    assert "error" in data
+    assert "Nothing to change" in data["error"]
+    mock_client.update_advance_automation.assert_not_called()
+
+
+async def test_update_rule_read_before_write_preserves_structural_field(mock_client):
+    """A field NOT in the encoder overlay (switchTime) survives the update round-trip."""
+    program = _seedling_program()
+    # Tag the humidity-setpoint rule with a distinctive structural field value.
+    program[1]["switchTime"] = 99
+    mock_client.get_advance_automations.return_value = program
+    await update_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=180, end_time=540, speed=4, dry_run=False,
+    )
+    sent_body = mock_client.update_advance_automation.call_args.args[1]
+    assert sent_body["switchTime"] == 99  # preserved, not re-derived
+    assert sent_body["onSpeed"] == 4      # change applied
+    assert sent_body["advId"] == 5002     # re-resolved at write time
+
+
+async def test_update_rule_mode_change_to_on_decodes_as_on(mock_client):
+    """temperature → on: currentMode flips to 1 and the rule decodes as a plain On rule.
+
+    The temp switches stay 1 (the On-mode base default), but currentMode=1 makes the
+    controller ignore them and _decode_rule reads the rule as On — the switches are
+    inert, not stale triggers. The off-mode-zeroing behavior is exercised separately
+    by the temperature → vpd test below, where a stale temp trigger WOULD otherwise
+    decode."""
+    program = _seedling_program()
+    mock_client.get_advance_automations.return_value = program
+    await update_automation_rule(
+        "C58ZA", "Seedling", [2], mode="on", speed=3, dry_run=False,
+    )
+    sent_body = mock_client.update_advance_automation.call_args.args[1]
+    assert sent_body["currentMode"] == 1
+    assert sent_body["autoLowTempSwitch"] == 1   # On-mode base default (inert at currentMode=1)
+    # The decoded rule must now read as a plain On rule, not a stale temp trigger.
+    assert _decode_rule(sent_body)["mode"] == "on"
+
+
+async def test_update_rule_mode_change_temp_to_humidity_zeroes_off_mode_temp(mock_client):
+    """temperature → humidity (both currentMode=4): the rebuild must zero the off-mode
+    temperature trigger, or the shared-currentMode=4 decode authority (temp wins over
+    humidity-trigger) would read the stale temp trigger instead of the new humidity rule.
+
+    This is the case where off-mode zeroing is load-bearing for the decode."""
+    program = _seedling_program()
+    mock_client.get_advance_automations.return_value = program
+    await update_automation_rule(
+        "C58ZA", "Seedling", [2], mode="humidity", target=70, dry_run=False,
+    )
+    sent_body = mock_client.update_advance_automation.call_args.args[1]
+    assert sent_body["currentMode"] == 4
+    # Off-mode temperature trigger is zeroed by the rebuild (no stale temp trigger wins).
+    assert sent_body["autoLowTempSwitch"] == 0
+    assert sent_body["autoHighTempSwitch"] == 0
+    assert sent_body["targetHumi"] == 70
+    decoded = _decode_rule(sent_body)
+    assert decoded["mode"] == "humidity"
+    assert "70%" in decoded["control"]
+
+
+async def test_update_rule_cross_mode_param_rejected(mock_client):
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await update_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=180, end_time=540,
+        mode="on", cycle_on_minutes=30, dry_run=True,
+    )
+    data = json.loads(result)
+    assert "error" in data
+    mock_client.update_advance_automation.assert_not_called()
+
+
+async def test_update_rule_dry_run_no_write(mock_client):
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    await update_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=180, end_time=540, speed=4, dry_run=True,
+    )
+    mock_client.update_advance_automation.assert_not_called()
+
+
+# ---- delete_automation_rule ----
+
+async def test_delete_rule_dry_run_no_write(mock_client):
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await delete_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=180, end_time=540, dry_run=True,
+    )
+    data = json.loads(result)
+    assert data["dry_run"] is True
+    assert data["rule"]["control"] == "hold humidity at 65%"
+    mock_client.delete_advance_automation.assert_not_called()
+
+
+async def test_delete_rule_disambiguation_no_advid(mock_client):
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await delete_automation_rule("C58ZA", "Seedling", [1], dry_run=True)
+    data = json.loads(result)
+    assert "matching_rules" in data
+    assert "advId" not in json.dumps(data)
+    mock_client.delete_advance_automation.assert_not_called()
+
+
+async def test_delete_rule_live_deletes_single_advid(mock_client):
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await delete_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=180, end_time=540, dry_run=False,
+    )
+    data = json.loads(result)
+    assert data["sent"] is True
+    mock_client.delete_advance_automation.assert_called_once()
+    # Deletes the matched single advId, not the whole program.
+    assert mock_client.delete_advance_automation.call_args.args[1] == 5002
+
+
+# ---- two-window no false conflict ----
+
+async def test_add_second_window_same_port_no_conflict(mock_client):
+    """A program with a port-1 rule; adding another port-1 rule on a different window
+    proceeds (dry-run) with no ADVANCE conflict response."""
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await add_automation_rule(
+        "C58ZA", "Seedling", [1], "on", speed=3, begin_time=0, end_time=120, dry_run=True,
+    )
+    data = json.loads(result)
+    assert "conflict" not in data
+    assert "error" not in data
+    assert data["dry_run"] is True
+
+
+# ---- get_advance_automation per-rule read parity ----
+
+async def test_get_advance_automation_rules_array_parity(mock_client):
+    """get_advance_automation surfaces a rules[] array using the same _decode_rule control
+    wording and window-with-timezone shape the write tools emit."""
+    program = _seedling_program()
+    # Make them one automation_id resolvable: get_advance_automation matches on the first
+    # entry's advId as the automation_id.
+    mock_client.get_advance_automations.return_value = program
+    result = await get_advance_automation("C58ZA", "5001")
+    data = json.loads(result)
+    assert "rules" in data
+    controls = {r["control"] for r in data["rules"]}
+    assert "hold VPD at 0.9 kPa" in controls
+    assert "hold humidity at 65%" in controls
+    # Window carries the timezone.
+    assert any("America/Chicago" in r["window"] for r in data["rules"])
+    # _mode is the internal round-trip key.
+    assert all("_mode" in r for r in data["rules"])
+
+
+# ============ Issue #284 — _validate_rule_inputs range / required-param coverage ============
+
+
+def _vri(mode, *, require_full=True, **kwargs):
+    """Call _validate_rule_inputs with all params defaulting to None for brevity."""
+    params = dict(
+        speed=None, target=None, target_kpa=None, low=None, high=None,
+        low_f=None, high_f=None, direction=None,
+        cycle_on_minutes=None, cycle_off_minutes=None,
+    )
+    params.update(kwargs)
+    return _validate_rule_inputs(mode, require_full=require_full, **params)
+
+
+# --- reject cases: (mode, kwargs, require_full, error_substring) ---
+_VRI_REJECT_CASES = [
+    # bad mode
+    ("banana", {}, True, "mode must be one of"),
+    # speed range
+    ("on", {"speed": 0}, True, "speed must be 1–10"),
+    ("on", {"speed": 11}, True, "speed must be 1–10"),
+    # direction validity
+    ("temperature", {"high_f": 80, "direction": "sideways"}, True, "direction must be one of"),
+    # temperature °F range
+    ("temperature", {"low_f": 31, "high_f": 80, "direction": "both"}, True, "must be 32–212"),
+    ("temperature", {"low_f": 40, "high_f": 213, "direction": "both"}, True, "must be 32–212"),
+    # temperature low < high
+    ("temperature", {"low_f": 90, "high_f": 80, "direction": "both"}, True,
+     "low_f must be less than high_f"),
+    # humidity setpoint range
+    ("humidity", {"target": 101}, True, "target humidity must be 0–100%"),
+    # humidity trigger low/high range
+    ("humidity", {"low": 101, "direction": "on_below"}, True, "humidity must be 0–100%"),
+    ("humidity", {"high": 101, "direction": "on_above"}, True, "humidity must be 0–100%"),
+    # humidity low < high
+    ("humidity", {"low": 80, "high": 70, "direction": "both"}, True, "low must be less than high"),
+    # vpd kpa range
+    ("vpd", {"target_kpa": -0.1}, True, "target_kpa must be 0.0–9.9"),
+    ("vpd", {"target_kpa": 10.0}, True, "target_kpa must be 0.0–9.9"),
+    # cycle minutes range
+    ("cycle", {"cycle_on_minutes": 1440, "cycle_off_minutes": 5}, True, "cycle on-minutes"),
+    ("cycle", {"cycle_on_minutes": 5, "cycle_off_minutes": 1440}, True, "cycle off-minutes"),
+    ("cycle", {"cycle_on_minutes": -1, "cycle_off_minutes": 5}, True, "cycle on-minutes"),
+    # cross-mode param rejection
+    ("on", {"cycle_on_minutes": 30}, True, "does not apply to a on rule"),
+    # require_full missing-param errors
+    ("cycle", {"cycle_on_minutes": 30}, True, "needs both an on-minutes"),
+    ("temperature", {"direction": "both"}, True, "needs a low and/or high temperature"),
+    ("temperature", {"low_f": 60}, True, "needs a direction"),
+    ("humidity", {}, True, "needs either a target"),
+    ("humidity", {"low": 40, "high": 80}, True, "trigger needs a direction"),
+    ("vpd", {}, True, "needs a target_kpa"),
+    # humidity setpoint + trigger mutual exclusion
+    ("humidity", {"target": 60, "low": 40, "direction": "on_below"}, True,
+     "either a humidity target"),
+]
+
+
+@pytest.mark.parametrize(
+    "mode,kwargs,require_full,err_sub", _VRI_REJECT_CASES,
+    ids=[f"{c[0]}-{c[3][:20]}" for c in _VRI_REJECT_CASES],
+)
+def test_validate_rule_inputs_reject(mode, kwargs, require_full, err_sub):
+    targets, err = _vri(mode, require_full=require_full, **kwargs)
+    assert targets is None, f"expected reject for {mode} {kwargs}"
+    assert err is not None
+    assert err_sub in json.loads(err)["error"]
+
+
+# --- pass cases: valid inputs produce targets dict, no error ---
+_VRI_PASS_CASES = [
+    ("on", {"speed": 5}, True),
+    ("cycle", {"cycle_on_minutes": 30, "cycle_off_minutes": 15}, True),
+    ("temperature", {"low_f": 60, "high_f": 80, "direction": "both"}, True),
+    ("humidity", {"target": 65}, True),
+    ("humidity", {"low": 40, "high": 80, "direction": "both"}, True),
+    ("vpd", {"target_kpa": 1.2}, True),
+    # update path (require_full=False): partial params allowed
+    ("temperature", {"low_f": 55}, False),
+    ("cycle", {"cycle_on_minutes": 20}, False),
+    ("vpd", {}, False),
+]
+
+
+@pytest.mark.parametrize(
+    "mode,kwargs,require_full", _VRI_PASS_CASES,
+    ids=[f"{c[0]}-{'-'.join(c[1]) or 'empty'}" for c in _VRI_PASS_CASES],
+)
+def test_validate_rule_inputs_pass(mode, kwargs, require_full):
+    targets, err = _vri(mode, require_full=require_full, **kwargs)
+    assert err is None, f"unexpected reject: {err}"
+    assert targets is not None
+
+
+# --- end-to-end: an out-of-range input is rejected at the tool boundary, no write ---
+
+async def test_add_rule_out_of_range_speed_no_write(mock_client):
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await add_automation_rule("C58ZA", "Seedling", [1], "on", speed=99, dry_run=False)
+    assert "speed must be 1–10" in json.loads(result)["error"]
+    mock_client.create_advance_automation.assert_not_called()
+
+
+async def test_update_rule_out_of_range_vpd_no_write(mock_client):
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await update_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=540, end_time=180,
+        mode="vpd", target_kpa=42.0, dry_run=False,
+    )
+    assert "target_kpa must be 0.0–9.9" in json.loads(result)["error"]
+    mock_client.update_advance_automation.assert_not_called()
+
+
+async def test_delete_rule_out_of_range_begin_time_no_write(mock_client):
+    """delete has no rule-target params, but an unparseable window selector simply yields
+    no match — assert no delete call when the window matches nothing."""
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await delete_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=999, end_time=998, dry_run=False,
+    )
+    assert "error" in json.loads(result)
+    mock_client.delete_advance_automation.assert_not_called()
+
+
+# ============ Issue #284 — same-mode in-place TARGET edits (overlay branches) ============
+
+async def test_update_rule_same_mode_temperature_targets(mock_client):
+    """temperature rule, no mode change: low_f/high_f/direction overlay onto the sent body."""
+    from ac_infinity_mcp.client import _f_to_c
+    program = _seedling_program()
+    mock_client.get_advance_automations.return_value = program
+    await update_automation_rule(
+        "C58ZA", "Seedling", [2], begin_time=540, end_time=180,
+        low_f=55, high_f=85, direction="both",
+        new_begin_time=600, new_end_time=240, dry_run=False,
+    )
+    sent = mock_client.update_advance_automation.call_args.args[1]
+    assert sent["autoLowTempF"] == 55
+    assert sent["autoHighTempF"] == 85
+    assert sent["autoLowTempC"] == _f_to_c(55)
+    assert sent["autoHighTempC"] == _f_to_c(85)
+    assert sent["autoLowTempSwitch"] == 1
+    assert sent["autoHighTempSwitch"] == 1
+    assert sent["currentMode"] == 4  # mode unchanged
+    # new window overlays applied
+    assert sent["beginTime"] == 600
+    assert sent["endTime"] == 240
+
+
+async def test_update_rule_same_mode_cycle_targets(mock_client):
+    """cycle rule, no mode change: cycleOn/cycleOff overlay onto the sent body."""
+    program = _seedling_program()
+    # Convert the port-2 rule to a cycle rule so the same-mode edit applies.
+    program[2] = {**program[2], "currentMode": 3, "cycleOn": 10, "cycleOff": 5}
+    mock_client.get_advance_automations.return_value = program
+    await update_automation_rule(
+        "C58ZA", "Seedling", [2], begin_time=540, end_time=180,
+        cycle_on_minutes=45, cycle_off_minutes=20, dry_run=False,
+    )
+    sent = mock_client.update_advance_automation.call_args.args[1]
+    assert sent["cycleOn"] == 45
+    assert sent["cycleOff"] == 20
+    assert sent["currentMode"] == 3
+
+
+async def test_update_rule_same_mode_humidity_setpoint_target(mock_client):
+    """humidity setpoint rule, no mode change: target overlays targetHumi + setpoint flags."""
+    program = _seedling_program()
+    mock_client.get_advance_automations.return_value = program
+    await update_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=180, end_time=540, target=72, dry_run=False,
+    )
+    sent = mock_client.update_advance_automation.call_args.args[1]
+    assert sent["targetHumi"] == 72
+    assert sent["settingMode"] == 1
+    assert sent["autoLowHumiSwitch"] == 0
+    assert sent["autoHighHumiSwitch"] == 0
+    assert _decode_rule(sent)["control"] == "hold humidity at 72%"
+
+
+async def test_update_rule_same_mode_humidity_trigger_low_high(mock_client):
+    """humidity trigger rule, no mode change: low/high overlay onto the sent body."""
+    program = _seedling_program()
+    # Make the port-2 rule a humidity trigger (on_below at 45%).
+    program[2] = {
+        **program[2], "currentMode": 4, "settingMode": 0, "targetHumi": 0,
+        "autoLowHumi": 45, "autoHighHumi": 100,
+        "autoLowHumiSwitch": 1, "autoHighHumiSwitch": 0,
+        "autoLowTempSwitch": 0, "autoHighTempSwitch": 0,
+    }
+    mock_client.get_advance_automations.return_value = program
+    await update_automation_rule(
+        "C58ZA", "Seedling", [2], begin_time=540, end_time=180,
+        low=50, high=85, direction="both", dry_run=False,
+    )
+    sent = mock_client.update_advance_automation.call_args.args[1]
+    assert sent["autoLowHumi"] == 50
+    assert sent["autoHighHumi"] == 85
+    assert sent["autoLowHumiSwitch"] == 1   # direction overlay applied
+    assert sent["autoHighHumiSwitch"] == 1
+    assert sent["currentMode"] == 4
+
+
+async def test_update_rule_same_mode_vpd_target_kpa(mock_client):
+    """vpd rule, no mode change: target_kpa overlays targetVpd/highVpd (×10)."""
+    program = _seedling_program()
+    mock_client.get_advance_automations.return_value = program
+    await update_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=540, end_time=180, target_kpa=1.3, dry_run=False,
+    )
+    sent = mock_client.update_advance_automation.call_args.args[1]
+    assert sent["targetVpd"] == 13
+    assert sent["highVpd"] == 13
+    assert sent["currentMode"] == 6
+    assert _decode_rule(sent)["control"] == "hold VPD at 1.3 kPa"
+
+
+# ============ Issue #284 — auth / API / write-failure error paths for all 3 tools ============
+
+async def test_add_rule_auth_error(mock_client, caplog):
+    import logging
+    mock_client.get_advance_automations.side_effect = ACInfinityAuthError("token expired xyz")
+    with caplog.at_level(logging.WARNING, logger="ac_infinity_mcp.server"):
+        result = await add_automation_rule("C58ZA", "Seedling", [1], "on", dry_run=False)
+    data = json.loads(result)
+    assert "Authentication failed — check AC_INFINITY_EMAIL" in data["error"]
+    assert data["detail"] == "see server logs"
+    assert "token expired xyz" not in result  # no upstream text leak
+    mock_client.create_advance_automation.assert_not_called()
+
+
+async def test_add_rule_api_error(mock_client):
+    mock_client.get_advance_automations.side_effect = ACInfinityAPIError("503 boom internal")
+    result = await add_automation_rule("C58ZA", "Seedling", [1], "on", dry_run=False)
+    data = json.loads(result)
+    assert data["error"] == "API error"
+    assert data["detail"] == "see server logs"
+    assert "503 boom internal" not in result
+    mock_client.create_advance_automation.assert_not_called()
+
+
+async def test_add_rule_write_method_failure(mock_client):
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    mock_client.create_advance_automation.side_effect = ACInfinityAPIError("write failed deep")
+    result = await add_automation_rule("C58ZA", "Seedling", [1], "on", speed=4, dry_run=False)
+    data = json.loads(result)
+    assert data["error"] == "API error"
+    assert "write failed deep" not in result
+
+
+async def test_update_rule_auth_error(mock_client):
+    mock_client.get_advance_automations.side_effect = ACInfinityAuthError("token expired xyz")
+    result = await update_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=180, end_time=540, speed=4, dry_run=False,
+    )
+    data = json.loads(result)
+    assert "Authentication failed — check AC_INFINITY_EMAIL" in data["error"]
+    assert data["detail"] == "see server logs"
+    assert "token expired xyz" not in result
+    mock_client.update_advance_automation.assert_not_called()
+
+
+async def test_update_rule_api_error(mock_client):
+    mock_client.get_advance_automations.side_effect = ACInfinityAPIError("503 boom internal")
+    result = await update_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=180, end_time=540, speed=4, dry_run=False,
+    )
+    data = json.loads(result)
+    assert data["error"] == "API error"
+    assert data["detail"] == "see server logs"
+    assert "503 boom internal" not in result
+    mock_client.update_advance_automation.assert_not_called()
+
+
+async def test_update_rule_write_method_failure(mock_client):
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    mock_client.update_advance_automation.side_effect = ACInfinityAPIError("write failed deep")
+    result = await update_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=180, end_time=540, speed=4, dry_run=False,
+    )
+    data = json.loads(result)
+    assert data["error"] == "API error"
+    assert "write failed deep" not in result
+
+
+async def test_delete_rule_auth_error(mock_client):
+    mock_client.get_advance_automations.side_effect = ACInfinityAuthError("token expired xyz")
+    result = await delete_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=180, end_time=540, dry_run=False,
+    )
+    data = json.loads(result)
+    assert "Authentication failed — check AC_INFINITY_EMAIL" in data["error"]
+    assert data["detail"] == "see server logs"
+    assert "token expired xyz" not in result
+    mock_client.delete_advance_automation.assert_not_called()
+
+
+async def test_delete_rule_api_error(mock_client):
+    mock_client.get_advance_automations.side_effect = ACInfinityAPIError("503 boom internal")
+    result = await delete_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=180, end_time=540, dry_run=False,
+    )
+    data = json.loads(result)
+    assert data["error"] == "API error"
+    assert data["detail"] == "see server logs"
+    assert "503 boom internal" not in result
+    mock_client.delete_advance_automation.assert_not_called()
+
+
+async def test_delete_rule_write_method_failure(mock_client):
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    mock_client.delete_advance_automation.side_effect = ACInfinityAPIError("write failed deep")
+    result = await delete_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=180, end_time=540, dry_run=False,
+    )
+    data = json.loads(result)
+    assert data["error"] == "API error"
+    assert "write failed deep" not in result
+
+
+# ============ Issue #284 — stale-advId write-time re-resolve guard ============
+
+async def test_update_rule_stale_advid_guard_blocks_write(mock_client):
+    """The write-time re-resolve returns a program missing the matched rule → the update
+    is blocked with the 'changed or was removed' error and no write is sent."""
+    program = _seedling_program()
+    # First read (dry-run resolution) sees the full program; the write-time re-read sees
+    # the matched humidity rule (advId 5002) gone.
+    program_after = [e for e in _seedling_program() if e["advId"] != 5002]
+    mock_client.get_advance_automations.side_effect = [program, program_after]
+    result = await update_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=180, end_time=540, speed=4, dry_run=False,
+    )
+    data = json.loads(result)
+    assert "changed or was removed" in data["error"]
+    mock_client.update_advance_automation.assert_not_called()
+
+
+async def test_delete_rule_stale_advid_guard_blocks_write(mock_client):
+    """Same stale-advId guard for delete: re-resolve misses the rule → no delete call."""
+    program = _seedling_program()
+    program_after = [e for e in _seedling_program() if e["advId"] != 5002]
+    mock_client.get_advance_automations.side_effect = [program, program_after]
+    result = await delete_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=180, end_time=540, dry_run=False,
+    )
+    data = json.loads(result)
+    assert "changed or was removed" in data["error"]
+    mock_client.delete_advance_automation.assert_not_called()

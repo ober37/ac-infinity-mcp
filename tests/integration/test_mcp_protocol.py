@@ -49,6 +49,10 @@ EXPECTED_TOOLS = {
     "create_advance_automation",
     "delete_advance_automation",
     "break_out_of_automation",
+    # Issue #284 — Advance Automation full rule CRUD
+    "add_automation_rule",
+    "update_automation_rule",
+    "delete_automation_rule",
 }
 
 SCHEMA_CASES: list[tuple[str, list[str], list[str]]] = [
@@ -97,7 +101,11 @@ SCHEMA_CASES: list[tuple[str, list[str], list[str]]] = [
     (
         "create_advance_automation",
         ["device_id", "name", "port", "on_speed"],
-        ["off_speed", "begin_time", "end_time", "dry_run"],
+        [
+            "off_speed", "begin_time", "end_time", "mode", "target", "target_kpa",
+            "low", "high", "low_f", "high_f", "direction", "cycle_on_minutes",
+            "cycle_off_minutes", "dry_run",
+        ],
     ),
     (
         "delete_advance_automation",
@@ -108,6 +116,30 @@ SCHEMA_CASES: list[tuple[str, list[str], list[str]]] = [
         "break_out_of_automation",
         ["device_id", "port"],
         ["dry_run", "confirm_automation_name"],
+    ),
+    # Issue #284 — Advance Automation full rule CRUD
+    (
+        "add_automation_rule",
+        ["device_id", "program_name", "ports", "mode"],
+        [
+            "speed", "target", "target_kpa", "low", "high", "low_f", "high_f",
+            "direction", "cycle_on_minutes", "cycle_off_minutes", "begin_time",
+            "end_time", "dry_run",
+        ],
+    ),
+    (
+        "update_automation_rule",
+        ["device_id", "program_name", "ports"],
+        [
+            "begin_time", "end_time", "mode", "speed", "target", "target_kpa",
+            "low", "high", "low_f", "high_f", "direction", "cycle_on_minutes",
+            "cycle_off_minutes", "new_begin_time", "new_end_time", "dry_run",
+        ],
+    ),
+    (
+        "delete_automation_rule",
+        ["device_id", "program_name", "ports"],
+        ["begin_time", "end_time", "dry_run"],
     ),
 ]
 
@@ -136,13 +168,13 @@ def _get_tool_schema(name: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def test_all_25_tools_registered() -> None:
+def test_all_28_tools_registered() -> None:
     registered = {t.name for t in mcp_server._tool_manager.list_tools()}  # type: ignore[attr-defined]
     assert registered == EXPECTED_TOOLS
 
 
-def test_tool_count_is_exactly_25() -> None:
-    assert len(mcp_server._tool_manager.list_tools()) == 25  # type: ignore[attr-defined]
+def test_tool_count_is_exactly_28() -> None:
+    assert len(mcp_server._tool_manager.list_tools()) == 28  # type: ignore[attr-defined]
 
 
 def test_mcp_server_name_is_ac_infinity() -> None:
@@ -198,11 +230,11 @@ def test_get_historical_readings_defaults() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_protocol_list_tools_returns_all_25(mock_client: MagicMock) -> None:
+async def test_protocol_list_tools_returns_all_28(mock_client: MagicMock) -> None:
     async with create_connected_server_and_client_session(srv.mcp_server) as session:
         result = await session.list_tools()
         names = {t.name for t in result.tools}
-        assert len(result.tools) == 25
+        assert len(result.tools) == 28
         assert names == EXPECTED_TOOLS
 
 
@@ -485,7 +517,7 @@ async def test_main_no_api_calls_on_introspection() -> None:
         with patch.object(real_client, "_authenticate_inner") as mock_auth:
             async with create_connected_server_and_client_session(srv.mcp_server) as session:
                 result = await session.list_tools()
-            assert len(result.tools) == 25
+            assert len(result.tools) == 28
             mock_auth.assert_not_called()
     finally:
         srv._aci_client = None

@@ -1084,6 +1084,11 @@ def test_set_port_mode_write_10003_not_replayed(authed_client):
             "delByid",
             lambda c: c.delete_advance_automation("12345", 99),
         ),
+        (
+            "update_advance_automation",
+            "updateGroupsById",
+            lambda c: c.update_advance_automation("12345", {"advId": 99}),
+        ),
     ],
 )
 @responses_lib.activate
@@ -1101,6 +1106,60 @@ def test_v2_write_10003_not_replayed(authed_client, method, url_fragment, call):
     login_calls = [c for c in responses_lib.calls if "appUserLogin" in c.request.url]
     assert len(write_calls) == 1, f"{method} replayed the write"
     assert len(login_calls) == 0, f"{method} refreshed token on a write"
+
+
+# ============ #284 — update_advance_automation client method ============
+
+UPDATE_GROUPS_BY_ID_URL = "https://www.acinfinityserver.com/api/version=2.0/dev/updateGroupsById"
+
+
+@responses_lib.activate
+def test_update_advance_automation_success(authed_client):
+    """A 200 from updateGroupsById returns the data dict and injects devId into the body."""
+    responses_lib.add(
+        responses_lib.POST, UPDATE_GROUPS_BY_ID_URL,
+        json={"code": 200, "data": {"advId": 99}}, status=200,
+    )
+    with patch.object(authed_client, "_enforce_write_rate_limit"):
+        result = authed_client.update_advance_automation("12345", {"advId": 99})
+    assert result == {"advId": 99}
+    sent = [c for c in responses_lib.calls if "updateGroupsById" in c.request.url]
+    assert len(sent) == 1
+    assert "devId=12345" in sent[0].request.body
+
+
+@responses_lib.activate
+def test_update_advance_automation_retries_on_connection_error(authed_client, monkeypatch):
+    """ConnectionError fires before the server sees the write — safe to retry (P1-F004)."""
+    monkeypatch.setattr("tenacity.nap.time.sleep", lambda _: None)
+    responses_lib.add(
+        responses_lib.POST, UPDATE_GROUPS_BY_ID_URL,
+        body=requests.exceptions.ConnectionError("reset"),
+    )
+    responses_lib.add(
+        responses_lib.POST, UPDATE_GROUPS_BY_ID_URL,
+        json={"code": 200, "data": {"advId": 99}}, status=200,
+    )
+    with patch.object(authed_client, "_enforce_write_rate_limit"):
+        result = authed_client.update_advance_automation("12345", {"advId": 99})
+    assert result == {"advId": 99}
+    sent = [c for c in responses_lib.calls if "updateGroupsById" in c.request.url]
+    assert len(sent) == 2
+
+
+@responses_lib.activate
+def test_update_advance_automation_does_not_retry_on_timeout(authed_client, monkeypatch):
+    """Timeout is NOT retried — the server may have already applied the edit (double-apply)."""
+    monkeypatch.setattr("tenacity.nap.time.sleep", lambda _: None)
+    responses_lib.add(
+        responses_lib.POST, UPDATE_GROUPS_BY_ID_URL,
+        body=requests.exceptions.Timeout("read timeout"),
+    )
+    with patch.object(authed_client, "_enforce_write_rate_limit"):
+        with pytest.raises(requests.exceptions.Timeout):
+            authed_client.update_advance_automation("12345", {"advId": 99})
+    sent = [c for c in responses_lib.calls if "updateGroupsById" in c.request.url]
+    assert len(sent) == 1
 
 
 # ============ #251 — app User-Agent header (not the default python-requests UA) ============

@@ -34,6 +34,139 @@ def _sanitize_api_string(value: str | None, max_len: int = 64) -> str:
     return cleaned if cleaned else "(unnamed)"
 
 
+# Sentinel values that mean "trigger not really set" even when the paired switch is 1.
+# Observed across all live rules: an inactive temp/humi trigger carries the rail value.
+_HUMI_HIGH_SENTINEL = 100
+_HUMI_LOW_SENTINEL = 0
+_TEMP_HIGH_F_SENTINEL = 194
+_TEMP_LOW_F_SENTINEL = 32
+
+
+def _decode_rule(entry: dict) -> dict:
+    """Decode a raw getGroups entry into a grower-readable rule description.
+
+    Returns ``{"mode": <on|cycle|temperature|humidity|vpd>, "control": <plain string>,
+    "direction": <on_below|on_above|both|None>}``. This is the single source of truth
+    for read-back and is the exact mirror of ``build_groups_payload``'s encoder.
+
+    Authority order for the shared ``currentMode==4`` shape (storage-verified, not
+    behavior-verified — see plan Open items): humidity setpoint (``settingMode==1`` with
+    a real ``targetHumi``) wins; then a temperature trigger; then a humidity trigger. A
+    switch counts as active only when set AND its paired value is non-sentinel.
+    """
+    current_mode = entry.get("currentMode")
+
+    if current_mode == 1:
+        speed = entry.get("onSpeed", 0)
+        return {"mode": "on", "control": f"runs at speed {speed}", "direction": None}
+
+    if current_mode == 3:
+        on_min = entry.get("cycleOn", 0)
+        off_min = entry.get("cycleOff", 0)
+        return {
+            "mode": "cycle",
+            "control": f"cycle {on_min} min on / {off_min} min off",
+            "direction": None,
+        }
+
+    if current_mode == 6:
+        kpa = entry.get("targetVpd", 0) / 10
+        return {
+            "mode": "vpd",
+            "control": f"hold VPD at {kpa:g} kPa",
+            "direction": None,
+        }
+
+    if current_mode == 4:
+        # Humidity setpoint wins.
+        if entry.get("settingMode") == 1 and (entry.get("targetHumi") or 0) > 0:
+            target = entry.get("targetHumi", 0)
+            return {
+                "mode": "humidity",
+                "control": f"hold humidity at {target}%",
+                "direction": None,
+            }
+
+        # Temperature trigger.
+        temp_low_active = (
+            entry.get("autoLowTempSwitch") == 1
+            and (entry.get("autoLowTempF") or 0) > _TEMP_LOW_F_SENTINEL
+        )
+        temp_high_active = (
+            entry.get("autoHighTempSwitch") == 1
+            and (entry.get("autoHighTempF") or 0) < _TEMP_HIGH_F_SENTINEL
+        )
+        if temp_low_active or temp_high_active:
+            return _decode_trigger(
+                "temp",
+                "°F",
+                low_active=temp_low_active,
+                high_active=temp_high_active,
+                low_value=entry.get("autoLowTempF", 0),
+                high_value=entry.get("autoHighTempF", 0),
+            )
+
+        # Humidity trigger.
+        humi_low_active = (
+            entry.get("autoLowHumiSwitch") == 1
+            and (entry.get("autoLowHumi") or 0) > _HUMI_LOW_SENTINEL
+        )
+        humi_high_active = (
+            entry.get("autoHighHumiSwitch") == 1
+            and (entry.get("autoHighHumi") or 0) < _HUMI_HIGH_SENTINEL
+        )
+        if humi_low_active or humi_high_active:
+            return _decode_trigger(
+                "humidity",
+                "%",
+                low_active=humi_low_active,
+                high_active=humi_high_active,
+                low_value=entry.get("autoLowHumi", 0),
+                high_value=entry.get("autoHighHumi", 0),
+            )
+
+        # currentMode=4 with no active trigger or setpoint — surface as auto without target.
+        return {"mode": "humidity", "control": "auto (no target set)", "direction": None}
+
+    return {"mode": "unknown", "control": "unknown rule type", "direction": None}
+
+
+def _decode_trigger(
+    variable: str,
+    unit: str,
+    *,
+    low_active: bool,
+    high_active: bool,
+    low_value: int,
+    high_value: int,
+) -> dict:
+    """Build a unified trigger control string + direction for temp/humidity triggers.
+
+    "run when <var> rises above N" (on_above) / "run when <var> drops below N" (on_below).
+    When both directions are active the control names both bounds.
+    """
+    if low_active and high_active:
+        return {
+            "mode": "temperature" if variable == "temp" else "humidity",
+            "control": (
+                f"run when {variable} rises above {high_value}{unit}"
+                f" or drops below {low_value}{unit}"
+            ),
+            "direction": "both",
+        }
+    if high_active:
+        return {
+            "mode": "temperature" if variable == "temp" else "humidity",
+            "control": f"run when {variable} rises above {high_value}{unit}",
+            "direction": "on_above",
+        }
+    return {
+        "mode": "temperature" if variable == "temp" else "humidity",
+        "control": f"run when {variable} drops below {low_value}{unit}",
+        "direction": "on_below",
+    }
+
+
 def _group_automations(raw_entries: list[dict]) -> list[dict]:
     """Group flat getGroups entries by advName into user-visible automations.
 
@@ -63,6 +196,13 @@ def _group_automations(raw_entries: list[dict]) -> list[dict]:
                     "adv_id": e.get("advId"),
                     "on_speed": e.get("onSpeed", 0),
                     "grp_dev_type": e.get("grouptDevType", 0),
+                    # Per-rule fields (additive — program-level keys read by the 4
+                    # consumers stay above; these are for the per-rule read/CRUD path).
+                    "begin_time": e.get("beginTime"),
+                    "end_time": e.get("endTime"),
+                    "run_state": bool(e.get("runState", 0)),
+                    "current_mode": e.get("currentMode"),
+                    "rule": _decode_rule(e),
                 }
                 for e in entries
             ],

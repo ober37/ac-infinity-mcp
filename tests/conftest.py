@@ -92,6 +92,7 @@ def mock_client():
     client.enable_advance_automation.return_value = {"code": 200}
     client.disable_advance_automation.return_value = {"code": 200}
     client.create_advance_automation.return_value = {"advId": 2302819}
+    client.update_advance_automation.return_value = {"code": 200}
     client.delete_advance_automation.return_value = {"code": 200}
     import ac_infinity_mcp.server as srv
     srv.setup(client)

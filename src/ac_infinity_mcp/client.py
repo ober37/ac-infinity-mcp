@@ -103,18 +103,51 @@ _SCHEDULE_ALWAYS_ACTIVE: int = 255
 _SESSION_EXPIRED_API_CODES: frozenset[int] = frozenset({10003})
 
 
-def build_add_groups_payload(
+def _f_to_c(temp_f: int) -> int:
+    """Convert °F to the °C integer the AC Infinity app pairs with each °F value.
+
+    The app rounds to the nearest integer °C; e.g. 110°F → 43, 40°F → 4. Used to
+    derive the autoLow/HighTempC values that mirror the supplied °F triggers so the
+    stored rule matches the shape the app produces.
+    """
+    return round((temp_f - 32) * 5 / 9)
+
+
+def build_groups_payload(
     dev_id: str,
-    port: int,
+    ports: list[int],
     clean_name: str,
     on_speed: int,
     begin_time: int,
     end_time: int,
+    *,
+    mode: str = "on",
+    targets: dict[str, Any] | None = None,
+    adv_id: int | None = None,
 ) -> dict[str, Any]:
-    """Build the addGroups API payload for create_advance_automation."""
-    grp_dev_type = 2 ** (port - 1)
-    return {
-        # devId NOT included here — _create_advance_automation_inner injects it.
+    """Build the addGroups / updateGroupsById payload for one automation rule.
+
+    ``ports`` is a list of 1-based port numbers governed by this single rule; the
+    grouptDevType bitmask is computed as ``sum(2**(p-1) for p in ports)``. ``mode``
+    selects the rule type and ``targets`` supplies the per-mode parameters:
+
+    - ``on``: no extra targets (fixed speed; currentMode=1).
+    - ``cycle``: ``cycle_on_minutes``, ``cycle_off_minutes`` (currentMode=3).
+    - ``temperature``: ``low_f`` / ``high_f`` + ``direction`` (currentMode=4 trigger).
+    - ``humidity`` setpoint: ``target`` (currentMode=4, settingMode=1).
+    - ``humidity`` trigger: ``low`` / ``high`` + ``direction`` (currentMode=4).
+    - ``vpd``: ``target_kpa`` (currentMode=6, settingMode=1).
+
+    ``direction`` ∈ {``on_below``, ``on_above``, ``both``} selects which *Switch flag(s)
+    are set to 1. ``adv_id`` is included only when not None (the update path).
+
+    Each mode branch starts from the same base dict (the verified On-mode signature) and
+    applies only the documented per-mode overrides, so the create path output is unchanged.
+    """
+    targets = targets or {}
+    grp_dev_type = sum(2 ** (p - 1) for p in ports)
+    payload: dict[str, Any] = {
+        # devId NOT included here — the inner method injects it.
         # advCode NOT included — absent from addGroups live capture (unlike addAlarms).
         # isFlag (capital F) confirmed for addGroups;
         # isflag (lowercase) for updateGroupsIsOn/delByid.
@@ -196,6 +229,87 @@ def build_add_groups_payload(
         "remarkLangKey": "",
     }
 
+    direction = targets.get("direction")
+
+    if mode == "cycle":
+        payload["currentMode"] = 3
+        payload["cycleOn"] = int(targets["cycle_on_minutes"])
+        payload["cycleOff"] = int(targets["cycle_off_minutes"])
+    elif mode == "temperature":
+        payload["currentMode"] = 4
+        payload["setSelect"] = 1
+        low_f = int(targets["low_f"]) if targets.get("low_f") is not None else 32
+        high_f = int(targets["high_f"]) if targets.get("high_f") is not None else 194
+        payload["autoLowTempF"] = low_f
+        payload["autoHighTempF"] = high_f
+        payload["autoLowTempC"] = _f_to_c(low_f)
+        payload["autoHighTempC"] = _f_to_c(high_f)
+        payload["autoLowTempSwitch"] = 1 if direction in ("on_below", "both") else 0
+        payload["autoHighTempSwitch"] = 1 if direction in ("on_above", "both") else 0
+        # Humidity trigger switches off for a temperature rule.
+        payload["autoLowHumiSwitch"] = 0
+        payload["autoHighHumiSwitch"] = 0
+    elif mode == "humidity":
+        payload["currentMode"] = 4
+        # Zero the temperature trigger switches so no stale temp trigger from the
+        # On-mode base dict reads as active on a humidity rule.
+        payload["autoLowTempSwitch"] = 0
+        payload["autoHighTempSwitch"] = 0
+        if "target" in targets and targets.get("target") is not None:
+            # Setpoint sub-mode.
+            payload["settingMode"] = 1
+            payload["targetHumi"] = int(targets["target"])
+            payload["autoLowHumiSwitch"] = 0
+            payload["autoHighHumiSwitch"] = 0
+        else:
+            # Trigger sub-mode.
+            payload["settingMode"] = 0
+            low = int(targets["low"]) if targets.get("low") is not None else 0
+            high = int(targets["high"]) if targets.get("high") is not None else 100
+            payload["autoLowHumi"] = low
+            payload["autoHighHumi"] = high
+            payload["autoLowHumiSwitch"] = 1 if direction in ("on_below", "both") else 0
+            payload["autoHighHumiSwitch"] = 1 if direction in ("on_above", "both") else 0
+    elif mode == "vpd":
+        payload["currentMode"] = 6
+        payload["settingMode"] = 1
+        scaled = round(float(targets["target_kpa"]) * 10)
+        payload["targetVpd"] = scaled
+        payload["highVpd"] = scaled
+        payload["highVpdSwitch"] = 1
+        # Zero the On-mode low default so no spurious low trigger remains.
+        payload["lowVpd"] = 0
+        payload["lowVpdSwitch"] = 0
+    # mode == "on": base dict unchanged (currentMode=1).
+
+    if adv_id is not None:
+        payload["advId"] = adv_id
+    return payload
+
+
+def build_add_groups_payload(
+    dev_id: str,
+    port: int,
+    clean_name: str,
+    on_speed: int,
+    begin_time: int,
+    end_time: int,
+) -> dict[str, Any]:
+    """Build the addGroups API payload for create_advance_automation (On mode, one port).
+
+    Thin shim over ``build_groups_payload`` for the original single-port On-mode create
+    path; output is byte-identical to the pre-refactor builder (golden-payload regression).
+    """
+    return build_groups_payload(
+        dev_id=dev_id,
+        ports=[port],
+        clean_name=clean_name,
+        on_speed=on_speed,
+        begin_time=begin_time,
+        end_time=end_time,
+        mode="on",
+    )
+
 
 class ACInfinityClient:
     """Client for AC Infinity cloud API"""
@@ -214,6 +328,7 @@ class ACInfinityClient:
     V2_GET_GROUPS_ENDPOINT = f"{V2_BASE_URL}/api/version=2.0/dev/getGroups"
     V2_ADD_GROUPS_ENDPOINT = f"{V2_BASE_URL}/api/version=2.0/dev/addGroups"
     V2_UPDATE_GROUPS_IS_ON_ENDPOINT = f"{V2_BASE_URL}/api/version=2.0/dev/updateGroupsIsOn"
+    V2_UPDATE_GROUPS_BY_ID_ENDPOINT = f"{V2_BASE_URL}/api/version=2.0/dev/updateGroupsById"
     V2_DEL_BY_ID_ENDPOINT = f"{V2_BASE_URL}/api/version=2.0/dev/delByid"
 
     def __init__(self, email: str, password: str):
@@ -1063,6 +1178,61 @@ class ACInfinityClient:
 
         data = result.get("data") or {}
         logger.info("Created automation for devId=%s, advId=%s", dev_id, data.get("advId"))
+        return data
+
+    def update_advance_automation(self, dev_id: str, payload: dict) -> dict:
+        """Edit an existing advance automation rule in place (with transparent 401 refresh).
+
+        Args:
+            dev_id: Numeric device ID string.
+            payload: Complete form payload for updateGroupsById. Must include the target
+                rule's ``advId`` (server edits in place by advId) plus the full rule body.
+                The caller is responsible for constructing the complete payload from the
+                rule's current getGroups body (read-before-write — Quirk 13).
+
+        Returns:
+            API response data dict.
+        """
+        return self._call_with_token_refresh(
+            self._update_advance_automation_inner, dev_id, payload
+        )
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(requests.exceptions.ConnectionError),
+        reraise=True,
+    )
+    def _update_advance_automation_inner(self, dev_id: str, payload: dict) -> dict:
+        """POST /api/version=2.0/dev/updateGroupsById — edits a rule in place by advId."""
+        if not self.token:
+            raise ACInfinityAuthError("Not authenticated — call authenticate() first")
+
+        form_data = {**payload, "devId": dev_id}
+
+        self._enforce_write_rate_limit()
+        try:
+            resp = self.session.post(
+                self.V2_UPDATE_GROUPS_BY_ID_ENDPOINT,
+                data=form_data,
+                headers=self._v2_headers(),
+                timeout=10,
+            )
+        finally:
+            self._mark_write_completed()
+        resp.raise_for_status()
+
+        result = resp.json()
+        if result.get("code") != 200:
+            error_msg = result.get("msg", "Unknown error")
+            code = result.get("code")
+            logger.error("Failed to update automation (devId=%s): %s", dev_id, error_msg)
+            self._raise_for_api_code(
+                code, error_msg, "UpdateAutomation", session_refreshable=False
+            )
+
+        data = result.get("data") or {}
+        logger.info("Updated automation for devId=%s, advId=%s", dev_id, payload.get("advId"))
         return data
 
     def delete_advance_automation(self, dev_id: str, adv_id: int) -> dict:
