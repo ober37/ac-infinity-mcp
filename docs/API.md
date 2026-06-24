@@ -510,7 +510,7 @@ devId=REDACTED_DEV_ID&externalPort=1&onSpead=5&modeType=2&offSpead=0&...
 
 ---
 
-## All 31 Known API Quirks
+## All 32 Known API Quirks
 
 ### Quirk 1 — Auth typo: `appPasswordl`
 
@@ -844,6 +844,7 @@ REST probing of 200+ legacy-path variants returned only HTTP 404.
 |---|---|---|---|
 | `/api/version=2.0/dev/getGroups` | POST | `devId=...` | Returns all automation groups for device |
 | `/api/version=2.0/dev/addGroups` | POST | Full form fields (~50 fields) | Creates automation; server assigns `advId` in response |
+| `/api/version=2.0/dev/updateGroupsById` | POST | Full form fields + `advId` + `devId` | **Edits a rule in place** by `advId` (same advId, fields updated). The app's rule-edit path — see Quirk 32 |
 | `/api/version=2.0/dev/updateGroupsIsOn` | POST | `advId=...&isDel=0&isflag=1` | **TOGGLES** current `isOn` state — server inverts; no explicit `isOn` field |
 | `/api/version=2.0/dev/delByid` | POST | `advId=...&isDel=1&isflag=1` | Deletes automation |
 
@@ -1423,6 +1424,67 @@ session (single-session limitation — see the login-endpoint notes above). (Iss
 
 ---
 
+### Quirk 32 — Advance Automation rule modes: `currentMode` map, per-mode field signatures, and in-place edit via `updateGroupsById`
+
+An Advance Automation **program** is the set of `getGroups` entries sharing one `advName`. A
+**rule** is one entry (one `advId`) = a port bitmask (`grouptDevType`), a schedule window, a
+`currentMode`, a speed, and any sensor targets. One program may hold multiple rules — the
+verified **two-window pattern** is two complementary rules on the same port (e.g. a lights-on
+and a lights-off window). This quirk documents how each rule's behavior is encoded, discovered
+via live probing on device 8T4TC (devType=18, legacy) on 2026-06-24 (Issue #284).
+
+**`currentMode` map (the rule's behavior type):**
+
+| `currentMode` | Mode | Notes |
+|---|---|---|
+| `1` | **On** — fixed speed | No control fields beyond name/ports/schedule/speed (optional `onTime` ramp) |
+| `2` | **Off** | **NOT used** — no `currentMode=2` rule observed on any of the device's 38 rules. "Off" is expressed by not adding a rule, or by disabling the rule/program |
+| `3` | **Cycle** | `cycleOn` / `cycleOff` (minutes) |
+| `4` | **Auto** — temperature/humidity trigger, or humidity setpoint | Sub-mode resolved by which field family is set (see below) |
+| `6` | **VPD target** | `settingMode=1`, `targetVpd=N` (÷10 kPa), `highVpd=N`, `highVpdSwitch=1` |
+
+**Per-mode field signature** (the exact fields the AC Infinity app emits for each mode — the
+encoder mirrors these rather than exposing every raw field):
+
+| Mode | `currentMode` | Fields set |
+|---|---|---|
+| On | `1` | base defaults only |
+| Cycle | `3` | `cycleOn`, `cycleOff` (minutes) |
+| Temperature trigger | `4` | `setSelect=1`; `autoLowTempF` / `autoHighTempF` (+ derived °C) and the matching `autoLow/HighTempSwitch` per direction; the unused temp switch → `0` |
+| Humidity setpoint | `4` | `settingMode=1`, `targetHumi=N` (raw % RH); humidity-trigger switches → `0` |
+| Humidity trigger | `4` | `autoLowHumi` / `autoHighHumi` + matching `autoLow/HighHumiSwitch` per direction; unused humidity switch → `0`; `settingMode=0` |
+| VPD | `6` | `settingMode=1`, `targetVpd=round(kPa×10)`, `highVpd=round(kPa×10)`, `highVpdSwitch=1`, `lowVpd=0`, `lowVpdSwitch=0` |
+
+**Trigger direction** is encoded by which `*Switch` flag is set: `on_below` → low switch only,
+`on_above` → high switch only, `both` → both. The server stores switches **as sent** — it does
+not force both directions on, so single-direction triggers are reliable at the rule level.
+
+**`targetVpd` is ÷10** — `targetVpd=9` → 0.9 kPa (same scaling as the alarm `highVpd` field and
+the legacy `addDevMode` quirk).
+
+**In-place rule edit — `updateGroupsById` (NEW, discovered Issue #284):** `addGroups` is
+create-only — passing an existing `advId` to it **duplicates** the rule (server assigns a fresh
+`advId` and ignores the passed one). To edit a rule in place, POST the full rule body plus
+`advId` + `devId` to `/api/version=2.0/dev/updateGroupsById` → code 200 `'success.'`, same
+`advId`, fields updated. The edit body is built **read-before-write** (Quirk 13): start from the
+live rule's full `getGroups` body so structural defaults (`switchTime`, `dualZoneSwitch`,
+`groupNums`, `sortType`, …) are preserved, then overlay only the changed fields. A **mode change**
+rebuilds the new mode's full per-mode signature above and **zeroes all off-mode switch/value
+fields**, so a stale trigger from the previous mode cannot remain active on the device.
+
+> **Behavior-verification caveat (Gate-5 pending):** The `currentMode` map, the per-mode field
+> signatures, the `currentMode=4` setpoint-vs-trigger authority (the `settingMode` vs `setSelect`
+> distinction), and the `targetVpd ÷10` factor are **storage-verified** — confirmed by reading
+> back what the server stored after a write to a throwaway **disabled** rule, with the active grow
+> never actuated. They are **not yet behavior-verified** — i.e. it is not yet confirmed that the
+> controller *acts* on these fields identically to how the AC Infinity app renders them. These are
+> the open Gate-5 behavioral checks for this phase. Newer fields returned by `getGroups`
+> (`sensorModeData`, `triggerSwitch`, `triggerValue`, `targetSwitch`, `targetValue`, `fanLevel`,
+> `minLevel`) are `0`/`None` on all legacy entries — purpose unknown, likely AI+/newer-firmware
+> only. `currentMode=2` (Off) and a CO2 target field were not located on this device.
+
+---
+
 ## v2.0 API Endpoints Reference
 
 All endpoints below use the base URL `https://www.acinfinityserver.com/api` and require
@@ -1435,6 +1497,7 @@ All use HTTPS (TLSv1.3 — see Quirk 8).
 |---|---|---|---|
 | `/api/version=2.0/dev/getGroups` | POST | `devId=<devId>` | Returns list of automation group objects; each has `advId`, `advName`, `isOn`, `onSpeed`, `offSpeed`, etc. |
 | `/api/version=2.0/dev/addGroups` | POST | Full form (~50 fields): `advName`, `devId`, `grouptDevType`, `currentMode`, `isOn`, `onSpeed`, `offSpeed`, `beginTime`, `endTime`, `groupNums`, `sortType`, `subNumber`, `returnData=1`, + others | Returns created automation object with server-assigned `advId` |
+| `/api/version=2.0/dev/updateGroupsById` | POST | Full rule body (read-before-write) + `advId` + `devId` | Edits a rule in place by `advId`; preserves structural defaults from the live rule (Quirk 13 + Quirk 32) |
 | `/api/version=2.0/dev/updateGroupsIsOn` | POST | `advId=<id>&isDel=0&isflag=1` | Toggles `isOn` state server-side; no explicit `isOn` field in body |
 | `/api/version=2.0/dev/delByid` | POST | `advId=<id>&isDel=1&isflag=1` | Deletes automation by `advId` |
 
@@ -2643,6 +2706,12 @@ Get full detail for a single Advance Automation.
 - `port_resolution` — one of:
   - `"resolved"` — `governed_ports` decoded successfully from bitmasks; accurate for this automation regardless of whether other automations are simultaneously active
   - `"error"` — an exception occurred while decoding bitmasks; `governed_ports` is empty
+- `rules` — per-rule read parity (one entry per port group / `advId`), decoded so the wording matches exactly what the rule-write tools emit. Each entry is `{"ports", "control", "speed", "window", "running", "_mode"}`:
+  - `ports` — name+number port label (e.g. `"Humidifier (Port 1)"`)
+  - `control` — grower-readable behavior string, e.g. `"runs at speed 5"`, `"cycle 30 min on / 30 min off"`, `"hold humidity at 65%"`, `"hold VPD at 0.9 kPa"`, `"run when temp rises above 82°F"`, `"run when humidity drops below 50%"`
+  - `window` — `"HH:MM–HH:MM (timezone)"`; wrap-around windows (begin > end) display as-is for the two-window pattern
+  - `running` — per-rule run state (`run_state`); different rules in one program may have different run states (e.g. complementary lights-on / lights-off windows)
+  - `_mode` — internal round-trip key (`on`/`cycle`/`temperature`/`humidity`/`vpd`); underscore-prefixed = not surfaced to the grower; Claude reads `control` + `window` (see Quirk 32)
 - `human_summary` — natural-language description; adapts to mode and group configuration:
   - Continuous, single group: `"'Name' runs continuously at speed N, currently enabled."`
   - Scheduled with times, single group: `"'Name' runs at speed N from HH:MM to HH:MM, currently enabled."`
@@ -2736,9 +2805,11 @@ Disable a currently enabled Advance Automation. No-ops if already disabled.
 
 ---
 
-### `create_advance_automation(device_id, name, on_speed, port, off_speed=0, begin_time=0, end_time=1439, dry_run=True)`
+### `create_advance_automation(device_id, name, on_speed, port, off_speed=0, begin_time=0, end_time=1439, mode="on", target=None, target_kpa=None, low=None, high=None, low_f=None, high_f=None, direction=None, cycle_on_minutes=None, cycle_off_minutes=None, dry_run=True)`
 
 Create a new Advance Automation on a device. Defaults to `dry_run=True` for safety. Set `dry_run=False` to send the automation to the device. The port bitmask (`grouptDevType`) is computed automatically from the port number (Port N → 2^(N-1)).
+
+The optional `mode` parameter sets the behavior of the automation's **first rule**. The default `mode="on"` is the original fixed-speed behavior and leaves the create path unchanged. Other modes (`cycle`, `temperature`, `humidity`, `vpd`) take the same per-mode target params as `add_automation_rule` (see Quirk 32 for the encoding).
 
 **Parameters:**
 | Parameter | Type | Description |
@@ -2750,7 +2821,16 @@ Create a new Advance Automation on a device. Defaults to `dry_run=True` for safe
 | `off_speed` | `int` | Accepted for compatibility but not sent to the device — On mode relies on the port's own minimum speed setting. Default: 0 |
 | `begin_time` | `int` | Schedule start as minutes since midnight (0–1439, or 255 = always active). Default: 0 (midnight) |
 | `end_time` | `int` | Schedule end as minutes since midnight (0–1439, or 255 = always active). Default: 1439 (23:59) |
+| `mode` | `str` | First-rule behavior: `on` (default), `cycle`, `temperature`, `humidity`, `vpd`. Default `"on"` is unchanged. |
+| `target` | `int \| None` | Humidity setpoint % (for `mode="humidity"` hold) |
+| `target_kpa` | `float \| None` | VPD setpoint in kPa (for `mode="vpd"`, 0.0–9.9) |
+| `low` / `high` | `int \| None` | Humidity low/high trigger % (for a humidity trigger rule) |
+| `low_f` / `high_f` | `int \| None` | Low/high temperature trigger °F (for `mode="temperature"`) |
+| `direction` | `str \| None` | `on_below`, `on_above`, or `both` (for temperature / humidity triggers) |
+| `cycle_on_minutes` / `cycle_off_minutes` | `int \| None` | Minutes on / off (for `mode="cycle"`) |
 | `dry_run` | `bool` | Default `True` — previews without sending. Set to `False` to create the automation on the device. |
+
+The `begin_time <= end_time` guard on this tool is unchanged (wrap-around windows are not permitted on create); use `add_automation_rule` for the two-window pattern.
 
 **Response (dry_run=True):**
 ```json
@@ -2905,6 +2985,131 @@ manual control. Ports in other automations are unaffected.
   are applied, the target port itself is written to its automation-controlled `on_speed` (from
   the governing port group). This ensures the grower sees no unexpected speed change after release
   — the port starts manual control from its previous automation-controlled baseline speed.
+
+---
+
+### `add_automation_rule(device_id, program_name, ports, mode, speed=5, target=None, target_kpa=None, low=None, high=None, low_f=None, high_f=None, direction=None, cycle_on_minutes=None, cycle_off_minutes=None, begin_time=0, end_time=1439, dry_run=True)`
+
+Append one rule to an existing Advance Automation program (matched by `program_name`). A rule is one schedule window + behavior for one or more ports. Defaults to `dry_run=True`. See Quirk 32 for the per-mode encoding.
+
+**Parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `device_id` | `str` | Device code from `discover_devices` |
+| `program_name` | `str` | Name of the existing program to add the rule to |
+| `ports` | `list[int]` | One or more 1-based port numbers this rule controls (bitmask computed internally) |
+| `mode` | `str` | `on`, `cycle`, `temperature`, `humidity`, or `vpd` |
+| `speed` | `int` | Fan speed when the rule is active (1–10). Default 5 |
+| `target` | `int \| None` | Humidity setpoint % (for `mode="humidity"` hold) |
+| `target_kpa` | `float \| None` | VPD setpoint in kPa (for `mode="vpd"`, 0.0–9.9) |
+| `low` / `high` | `int \| None` | Humidity low/high trigger % |
+| `low_f` / `high_f` | `int \| None` | Low/high temperature trigger °F |
+| `direction` | `str \| None` | `on_below`, `on_above`, or `both` (required for temperature / humidity triggers; rejected for `on`/`cycle`/`vpd`/humidity-setpoint) |
+| `cycle_on_minutes` / `cycle_off_minutes` | `int \| None` | Minutes on / off (for `mode="cycle"`) |
+| `begin_time` / `end_time` | `int` | Window start / end, minutes since midnight (0–1439). **Wrap-around (begin > end) is permitted** — a lights-on window like 09:00→03:00 is allowed. Defaults 0 / 1439 |
+| `dry_run` | `bool` | Default `True` — previews the rule without sending |
+
+**Response (dry_run=True):**
+```json
+{
+  "action": "add rule to 'Seedling'",
+  "program_name": "Seedling",
+  "rule": {
+    "ports": "Humidifier (Port 1)",
+    "control": "hold humidity at 65%",
+    "speed": 2,
+    "window": "03:00–09:00 (America/Chicago)",
+    "_mode": "humidity"
+  },
+  "dry_run": true,
+  "sent": false,
+  "note": "Preview only — nothing sent yet. Confirm to add this rule."
+}
+```
+
+**Response (live, dry_run=False):** replaces `dry_run`/`sent` with `false`/`true` and adds a `human_summary` line (e.g. `"Added a rule on Humidifier (Port 1) (hold humidity at 65%) for 03:00–09:00 (America/Chicago)."`).
+
+**Response (program not found):** `{"error": "No program named '...' on device ...", "existing_programs": [...], "suggested_reply": "..."}`.
+
+**Field notes:**
+- `control` wording is identical on dry-run, live, and read-back via `get_advance_automation` (round-trip parity)
+- `_mode` is internal/round-trip only — not surfaced to the grower
+- Validation (before any write): RH `target`/`low`/`high` 0–100; `target_kpa` 0.0–9.9; `low_f`/`high_f` 32–212°F; `speed` 1–10; `cycle_on/off_minutes` 0–1439; `low < high` when both given; a param irrelevant to the chosen `mode` is rejected
+
+---
+
+### `update_automation_rule(device_id, program_name, ports, begin_time=None, end_time=None, mode=None, speed=None, target=None, target_kpa=None, low=None, high=None, low_f=None, high_f=None, direction=None, cycle_on_minutes=None, cycle_off_minutes=None, new_begin_time=None, new_end_time=None, dry_run=True)`
+
+Edit one existing rule in place (via the `updateGroupsById` endpoint — Quirk 32). The rule is found by `program_name` + `ports`, optionally disambiguated by the **current** window (`begin_time`/`end_time`). Only the fields you supply change; everything else is preserved read-before-write from the live rule. Defaults to `dry_run=True`.
+
+**Parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `device_id` | `str` | Device code from `discover_devices` |
+| `program_name` | `str` | The program the rule belongs to |
+| `ports` | `list[int]` | The port number(s) the target rule controls (used to find the rule) |
+| `begin_time` / `end_time` | `int \| None` | **Selector** — the rule's *current* window, to disambiguate when the program has more than one rule on these ports |
+| `mode` | `str \| None` | New behavior type. Omit to keep. A mode change rebuilds the full per-mode signature and zeroes off-mode switches (Quirk 32) |
+| `speed` | `int \| None` | New active fan speed (1–10) |
+| `target` / `target_kpa` / `low` / `high` / `low_f` / `high_f` / `direction` | — | New target params (same semantics as `add_automation_rule`) |
+| `cycle_on_minutes` / `cycle_off_minutes` | `int \| None` | New cycle on/off minutes |
+| `new_begin_time` / `new_end_time` | `int \| None` | **New** window (minutes since midnight, 0–1439) to move the rule to |
+| `dry_run` | `bool` | Default `True` — previews the change without sending |
+
+**Response (more than one rule matches):**
+```json
+{
+  "error": "More than one rule matches — pick which window to edit.",
+  "program_name": "Seedling",
+  "matching_rules": [
+    {"ports": "Humidifier (Port 1)", "control": "hold humidity at 65%", "window": "03:00–09:00 (America/Chicago)", "running": false},
+    {"ports": "Humidifier (Port 1)", "control": "hold VPD at 0.9 kPa", "window": "09:00–03:00 (America/Chicago)", "running": true}
+  ],
+  "suggested_reply": "There's more than one rule on those ports. Which window should I edit?"
+}
+```
+The disambiguation list never contains `advId`.
+
+**Field notes:**
+- No-op rejection: supplying zero change fields → `{"error": "Nothing to change — supply at least one field to update."}`, no write attempted
+- Stale-advId guard: the `advId` is re-resolved from a fresh `getGroups` at write time; if the rule vanished between resolve and write the API error surfaces as a typed `ACInfinityAPIError`
+- Update body is `deepcopy` of the live rule + overlay (read-before-write, Quirk 13/32) — the builder is not used to construct the update body, so structural defaults are preserved
+
+---
+
+### `delete_automation_rule(device_id, program_name, ports, begin_time=None, end_time=None, dry_run=True)`
+
+Remove one rule from a program (via `delByid`), leaving the rest of the program intact. The rule is found by `program_name` + `ports`, optionally disambiguated by window. Defaults to `dry_run=True`.
+
+**Parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `device_id` | `str` | Device code from `discover_devices` |
+| `program_name` | `str` | The program the rule belongs to |
+| `ports` | `list[int]` | The port number(s) the target rule controls |
+| `begin_time` / `end_time` | `int \| None` | Selector to disambiguate when more than one rule matches |
+| `dry_run` | `bool` | Default `True` — previews the deletion without performing it |
+
+**Response (dry_run=True):**
+```json
+{
+  "action": "remove rule from 'Seedling'",
+  "program_name": "Seedling",
+  "rule": {
+    "ports": "Humidifier (Port 1)",
+    "control": "hold humidity at 65%",
+    "window": "03:00–09:00 (America/Chicago)",
+    "_mode": "humidity"
+  },
+  "dry_run": true,
+  "sent": false,
+  "note": "Preview only — nothing removed yet. Confirm to remove this rule."
+}
+```
+
+**Field notes:**
+- More-than-one-match returns the same `matching_rules` disambiguation shape as `update_automation_rule` (no `advId`)
+- Stale-advId guard: re-resolves from a fresh `getGroups` at write time
 
 ---
 

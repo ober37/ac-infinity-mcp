@@ -17,7 +17,7 @@ A complete walkthrough of every tool, with real conversation examples.
 9. [Advance Automations](#9-advance-automations)
 10. [Built-in Prompts](#10-built-in-prompts)
 11. [Troubleshooting](#11-troubleshooting)
-12. [Appendix: All 25 Tools at a Glance](#12-appendix-all-25-tools-at-a-glance)
+12. [Appendix: All 28 Tools at a Glance](#12-appendix-all-28-tools-at-a-glance)
 
 ---
 
@@ -677,7 +677,7 @@ See [Taking Back Manual Control](#taking-back-manual-control) in Section 9.
 
 ---
 
-## 12. Appendix: All 25 Tools at a Glance
+## 12. Appendix: All 28 Tools at a Glance
 
 | Tool | Category | Preview mode | What it does |
 |---|---|---|---|
@@ -703,6 +703,9 @@ See [Taking Back Manual Control](#taking-back-manual-control) in Section 9.
 | `get_advance_automation` | Advance Automation | N/A | Full detail for one automation — schedule, ports, run state |
 | `enable_advance_automation` | Advance Automation | Yes — on by default | Enable a disabled automation |
 | `disable_advance_automation` | Advance Automation | Yes — on by default | Disable an enabled automation |
-| `create_advance_automation` | Advance Automation | Yes — on by default | Create a new named automation with speed, schedule, and threshold settings |
+| `create_advance_automation` | Advance Automation | Yes — on by default | Create a new named automation; the first rule can be on, cycle, temperature, humidity, or VPD |
 | `delete_advance_automation` | Advance Automation | Yes — on by default | Delete an automation (disables it first if active) |
+| `add_automation_rule` | Advance Automation | Yes — on by default | Add one rule (window + behavior) to an existing program |
+| `update_automation_rule` | Advance Automation | Yes — on by default | Edit one rule in place — change its window, speed, mode, or sensor targets |
+| `delete_automation_rule` | Advance Automation | Yes — on by default | Remove a single rule from a program, leaving the rest intact |
 | `break_out_of_automation` | Advance Automation | Yes — on by default | Release a port from automation control and lock co-governed ports to manual speed |

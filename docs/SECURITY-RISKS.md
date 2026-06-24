@@ -44,6 +44,7 @@ All endpoints below are confirmed over HTTPS. This list was updated via network 
 |---|---|
 | `POST /api/version=2.0/dev/getGroups` | List all automation groups for a device |
 | `POST /api/version=2.0/dev/addGroups` | Create automation group |
+| `POST /api/version=2.0/dev/updateGroupsById` | Edit an automation rule in place by `advId` (read-before-write) |
 | `POST /api/version=2.0/dev/updateGroupsIsOn` | Toggle automation on/off state |
 | `POST /api/version=2.0/dev/delByid` | Delete automation |
 
@@ -137,6 +138,11 @@ a vulnerability.
   bump the `mcp` version in `pyproject.toml` and remove the ignore from
   `.github/workflows/ci.yml`.
 - **Re-evaluation due:** 2026-08-26 — check upstream advisories quarterly until resolved.
+- **Additional starlette CVEs (CVE-2026-54282, CVE-2026-54283; fix: 1.3.0 / 1.3.1):** observed
+  in `pip-audit` (Issue #284 Gate 4, 2026-06-24). Same exposure profile as above — transitive
+  via the `mcp` SDK's HTTP/SSE transport, which this stdio-only server never reaches. **Not
+  introduced by Issue #284** — that PR adds no dependencies. Tracked here for visibility, not
+  added to the `--ignore-vuln` list; resolves when the `mcp` pin pulls `starlette ≥ 1.3.1`.
 
 ---
 

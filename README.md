@@ -61,8 +61,11 @@
 | 🤖 **Advance Automation** | `get_advance_automation` | Get full detail (schedule, port groups, run state) for one automation |
 | 🤖 **Advance Automation** | `enable_advance_automation` | Enable a disabled automation — reads state first, no-ops if already enabled (`dry_run=True` by default) |
 | 🤖 **Advance Automation** | `disable_advance_automation` | Disable an enabled automation — reads state first, no-ops if already disabled (`dry_run=True` by default) |
-| 🤖 **Advance Automation** | `create_advance_automation` | Create a new named automation with speed, schedule, and threshold settings (`dry_run=True` by default) |
+| 🤖 **Advance Automation** | `create_advance_automation` | Create a new named automation; the first rule can be on, cycle, temperature, humidity, or VPD (`dry_run=True` by default) |
 | 🤖 **Advance Automation** | `delete_advance_automation` | Delete an automation (disables first if active) (`dry_run=True` by default) |
+| 🤖 **Advance Automation** | `add_automation_rule` | Add one rule (window + behavior) to an existing program — on, cycle, temperature, humidity, or VPD (`dry_run=True` by default) |
+| 🤖 **Advance Automation** | `update_automation_rule` | Edit one rule in place — change its window, speed, mode, or sensor targets (`dry_run=True` by default) |
+| 🤖 **Advance Automation** | `delete_automation_rule` | Remove a single rule from a program, leaving the rest intact (`dry_run=True` by default) |
 | 🤖 **Advance Automation** | `break_out_of_automation` | Safely break a port out of automation control and lock co-governed ports to manual speed (`dry_run=True` by default) |
 
 > ✦ All write tools (Write, Automation, and Intelligence categories) default to `dry_run=True` — they return the exact payload they *would* send without making any changes to your equipment. Pass `dry_run=False` only when you're ready to execute.
