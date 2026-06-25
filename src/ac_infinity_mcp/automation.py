@@ -226,6 +226,11 @@ def _decode_rule(entry: dict) -> dict:
     schedule and buffer/transition modifiers are appended. A value AT its rail is NEVER a
     clause, so a Target rule's rail-parked triggers (switches=1) are correctly ignored.
     """
+    # Groups (Advance Automation) currentMode: Off/On/Auto/VPD/Cycle = 2/1/4/6/3. This is a
+    # DIFFERENT enum from the legacy per-port `atType` (getdevModeSettingList): atType OFF=1,
+    # ON=2, AUTO=3, TIMER=4/5, CYCLE=6, SCHEDULE=7, VPD=8. Do not conflate the two. Any
+    # currentMode not in {1,2,3,4,6} decodes gracefully to "unknown" (no KeyError/crash) so a
+    # future firmware value (e.g. 5 or 7) can't break read-back.
     current_mode = entry.get("currentMode")
 
     if current_mode == 2:
@@ -252,7 +257,7 @@ def _decode_rule(entry: dict) -> dict:
             clauses = ["VPD (no rule set)"]
         mode = "vpd"
     else:
-        return {"mode": "unknown", "control": "unknown rule type", "direction": None}
+        return {"mode": "unknown", "control": "unrecognized rule", "direction": None}
 
     parts = list(clauses)
     parts.extend(_decode_modifiers(entry))

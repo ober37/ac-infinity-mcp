@@ -7852,6 +7852,9 @@ async def test_create_advance_automation_live_port4(mock_client):
     assert payload["grouptDevType"] == 8
     assert payload["advName"] == "Test Auto"
     assert payload["onSpeed"] == 5
+    # New program: isFlag=1, server assigns the slot (subNumber=0). Issue #284.
+    assert payload["isFlag"] == 1
+    assert payload["subNumber"] == 0
 
 
 async def test_create_advance_automation_live_port1(mock_client):
@@ -9461,13 +9464,18 @@ def _seedling_program():
     """Seedling program (capture-aligned): two port-1 rules (different windows) +
     one port-2 auto-trigger rule. Full per-mode field sets carried via deep-copied
     fixtures so the read-before-write overlay has every field to preserve."""
+    # All three rules share one program SLOT (groupNums=1, sortType=6) with sequential
+    # subNumber 0/1/2 — the real shape an appended rule must join (Issue #284).
     return [
         {**copy.deepcopy(MOCK_RULE_VPD), "advName": "Seedling", "grouptDevType": 1,
-         "beginTime": 540, "endTime": 180, "runState": 1, "advId": 5001},
+         "beginTime": 540, "endTime": 180, "runState": 1, "advId": 5001,
+         "groupNums": 1, "sortType": 6, "subNumber": 0, "subNumberSort": 0},
         {**copy.deepcopy(MOCK_RULE_HUMIDITY_SETPOINT), "advName": "Seedling",
-         "grouptDevType": 1, "beginTime": 180, "endTime": 540, "runState": 0, "advId": 5002},
+         "grouptDevType": 1, "beginTime": 180, "endTime": 540, "runState": 0, "advId": 5002,
+         "groupNums": 1, "sortType": 6, "subNumber": 1, "subNumberSort": 1},
         {**copy.deepcopy(MOCK_RULE_TEMPERATURE_TRIGGER), "advName": "Seedling",
-         "grouptDevType": 2, "beginTime": 540, "endTime": 180, "runState": 1, "advId": 5003},
+         "grouptDevType": 2, "beginTime": 540, "endTime": 180, "runState": 1, "advId": 5003,
+         "groupNums": 1, "sortType": 6, "subNumber": 2, "subNumberSort": 2},
     ]
 
 
@@ -9559,16 +9567,65 @@ async def test_add_continuous_rule_window_not_clock_range(mock_client):
     assert "runs continuously" in data["rule"]["control"]
 
 
-async def test_add_automation_rule_live_sends_and_subnumber(mock_client):
-    program = _seedling_program()
+async def test_add_automation_rule_live_appends_to_slot(mock_client):
+    """Append (Issue #284): isFlag=0 + the target program's SLOT (groupNums/sortType) +
+    subNumber = existing max + 1, so the rule joins the program rather than spawning a new one."""
+    program = _seedling_program()  # slot (1, 6), subNumbers 0/1/2
     mock_client.get_advance_automations.return_value = program
     result = await add_automation_rule("C58ZA", "Seedling", [1], "on", max_level=4, dry_run=False)
     data = json.loads(result)
     assert data["sent"] is True
     mock_client.create_advance_automation.assert_called_once()
     sent = mock_client.create_advance_automation.call_args.args[1]
-    # subNumber = number of existing entries in the program (append index).
-    assert sent["subNumber"] == len(program)
+    assert sent["isFlag"] == 0
+    assert sent["groupNums"] == 1
+    assert sent["sortType"] == 6
+    assert sent["subNumber"] == 3  # max(0,1,2) + 1
+    assert sent["subNumberSort"] == 3
+
+
+async def test_multi_rule_flow_create_then_append(mock_client):
+    """End-to-end slot lifecycle: create a NEW program (isFlag=1, subNumber=0), then add a
+    second rule (isFlag=0) carrying the created program's slot + subNumber=1. Issue #284."""
+    import copy as _copy
+
+    device = _copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device["deviceInfo"]["ports"].append({"port": 4, "portName": "Clip Fan"})
+    mock_client.get_devices.return_value = [device]
+    mock_client.create_advance_automation.return_value = {"advId": 7001}
+
+    # 1) create a new program.
+    await create_advance_automation("C58ZA", "Veg Fans", on_speed=5, port=4, dry_run=False)
+    first_payload = mock_client.create_advance_automation.call_args.args[1]
+    assert first_payload["isFlag"] == 1
+    assert first_payload["subNumber"] == 0
+
+    # 2) the server now reads back the created program as one rule in slot (3, 4),
+    #    subNumber=0; appending must join that slot at subNumber=1.
+    mock_client.get_advance_automations.return_value = [{
+        **_copy.deepcopy(MOCK_RULE_VPD), "advName": "Veg Fans", "advId": 7001,
+        "grouptDevType": 8, "groupNums": 3, "sortType": 4, "subNumber": 0, "subNumberSort": 0,
+    }]
+    mock_client.create_advance_automation.reset_mock()
+    await add_automation_rule("C58ZA", "Veg Fans", [4], "on", max_level=6, dry_run=False)
+    second_payload = mock_client.create_advance_automation.call_args.args[1]
+    assert second_payload["isFlag"] == 0
+    assert second_payload["groupNums"] == 3
+    assert second_payload["sortType"] == 4
+    assert second_payload["subNumber"] == 1
+
+
+async def test_add_automation_rule_more_than_one_program_same_name_rejected(mock_client):
+    """A name mapping to >1 distinct (groupNums, sortType) slot is ambiguous → friendly
+    disambiguation error, no write."""
+    program = _seedling_program()
+    program[2]["groupNums"] = 2  # second distinct slot under the same advName
+    mock_client.get_advance_automations.return_value = program
+    result = await add_automation_rule("C58ZA", "Seedling", [1], "on", max_level=4, dry_run=False)
+    data = json.loads(result)
+    assert "error" in data
+    assert "More than one program" in data["error"]
+    mock_client.create_advance_automation.assert_not_called()
 
 
 async def test_add_automation_rule_cross_mode_param_rejected(mock_client):

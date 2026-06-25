@@ -410,3 +410,44 @@ def test_round_trip_wrap_around_window_no_negative_duration():
         mode="on", on_speed=5, switch_time=127,
     )
     assert "09:00–03:00" in _decode_rule(p)["control"]
+
+
+# ============ isFlag / program-slot gating (Issue #284 append fix) ============
+
+
+def test_build_groups_payload_default_is_new_program():
+    """Defaults: isFlag=1 (new program), subNumber=0, slot at the new-program sentinel 9/9."""
+    p = build_groups_payload(
+        dev_id="X", ports=[1], clean_name="P", begin_time=0, end_time=1439,
+        mode="on", on_speed=5,
+    )
+    assert p["isFlag"] == 1
+    assert p["subNumber"] == 0
+    assert p["subNumberSort"] == 0
+    assert p["groupNums"] == 9
+    assert p["sortType"] == 9
+
+
+def test_build_groups_payload_append_honors_slot_and_subnumber():
+    """isFlag=0 append carries the target program's slot + the next subNumber."""
+    p = build_groups_payload(
+        dev_id="X", ports=[2], clean_name="0624", begin_time=0, end_time=1439,
+        mode="on", on_speed=5, is_flag=0, group_nums=1, sort_type=6, sub_number=2,
+    )
+    assert p["isFlag"] == 0
+    assert p["groupNums"] == 1
+    assert p["sortType"] == 6
+    assert p["subNumber"] == 2
+    assert p["subNumberSort"] == 2
+
+
+# ============ Graceful decode of unhandled currentMode (robustness) ============
+
+
+@pytest.mark.parametrize("mode", [5, 7])
+def test_decode_unknown_current_mode_is_graceful(mode):
+    """A currentMode the decoder doesn't handle returns 'unknown' — no KeyError/crash."""
+    decoded = _decode_rule({"currentMode": mode})
+    assert decoded["mode"] == "unknown"
+    assert decoded["control"] == "unrecognized rule"
+    assert decoded["direction"] is None

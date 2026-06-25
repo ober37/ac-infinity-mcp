@@ -116,7 +116,10 @@ _RAIL_HUMI_LOW = 0
 _RAIL_VPD_HIGH = 99
 _RAIL_VPD_LOW = 0
 
-# currentMode values (single mode pick, matches the app's Modes screen).
+# currentMode values for the Groups (Advance Automation) API. Single mode pick, matches
+# the app's Advance Automation screen: Off/On/Auto/VPD/Cycle = 2/1/4/6/3.
+# NOTE: this is a DIFFERENT enum from the legacy per-port `atType` (getdevModeSettingList):
+# atType OFF=1, ON=2, AUTO=3, TIMER=4/5, CYCLE=6, SCHEDULE=7, VPD=8. Do not conflate the two.
 _MODE_ON = 1
 _MODE_OFF = 2
 _MODE_CYCLE = 3
@@ -155,6 +158,9 @@ def build_groups_payload(
     cycle_off_minutes: int | None = None,
     switch_time: int = 127,
     sub_number: int = 0,
+    is_flag: int = 1,
+    group_nums: int | None = None,
+    sort_type: int | None = None,
     adv_id: int | None = None,
 ) -> dict[str, Any]:
     """Build the addGroups / updateGroupsById payload for one Advance Automation rule.
@@ -175,6 +181,15 @@ def build_groups_payload(
     at their rail (°C parked at rail, NOT derived). Buffer → ``*Buff``, transition →
     ``*Trans`` (the two are mutually exclusive per sensor — validated upstream). ``switch_time``
     bits 0–6 = days (bit0=Mon … bit6=Sun), bit 7 = continuous.
+
+    A *program* is a shared ``(groupNums, sortType)`` slot whose rules carry sequential
+    ``subNumber``. ``addGroups`` is gated by ``is_flag`` (Issue #284, iOS-app capture):
+    ``is_flag=1`` → NEW program (server assigns a fresh slot, ``subNumber=0`` — sent
+    ``group_nums``/``sort_type`` are ignored); ``is_flag=0`` → APPEND (server HONORS the
+    sent ``group_nums`` + ``sort_type`` = the target program's slot, and
+    ``subNumber``/``subNumberSort`` = existing max + 1, so the rule joins that program).
+    The defaults (``is_flag=1``, no slot, ``sub_number=0``) reproduce the original
+    new-program output byte-for-byte.
 
     NO ``{**base, **caller}`` spread — every field is assigned explicitly so an unknown
     caller param can never reach the payload. ``adv_id`` is included only on the update path.
@@ -200,12 +215,15 @@ def build_groups_payload(
         # Map "always active" sentinel to a valid full-day range.
         "beginTime": 0 if begin_time == _SCHEDULE_ALWAYS_ACTIVE else begin_time,
         "endTime": 1439 if end_time == _SCHEDULE_ALWAYS_ACTIVE else end_time,
-        "groupNums": 9,
-        "sortType": 9,
+        # groupNums/sortType define the program SLOT. On a NEW program (isFlag=1) the
+        # server assigns the slot and ignores these; on APPEND (isFlag=0) the caller passes
+        # the target program's slot so the rule joins it (Issue #284).
+        "groupNums": 9 if group_nums is None else group_nums,
+        "sortType": 9 if sort_type is None else sort_type,
         "subNumber": sub_number,
         "subNumberSort": sub_number,
         "isDel": 0,
-        "isFlag": 1,
+        "isFlag": is_flag,
         "returnData": 1,
         "templateType": 0,
         "grouptDevType": grp_dev_type,

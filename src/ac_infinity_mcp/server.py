@@ -4399,11 +4399,29 @@ async def add_automation_rule(
                 ),
             })
 
-        # subNumber = number of existing entries in the program (append index).
-        sub_number = len(program_entries)
+        # A program is a shared (groupNums, sortType) SLOT; its rules carry sequential
+        # subNumber. Append = isFlag=0 + the target slot + next subNumber (existing max + 1).
+        slots = {
+            (e.get("groupNums"), e.get("sortType")) for e in program_entries
+        }
+        if len(slots) > 1:
+            return json.dumps({
+                "error": (
+                    f"More than one program named '{clean_program}' on device {device_id}."
+                    " Rename them so they're unique, then add the rule to the one you want."
+                ),
+                "suggested_reply": (
+                    f"There's more than one program called '{clean_program}', so I can't tell"
+                    " which to add to. Rename them to be unique and we'll try again."
+                ),
+            })
+        group_nums, sort_type = next(iter(slots))
+        next_sub = max((e.get("subNumber") or 0) for e in program_entries) + 1
         payload = build_groups_payload(
             dev_id=str(dev_id), ports=ports, clean_name=clean_program,
-            begin_time=begin_time, end_time=end_time, sub_number=sub_number, **kwargs,
+            begin_time=begin_time, end_time=end_time,
+            is_flag=0, group_nums=group_nums, sort_type=sort_type, sub_number=next_sub,
+            **kwargs,
         )
         decoded = _decode_rule(payload)
         rule_view = {
