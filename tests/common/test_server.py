@@ -7050,14 +7050,15 @@ async def test_break_out_lock_port_fails_rollback(mock_client):
     assert len(data["recovery_steps"]) > 0
 
 
-async def test_create_advance_automation_begin_end_reversed(mock_client):
-    """begin_time > end_time (both non-255) → validation error."""
+async def test_create_advance_automation_wraparound_window_permitted(mock_client):
+    """begin_time > end_time (wrap-around, e.g. lights-on 09:00→03:00) is PERMITTED —
+    required for the two-window pattern; consistent with add_automation_rule and the app."""
     result = await create_advance_automation(
         "C58ZA", "Test", on_speed=5, port=1, begin_time=1200, end_time=60, dry_run=True
     )
     data = json.loads(result)
-    assert "error" in data
-    assert "begin_time" in data["error"]
+    assert "error" not in data
+    assert data.get("dry_run") is True
 
 
 async def test_break_out_confirm_name_too_long(mock_client):

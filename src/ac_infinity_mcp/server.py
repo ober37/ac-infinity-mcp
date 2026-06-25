@@ -3943,11 +3943,9 @@ async def create_advance_automation(
             return json.dumps({"error": "begin_time must be 0–1439 or 255 (no schedule)"})
         if not (0 <= end_time <= 1439 or end_time == _SCHEDULE_ALWAYS_ACTIVE):
             return json.dumps({"error": "end_time must be 0–1439 or 255 (no schedule)"})
-        if (begin_time != _SCHEDULE_ALWAYS_ACTIVE and end_time != _SCHEDULE_ALWAYS_ACTIVE
-                and begin_time > end_time):
-            return json.dumps(
-                {"error": "begin_time must be <= end_time (or both 255 for no schedule)"}
-            )
+        # Wrap-around windows (begin > end, e.g. lights-on 09:00→03:00) are VALID and
+        # required for the two-window pattern — the controller and add_automation_rule both
+        # permit them. Do NOT reject begin > end here (kept consistent with add_automation_rule).
         if (begin_time == _SCHEDULE_ALWAYS_ACTIVE) != (end_time == _SCHEDULE_ALWAYS_ACTIVE):
             return json.dumps({
                 "error": (
