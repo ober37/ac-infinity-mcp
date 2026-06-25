@@ -101,18 +101,27 @@ def _decode_modifiers(entry: dict) -> list[str]:
         min_render = "0 (off)" if min_level == 0 else str(min_level)
         mods.append(f"speed {min_render}–{max_level}")
 
-    if int(entry.get("temperatureFBuff") or 0) > 0:
-        mods.append(f"temperature buffer {entry['temperatureFBuff']}°F")
-    if int(entry.get("temperatureFTrans") or 0) > 0:
-        mods.append(f"temperature transition {entry['temperatureFTrans']}°F")
-    if int(entry.get("humidityBuff") or 0) > 0:
-        mods.append(f"humidity buffer {entry['humidityBuff']}%")
-    if int(entry.get("humidityTrans") or 0) > 0:
-        mods.append(f"humidity transition {entry['humidityTrans']}%")
-    if int(entry.get("vpdBuff") or 0) > 0:
-        mods.append(f"VPD buffer {entry['vpdBuff'] / 10:g} kPa")
-    if int(entry.get("vpdTrans") or 0) > 0:
-        mods.append(f"VPD transition {entry['vpdTrans'] / 10:g} kPa")
+    # Coerce each value once (the API returns ints, but stay defensive against a
+    # string-valued field so a display modifier can never raise — _decode_modifiers
+    # runs for every rule via _group_automations, which feeds legacy conflict detection).
+    temp_buff = int(entry.get("temperatureFBuff") or 0)
+    temp_trans = int(entry.get("temperatureFTrans") or 0)
+    humi_buff = int(entry.get("humidityBuff") or 0)
+    humi_trans = int(entry.get("humidityTrans") or 0)
+    vpd_buff = int(entry.get("vpdBuff") or 0)
+    vpd_trans = int(entry.get("vpdTrans") or 0)
+    if temp_buff > 0:
+        mods.append(f"temperature buffer {temp_buff}°F")
+    if temp_trans > 0:
+        mods.append(f"temperature transition {temp_trans}°F")
+    if humi_buff > 0:
+        mods.append(f"humidity buffer {humi_buff}%")
+    if humi_trans > 0:
+        mods.append(f"humidity transition {humi_trans}%")
+    if vpd_buff > 0:
+        mods.append(f"VPD buffer {vpd_buff / 10:g} kPa")
+    if vpd_trans > 0:
+        mods.append(f"VPD transition {vpd_trans / 10:g} kPa")
     return mods
 
 

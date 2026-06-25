@@ -418,3 +418,24 @@ async def test_build_conflict_auth_error_returns_error():
     assert "error" in data
     assert "conflict" not in data
     assert "Authentication failed" in data["error"]
+
+
+# ============ _decode_rule defensive coercion (buffer/transition) ============
+
+
+def test_decode_rule_string_valued_buffer_transition_no_raise():
+    """A string-valued buffer/transition field must not raise in _decode_rule —
+    it runs for every rule via _group_automations (legacy conflict-detection hot path).
+    The VPD /10 path would TypeError on a raw string without coercion."""
+    entry = {
+        "advName": "X", "advId": 1, "grouptDevType": 1, "currentMode": 6,
+        "settingMode": 1, "targetVpd": 12, "onSpeed": 5, "offSpeed": 1,
+        "beginTime": 540, "endTime": 1020, "switchTime": 127,
+        # string-valued (defensive): must coerce, not crash
+        "vpdBuff": "3", "temperatureFBuff": "2", "humidityTrans": "4",
+    }
+    decoded = _decode_rule(entry)  # must not raise
+    assert decoded["mode"] == "vpd"
+    assert "VPD buffer 0.3 kPa" in decoded["control"]
+    assert "temperature buffer 2°F" in decoded["control"]
+    assert "humidity transition 4%" in decoded["control"]
