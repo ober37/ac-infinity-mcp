@@ -843,7 +843,7 @@ REST probing of 200+ legacy-path variants returned only HTTP 404.
 | Endpoint | Method | Body | Notes |
 |---|---|---|---|
 | `/api/version=2.0/dev/getGroups` | POST | `devId=...` | Returns all automation groups for device |
-| `/api/version=2.0/dev/addGroups` | POST | Full form fields (~50 fields) | Creates automation; server assigns `advId` in response |
+| `/api/version=2.0/dev/addGroups` | POST | Full form fields (~50 fields), incl. `isFlag` | Creates **or** appends a rule. `isFlag=1` → new program slot; `isFlag=0` + the program's `groupNums`/`sortType` + `subNumber=max+1` → appends to that program. Server assigns `advId` in response. See Quirk 32 |
 | `/api/version=2.0/dev/updateGroupsById` | POST | Full form fields + `advId` + `devId` | **Edits a rule in place** by `advId` (same advId, fields updated). The app's rule-edit path — see Quirk 32 |
 | `/api/version=2.0/dev/updateGroupsIsOn` | POST | `advId=...&isDel=0&isflag=1` | **TOGGLES** current `isOn` state — server inverts; no explicit `isOn` field |
 | `/api/version=2.0/dev/delByid` | POST | `advId=...&isDel=1&isflag=1` | Deletes automation |
@@ -1471,14 +1471,33 @@ bit6=Sun), bit 7 (128) = continuous flag. Confirmed values:
 read-side `onTimeSwitch` interpretation). The earlier `switchTime=255 → Continuous` note
 (Quirk 18) is the same fact: `255` = all-days bits *plus* the continuous bit.
 
-**Add a rule — `addGroups` + `subNumber` sequencing:** `addGroups` is **create-only** —
-passing an existing `advId` to it **duplicates** the rule (server assigns a fresh `advId` and
-ignores the passed one). Within a program each rule carries a distinct `subNumber` = its 0-based
-index in the program. Appending a rule with a **colliding `subNumber`** (the old hardcoded `0`)
-is rejected with `code 500 "Adv exist!"`. The fix: when appending to a populated program, set
-`subNumber = max(existing subNumbers) + 1`; a brand-new program's first rule stays `subNumber=0`;
-an in-place update preserves the rule's existing `subNumber`. This was caught only at Gate 5
-(live) — unit tests passed without it.
+**Program = a `(groupNums, sortType)` slot; `addGroups` append is gated by `isFlag`.** A
+program is a shared `(groupNums, sortType)` **slot**, and its rules are entries with sequential
+`subNumber` (0, 1, 2, …). `addGroups` builds **either** a brand-new program **or** appends a
+rule to an existing one, and the lever is the `isFlag` field — *not* `subNumber` sequencing
+(the earlier "duplicates on advId / the lever is subNumber" model was the wrong axis):
+
+- **`isFlag=1` → NEW program slot.** The server mints a fresh `(groupNums, sortType)` slot and
+  sets `subNumber=0`; any `groupNums`/`sortType` sent in the body are **ignored**. This is the
+  `create_advance_automation` path — the program's first rule.
+- **`isFlag=0` → APPEND to an existing program.** The server **honors** the sent `groupNums` +
+  `sortType` (which must equal the target program's existing slot) and `subNumber`/`subNumberSort`
+  (= the program's existing `max(subNumber) + 1`). The new rule joins that program's slot. This
+  is the `add_automation_rule` path.
+
+A **multi-rule program** is therefore built by *create* (`isFlag=1`, new slot) followed by one
+or more *appends* (`isFlag=0`, reusing that slot) — e.g. the seedling two-window case is one
+create + one append, and a four-rule program is one create + three appends. Verified by iOS-app
+traffic capture (Proxyman: the app's append sends `addGroups … isFlag=0 & groupNums=1 &
+sortType=6 & subNumber=2 & subNumberSort=2`) and confirmed live. This mechanism was only
+discoverable by capturing the app's own traffic — probe-and-infer plateaued on the wrong
+(`subNumber`) axis until the capture made the `isFlag` lever decisive.
+
+**A name can map to more than one slot.** Programs are keyed by slot, not by `advName`, so two
+distinct programs may share a name. `add_automation_rule` resolves the target slot from the
+program's existing entries; if a name maps to **multiple** `(groupNums, sortType)` slots it
+cannot disambiguate and returns an error asking the user to rename the programs to be unique
+before adding the rule.
 
 **"Adv exist!" also fires on genuine overlap:** a program rejects a second rule that governs the
 **same port with an overlapping time window** (e.g. a full-day rule overlapping an existing
@@ -1528,7 +1547,7 @@ All use HTTPS (TLSv1.3 — see Quirk 8).
 | Endpoint | Method | Request body | Response notes |
 |---|---|---|---|
 | `/api/version=2.0/dev/getGroups` | POST | `devId=<devId>` | Returns list of automation group objects; each has `advId`, `advName`, `isOn`, `onSpeed`, `offSpeed`, etc. |
-| `/api/version=2.0/dev/addGroups` | POST | Full form (~50 fields): `advName`, `devId`, `grouptDevType`, `currentMode`, `isOn`, `onSpeed`, `offSpeed`, `beginTime`, `endTime`, `groupNums`, `sortType`, `subNumber`, `returnData=1`, + others | Returns created automation object with server-assigned `advId` |
+| `/api/version=2.0/dev/addGroups` | POST | Full form (~50 fields): `advName`, `devId`, `grouptDevType`, `currentMode`, `isOn`, `onSpeed`, `offSpeed`, `beginTime`, `endTime`, `groupNums`, `sortType`, `subNumber`, `isFlag`, `returnData=1`, + others | Creates a new program (`isFlag=1`) or appends a rule to an existing one (`isFlag=0` + the program's slot + `subNumber=max+1`); returns the automation object with server-assigned `advId`. See Quirk 32 |
 | `/api/version=2.0/dev/updateGroupsById` | POST | Full rule body (read-before-write) + `advId` + `devId` | Edits a rule in place by `advId`; preserves structural defaults from the live rule (Quirk 13 + Quirk 32) |
 | `/api/version=2.0/dev/updateGroupsIsOn` | POST | `advId=<id>&isDel=0&isflag=1` | Toggles `isOn` state server-side; no explicit `isOn` field in body |
 | `/api/version=2.0/dev/delByid` | POST | `advId=<id>&isDel=1&isflag=1` | Deletes automation by `advId` |
@@ -2864,7 +2883,7 @@ The optional `mode` parameter sets the behavior of the automation's **first rule
 | `cycle_on_minutes` / `cycle_off_minutes` | `int \| None` | Minutes on / off (for `mode="cycle"`) |
 | `dry_run` | `bool` | Default `True` — previews without sending. Set to `False` to create the automation on the device. |
 
-The `begin_time <= end_time` guard on this tool is unchanged (wrap-around windows are not permitted on create); use `add_automation_rule` for the two-window pattern.
+**Wrap-around windows are permitted on create.** `begin_time > end_time` (e.g. a lights-on window 09:00→03:00) is allowed, consistent with `add_automation_rule` and the controller itself. (Earlier revisions rejected wrap-around on create with a `begin_time <= end_time` guard; that guard has been removed.) Use `add_automation_rule` to add the complementary second window for the two-window pattern.
 
 **Response (dry_run=True):**
 ```json
@@ -2929,7 +2948,7 @@ The `begin_time <= end_time` guard on this tool is unchanged (wrap-around window
 - `note` — present in dry_run response only; prompts user to confirm before creating
 - `switchTime` — always sent as `127` (binary `01111111`, all 7 days bitmask); value `255` causes the app to ignore the schedule and treat it as Continuous mode (see Quirk 18)
 
-**Validation:** `on_speed` 1–10; `off_speed` 0–10; `begin_time` and `end_time` each 0–1439 or both 255; `begin_time` ≤ `end_time` unless both are 255; `name` must not be empty or all control characters.
+**Validation:** `on_speed` 1–10; `off_speed` 0–10; `begin_time` and `end_time` each 0–1439 or both 255 (both must be 255 or neither); wrap-around windows (`begin_time > end_time`) are allowed; `name` must not be empty or all control characters.
 
 ---
 
@@ -3080,7 +3099,7 @@ The surface is **compositional**, mirroring the AC Infinity app's rule editor: a
 **Field notes:**
 - `control` wording is identical on dry-run, live, and read-back via `get_advance_automation` (round-trip parity)
 - `_mode` is internal/round-trip only — not surfaced to the grower
-- The new rule is appended with `subNumber = max(existing subNumbers) + 1` to avoid the `"Adv exist!"` collision (Quirk 32)
+- The new rule is appended into the program's existing slot via `addGroups` with `isFlag=0`, reusing the program's `groupNums`/`sortType` and `subNumber = max(existing subNumbers) + 1` (Quirk 32). If the program name maps to more than one slot, the tool returns a disambiguation error asking the user to rename the programs to be unique
 - Validation (before any write): temp 32–212 °F; humidity 0–100 %; VPD 0.0–9.9 kPa; `min_level`/`max_level` 0–10 with `min ≤ max`; `cycle_*_minutes` 0–1439; `low < high` when both thresholds given; buffer XOR transition per sensor; target XOR trigger per sensor; any param irrelevant to the chosen `mode` is rejected
 
 ---
