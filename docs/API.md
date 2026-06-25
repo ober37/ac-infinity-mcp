@@ -1435,42 +1435,74 @@ via live probing on device 8T4TC (devType=18, legacy) on 2026-06-24 (Issue #284)
 
 **`currentMode` map (the rule's behavior type):**
 
-| `currentMode` | Mode | Notes |
+| `currentMode` | Mode (tool `mode`) | Notes |
 |---|---|---|
-| `1` | **On** — fixed speed | No control fields beyond name/ports/schedule/speed (optional `onTime` ramp) |
-| `2` | **Off** | **NOT used** — no `currentMode=2` rule observed on any of the device's 38 rules. "Off" is expressed by not adding a rule, or by disabling the rule/program |
-| `3` | **Cycle** | `cycleOn` / `cycleOff` (minutes) |
-| `4` | **Auto** — temperature/humidity trigger, or humidity setpoint | Sub-mode resolved by which field family is set (see below) |
-| `6` | **VPD target** | `settingMode=1`, `targetVpd=N` (÷10 kPa), `highVpd=N`, `highVpdSwitch=1` |
+| `1` | **On** (`on`) — fixed speed | No control fields beyond name/ports/schedule/speed (optional `onTime` ramp) |
+| `2` | **Off** (`off`) | Port forced off during the window. All trigger/target fields are don't-care (app leaves base defaults). Captured live (program "0624", Rule 4) — this is a real, supported rule type, not the "no rule" pseudo-state described in earlier revisions |
+| `3` | **Cycle** (`cycle`) | `cycleOn` / `cycleOff` (minutes) |
+| `4` | **Auto** (`auto`) — temperature/humidity, target or trigger | Sub-mode resolved by `settingMode`/`setSelect` (see below) |
+| `6` | **VPD** (`vpd`) — target or trigger | `settingMode=1` + `targetVpd` (target), or `settingMode=0` + `highVpd`/`lowVpd` (trigger) |
 
-**Per-mode field signature** (the exact fields the AC Infinity app emits for each mode — the
-encoder mirrors these rather than exposing every raw field):
+**Compositional surface — how the tools map to the encoding.** The rule-write tools expose a
+*compositional* surface (`mode` + `control_style` + sensor params) rather than the discrete
+named modes earlier revisions used. The mapping, ground-truthed byte-for-byte from app-created
+rules (capture program "0624", device 8T4TC, 2026-06-24):
 
-| Mode | `currentMode` | Fields set |
-|---|---|---|
-| On | `1` | base defaults only |
-| Cycle | `3` | `cycleOn`, `cycleOff` (minutes) |
-| Temperature trigger | `4` | `setSelect=1`; `autoLowTempF` / `autoHighTempF` (+ derived °C) and the matching `autoLow/HighTempSwitch` per direction; the unused temp switch → `0` |
-| Humidity setpoint | `4` | `settingMode=1`, `targetHumi=N` (raw % RH); humidity-trigger switches → `0` |
-| Humidity trigger | `4` | `autoLowHumi` / `autoHighHumi` + matching `autoLow/HighHumiSwitch` per direction; unused humidity switch → `0`; `settingMode=0` |
-| VPD | `6` | `settingMode=1`, `targetVpd=round(kPa×10)`, `highVpd=round(kPa×10)`, `highVpdSwitch=1`, `lowVpd=0`, `lowVpdSwitch=0` |
+- **Speed range:** `max_level` → `onSpeed`; `min_level` → `offSpeed`. (`minLevel`/`fanLevel` unused = 0.)
+- **`control_style`:** `target` → `settingMode=1, setSelect=0`; `trigger` → `settingMode=0, setSelect=1` (Auto trigger) / `setSelect=0` (VPD trigger). Target/trigger are mutually exclusive per sensor.
+- **Auto target:** `humidity_target` → `targetHumi`, `targetHumiSwitch=1`; `temp_target_f` → `targetTempF` (**device-gated** — a humidifier exposes humidity target only; no general temp target). Off-target rails are parked at their sentinel values with switches=1.
+- **Auto trigger:** `temp_high_f`/`temp_low_f` → `autoHighTempF`/`autoLowTempF` with the matching `auto*TempSwitch=1`; `humidity_high`/`humidity_low` → `autoHighHumi`/`autoLowHumi` with `auto*HumiSwitch=1`. The unused direction's switch → `0`. The server stores switches **as sent** — single-direction triggers are reliable at the rule level.
+- **VPD:** `vpd_target` → `targetVpd=round(kPa×10)`, `targetVpdSwitch=1`, `settingMode=1`; `vpd_high`/`vpd_low` → `highVpd`/`lowVpd` = `round(kPa×10)` with matching switch, `settingMode=0`. VPD **target has no direction** (single kPa value). `targetVpd` is **÷10** — `targetVpd=9` → 0.9 kPa (same scaling as the alarm `highVpd` field and the legacy `addDevMode` quirk).
+- **Buffer vs transition (per sensor, mutually exclusive):** `*_buffer` → `temperatureFBuff` / `humidityBuff` / `vpdBuff`; `*_transition` → `temperatureFTrans` / `humidityTrans` / `vpdTrans`. Distinguished purely by which family is non-zero. VPD buffer/transition are stored ÷10 like the VPD value.
+- **°C drift (do NOT derive):** the app stores the display-unit value (°F) and **parks the other unit at its rail** (e.g. `autoHighTempF=85` pairs with `autoHighTempC=90`, *not* 29 °C). The encoder mirrors the rails verbatim — `_RAIL_TEMP_HIGH_C=90` / `_RAIL_TEMP_LOW_C=0` — rather than converting.
 
-**Trigger direction** is encoded by which `*Switch` flag is set: `on_below` → low switch only,
-`on_above` → high switch only, `both` → both. The server stores switches **as sent** — it does
-not force both directions on, so single-direction triggers are reliable at the rule level.
+**Schedule — `switchTime` bitmask (`days` / `continuous`):** bits 0–6 = days (bit0=Mon …
+bit6=Sun), bit 7 (128) = continuous flag. Confirmed values:
 
-**`targetVpd` is ÷10** — `targetVpd=9` → 0.9 kPa (same scaling as the alarm `highVpd` field and
-the legacy `addDevMode` quirk).
+| `days` / `continuous` | `switchTime` |
+|---|---|
+| `continuous=True` (24/7) | `255` (= `127 | 128`) |
+| all 7 days / `"all"` / default | `127` |
+| `"weekdays"` (Mon–Fri) | `31` |
+| `"weekends"` (Sat+Sun) | `96` |
+| single day, e.g. Monday | `1` (`1 << 0`) |
 
-**In-place rule edit — `updateGroupsById` (NEW, discovered Issue #284):** `addGroups` is
-create-only — passing an existing `advId` to it **duplicates** the rule (server assigns a fresh
-`advId` and ignores the passed one). To edit a rule in place, POST the full rule body plus
-`advId` + `devId` to `/api/version=2.0/dev/updateGroupsById` → code 200 `'success.'`, same
-`advId`, fields updated. The edit body is built **read-before-write** (Quirk 13): start from the
-live rule's full `getGroups` body so structural defaults (`switchTime`, `dualZoneSwitch`,
-`groupNums`, `sortType`, …) are preserved, then overlay only the changed fields. A **mode change**
-rebuilds the new mode's full per-mode signature above and **zeroes all off-mode switch/value
-fields**, so a stale trigger from the previous mode cannot remain active on the device.
+`onTimeSwitch` is **not** the continuous flag — `switchTime` bit 7 is (Quirk 21 covers the
+read-side `onTimeSwitch` interpretation). The earlier `switchTime=255 → Continuous` note
+(Quirk 18) is the same fact: `255` = all-days bits *plus* the continuous bit.
+
+**Add a rule — `addGroups` + `subNumber` sequencing:** `addGroups` is **create-only** —
+passing an existing `advId` to it **duplicates** the rule (server assigns a fresh `advId` and
+ignores the passed one). Within a program each rule carries a distinct `subNumber` = its 0-based
+index in the program. Appending a rule with a **colliding `subNumber`** (the old hardcoded `0`)
+is rejected with `code 500 "Adv exist!"`. The fix: when appending to a populated program, set
+`subNumber = max(existing subNumbers) + 1`; a brand-new program's first rule stays `subNumber=0`;
+an in-place update preserves the rule's existing `subNumber`. This was caught only at Gate 5
+(live) — unit tests passed without it.
+
+**"Adv exist!" also fires on genuine overlap:** a program rejects a second rule that governs the
+**same port with an overlapping time window** (e.g. a full-day rule overlapping an existing
+partial window) — same `code 500 "Adv exist!"`. The complementary **two-window pattern**
+(non-overlapping, e.g. 09:00→03:00 + 03:00→09:00) is fine. `add_automation_rule` maps this to a
+grower-readable overlap message; the upstream string is never echoed. This is the practical
+model: **one rule per port + window**.
+
+**In-place rule edit — `updateGroupsById` (NEW, discovered Issue #284):** To edit a rule in
+place, POST the full rule body plus `advId` + `devId` to
+`/api/version=2.0/dev/updateGroupsById` → code 200 `'success.'`, same `advId`, fields updated.
+The edit body is built **read-before-write** (Quirk 13): start from a `deepcopy` of the live
+rule's full `getGroups` body so structural defaults (`switchTime`, `dualZoneSwitch`,
+`groupNums`, `sortType`, `subNumber`, …) are preserved, then overlay only the changed fields. A
+**mode change** rebuilds the new mode's full per-mode signature above and **zeroes all off-mode
+switch/value fields**, so a stale trigger from the previous mode cannot remain active on the
+device.
+
+**Delete — `delByid`, and the delete-wedge:** a rule is removed with
+`/api/version=2.0/dev/delByid` (`advId=<id>&isDel=1&isflag=1`), leaving the rest of the program
+intact. A rapid sequence of writes can throttle the controller into rejecting deletes with
+`error 100001` ("busy"); the rejected rule remains **wedged** until the controller is restarted
+(power-cycle clears it). `delete_automation_rule` / `add_automation_rule` map `error 100001` to a
+grower-readable "controller is busy — wait and retry, or restart it" message.
 
 > **Behavior-verification caveat (Gate-5 pending):** The `currentMode` map, the per-mode field
 > signatures, the `currentMode=4` setpoint-vs-trigger authority (the `settingMode` vs `setSelect`
@@ -2711,7 +2743,7 @@ Get full detail for a single Advance Automation.
   - `control` — grower-readable behavior string, e.g. `"runs at speed 5"`, `"cycle 30 min on / 30 min off"`, `"hold humidity at 65%"`, `"hold VPD at 0.9 kPa"`, `"run when temp rises above 82°F"`, `"run when humidity drops below 50%"`
   - `window` — `"HH:MM–HH:MM (timezone)"`; wrap-around windows (begin > end) display as-is for the two-window pattern
   - `running` — per-rule run state (`run_state`); different rules in one program may have different run states (e.g. complementary lights-on / lights-off windows)
-  - `_mode` — internal round-trip key (`on`/`cycle`/`temperature`/`humidity`/`vpd`); underscore-prefixed = not surfaced to the grower; Claude reads `control` + `window` (see Quirk 32)
+  - `_mode` — internal round-trip key (`off`/`on`/`cycle`/`auto`/`vpd`); underscore-prefixed = not surfaced to the grower; Claude reads `control` + `window` (see Quirk 32)
 - `human_summary` — natural-language description; adapts to mode and group configuration:
   - Continuous, single group: `"'Name' runs continuously at speed N, currently enabled."`
   - Scheduled with times, single group: `"'Name' runs at speed N from HH:MM to HH:MM, currently enabled."`
@@ -2805,28 +2837,30 @@ Disable a currently enabled Advance Automation. No-ops if already disabled.
 
 ---
 
-### `create_advance_automation(device_id, name, on_speed, port, off_speed=0, begin_time=0, end_time=1439, mode="on", target=None, target_kpa=None, low=None, high=None, low_f=None, high_f=None, direction=None, cycle_on_minutes=None, cycle_off_minutes=None, dry_run=True)`
+### `create_advance_automation(device_id, name, on_speed, port, off_speed=0, begin_time=0, end_time=1439, mode="on", control_style=None, temp_high_f=None, temp_low_f=None, humidity_high=None, humidity_low=None, temp_target_f=None, humidity_target=None, vpd_target=None, vpd_high=None, vpd_low=None, cycle_on_minutes=None, cycle_off_minutes=None, dry_run=True)`
 
 Create a new Advance Automation on a device. Defaults to `dry_run=True` for safety. Set `dry_run=False` to send the automation to the device. The port bitmask (`grouptDevType`) is computed automatically from the port number (Port N → 2^(N-1)).
 
-The optional `mode` parameter sets the behavior of the automation's **first rule**. The default `mode="on"` is the original fixed-speed behavior and leaves the create path unchanged. Other modes (`cycle`, `temperature`, `humidity`, `vpd`) take the same per-mode target params as `add_automation_rule` (see Quirk 32 for the encoding).
+The optional `mode` parameter sets the behavior of the automation's **first rule**. The default `mode="on"` reproduces the original single-port On-mode payload byte-for-byte (`on_speed` becomes `onSpeed`, `off_speed` becomes `offSpeed`/MIN level). Other modes (`off`, `cycle`, `auto`, `vpd`) take the **same compositional per-mode params as `add_automation_rule`** (see that tool and Quirk 32 for the encoding). `auto` and `vpd` require `control_style` (`target` or `trigger`).
 
 **Parameters:**
 | Parameter | Type | Description |
 |---|---|---|
 | `device_id` | `str` | Device code from `discover_devices` |
 | `name` | `str` | Automation name (max 64 chars; control chars stripped) |
-| `on_speed` | `int` | Fan speed when active (1–10) |
+| `on_speed` | `int` | Fan speed when active (1–10) — becomes the rule's MAX level (`onSpeed`) |
 | `port` | `int` | 1-based port number the automation should control (1–8) |
-| `off_speed` | `int` | Accepted for compatibility but not sent to the device — On mode relies on the port's own minimum speed setting. Default: 0 |
+| `off_speed` | `int` | Minimum fan level when inactive (0–10) — becomes the rule's MIN level (`offSpeed`). Default: 0 |
 | `begin_time` | `int` | Schedule start as minutes since midnight (0–1439, or 255 = always active). Default: 0 (midnight) |
 | `end_time` | `int` | Schedule end as minutes since midnight (0–1439, or 255 = always active). Default: 1439 (23:59) |
-| `mode` | `str` | First-rule behavior: `on` (default), `cycle`, `temperature`, `humidity`, `vpd`. Default `"on"` is unchanged. |
-| `target` | `int \| None` | Humidity setpoint % (for `mode="humidity"` hold) |
-| `target_kpa` | `float \| None` | VPD setpoint in kPa (for `mode="vpd"`, 0.0–9.9) |
-| `low` / `high` | `int \| None` | Humidity low/high trigger % (for a humidity trigger rule) |
-| `low_f` / `high_f` | `int \| None` | Low/high temperature trigger °F (for `mode="temperature"`) |
-| `direction` | `str \| None` | `on_below`, `on_above`, or `both` (for temperature / humidity triggers) |
+| `mode` | `str` | First-rule behavior: `on` (default), `off`, `cycle`, `auto`, `vpd`. Default `"on"` is the legacy byte-identical path. |
+| `control_style` | `str \| None` | `target` or `trigger` — **required** for `mode="auto"` and `mode="vpd"` |
+| `temp_high_f` / `temp_low_f` | `int \| None` | Turn on above / below this °F (auto **trigger**) |
+| `humidity_high` / `humidity_low` | `int \| None` | Turn on above / below this % RH (auto **trigger**) |
+| `temp_target_f` | `int \| None` | Hold this °F (auto **target**; device-gated — see Quirk 32) |
+| `humidity_target` | `int \| None` | Hold this % RH (auto **target**) |
+| `vpd_target` | `float \| None` | Hold this kPa (vpd **target**, 0.0–9.9) |
+| `vpd_high` / `vpd_low` | `float \| None` | Turn on above / below this kPa (vpd **trigger**) |
 | `cycle_on_minutes` / `cycle_off_minutes` | `int \| None` | Minutes on / off (for `mode="cycle"`) |
 | `dry_run` | `bool` | Default `True` — previews without sending. Set to `False` to create the automation on the device. |
 
@@ -2887,7 +2921,7 @@ The `begin_time <= end_time` guard on this tool is unchanged (wrap-around window
 - `port` — required; identifies the port the automation will govern
 - `port_name` — resolved from `devInfoListAll` for the given port number
 - `min_speed` — the port's configured minimum speed (read from `offSpead` in `getdevModeSettingList`); used by the device when the automation is inactive
-- `off_speed` — not sent to the device; On mode uses the port's own minimum speed setting (`min_speed`)
+- `off_speed` — now sent to the device as the rule's MIN level (`offSpeed`); default `0`. (Earlier revisions discarded this parameter; the compositional rebuild wires it through.)
 - `begin_time` / `end_time` — returned as `"HH:MM"` formatted strings in the response (input is still minutes-since-midnight integer); use 255 for "always active" (maps to full-day range 0/1439)
 - `schedule_summary` — human-readable schedule description (e.g. `"Active 10:00 PM – 6:00 AM"` or `"Always active"`)
 - `automation_id` — server-assigned `advId`; present in live response for programmatic chaining only — do not surface to the user; reference the automation by `name` instead
@@ -2988,9 +3022,11 @@ manual control. Ports in other automations are unaffected.
 
 ---
 
-### `add_automation_rule(device_id, program_name, ports, mode, speed=5, target=None, target_kpa=None, low=None, high=None, low_f=None, high_f=None, direction=None, cycle_on_minutes=None, cycle_off_minutes=None, begin_time=0, end_time=1439, dry_run=True)`
+### `add_automation_rule(device_id, program_name, ports, mode, control_style=None, min_level=0, max_level=10, temp_high_f=None, temp_low_f=None, humidity_high=None, humidity_low=None, temp_target_f=None, humidity_target=None, vpd_target=None, vpd_high=None, vpd_low=None, temp_buffer=None, temp_transition=None, humidity_buffer=None, humidity_transition=None, vpd_buffer=None, vpd_transition=None, cycle_on_minutes=None, cycle_off_minutes=None, begin_time=0, end_time=1439, days=None, continuous=False, dry_run=True)`
 
-Append one rule to an existing Advance Automation program (matched by `program_name`). A rule is one schedule window + behavior for one or more ports. Defaults to `dry_run=True`. See Quirk 32 for the per-mode encoding.
+Append one rule to an existing Advance Automation program (matched by `program_name`). A **rule** is one schedule window + behavior for one or more ports inside that program. Defaults to `dry_run=True`. See Quirk 32 for the per-mode encoding.
+
+The surface is **compositional**, mirroring the AC Infinity app's rule editor: a `mode` chooses the behavior, and `auto`/`vpd` add a `control_style` (`target` vs `trigger`) plus the sensor params that style needs. The tool infers `control_style` from phrasing: "hold/keep/maintain at X" → `target`; "above/below/when it rises|drops/turn on at" → `trigger`.
 
 **Parameters:**
 | Parameter | Type | Description |
@@ -2998,16 +3034,25 @@ Append one rule to an existing Advance Automation program (matched by `program_n
 | `device_id` | `str` | Device code from `discover_devices` |
 | `program_name` | `str` | Name of the existing program to add the rule to |
 | `ports` | `list[int]` | One or more 1-based port numbers this rule controls (bitmask computed internally) |
-| `mode` | `str` | `on`, `cycle`, `temperature`, `humidity`, or `vpd` |
-| `speed` | `int` | Fan speed when the rule is active (1–10). Default 5 |
-| `target` | `int \| None` | Humidity setpoint % (for `mode="humidity"` hold) |
-| `target_kpa` | `float \| None` | VPD setpoint in kPa (for `mode="vpd"`, 0.0–9.9) |
-| `low` / `high` | `int \| None` | Humidity low/high trigger % |
-| `low_f` / `high_f` | `int \| None` | Low/high temperature trigger °F |
-| `direction` | `str \| None` | `on_below`, `on_above`, or `both` (required for temperature / humidity triggers; rejected for `on`/`cycle`/`vpd`/humidity-setpoint) |
-| `cycle_on_minutes` / `cycle_off_minutes` | `int \| None` | Minutes on / off (for `mode="cycle"`) |
+| `mode` | `str` | `off`, `on`, `cycle`, `auto`, or `vpd` |
+| `control_style` | `str \| None` | `target` or `trigger` — **required** for `auto` and `vpd` |
+| `min_level` / `max_level` | `int` | Minimum (inactive) / maximum (active) fan level 0–10. Defaults 0 / 10. `MIN→offSpeed`, `MAX→onSpeed` |
+| `temp_high_f` / `temp_low_f` | `int \| None` | Turn on above / below this °F (auto **trigger**), 32–212 |
+| `humidity_high` / `humidity_low` | `int \| None` | Turn on above / below this % RH (auto **trigger**), 0–100 |
+| `temp_target_f` | `int \| None` | Hold this °F (auto **target**; device-gated) |
+| `humidity_target` | `int \| None` | Hold this % RH (auto **target**) |
+| `vpd_target` | `float \| None` | Hold this kPa (vpd **target**, 0.0–9.9) |
+| `vpd_high` / `vpd_low` | `float \| None` | Turn on above / below this kPa (vpd **trigger**) |
+| `temp_buffer` / `temp_transition` | `int \| None` | Temperature deadband / ramp band °F (auto). **Mutually exclusive per sensor** |
+| `humidity_buffer` / `humidity_transition` | `int \| None` | Humidity deadband / ramp band % (auto). Mutually exclusive |
+| `vpd_buffer` / `vpd_transition` | `float \| None` | VPD deadband / ramp band kPa (vpd). Mutually exclusive |
+| `cycle_on_minutes` / `cycle_off_minutes` | `int \| None` | Minutes on / off (for `mode="cycle"`, 0–1439) |
 | `begin_time` / `end_time` | `int` | Window start / end, minutes since midnight (0–1439). **Wrap-around (begin > end) is permitted** — a lights-on window like 09:00→03:00 is allowed. Defaults 0 / 1439 |
+| `days` | `list[str] \| str \| None` | Day names (`mon`–`sun`), or `"all"` / `"weekdays"` / `"weekends"`. Default: all 7 days |
+| `continuous` | `bool` | Run 24/7, ignoring the window (sets `switchTime=255`). Default `False` |
 | `dry_run` | `bool` | Default `True` — previews the rule without sending |
+
+**Buffer vs transition:** a *buffer* is a deadband (the fan holds until the reading crosses the band); a *transition* ramps fan speed across the band. Pick at most one per sensor.
 
 **Response (dry_run=True):**
 ```json
@@ -3017,9 +3062,8 @@ Append one rule to an existing Advance Automation program (matched by `program_n
   "rule": {
     "ports": "Humidifier (Port 1)",
     "control": "hold humidity at 65%",
-    "speed": 2,
     "window": "03:00–09:00 (America/Chicago)",
-    "_mode": "humidity"
+    "_mode": "auto"
   },
   "dry_run": true,
   "sent": false,
@@ -3031,16 +3075,23 @@ Append one rule to an existing Advance Automation program (matched by `program_n
 
 **Response (program not found):** `{"error": "No program named '...' on device ...", "existing_programs": [...], "suggested_reply": "..."}`.
 
+**Response (overlap / busy controller):** A second rule on the same port + overlapping window is rejected by the controller (`"Adv exist!"` upstream — Quirk 32) and surfaces as `{"error": "A rule already covers those ports during that window — pick a different time or update the existing rule."}`. A throttled/busy controller (`error 100001`) surfaces as `{"error": "The controller didn't accept that — it may be busy; wait and retry, or restart the controller."}`. The upstream text is never echoed to the client.
+
 **Field notes:**
 - `control` wording is identical on dry-run, live, and read-back via `get_advance_automation` (round-trip parity)
 - `_mode` is internal/round-trip only — not surfaced to the grower
-- Validation (before any write): RH `target`/`low`/`high` 0–100; `target_kpa` 0.0–9.9; `low_f`/`high_f` 32–212°F; `speed` 1–10; `cycle_on/off_minutes` 0–1439; `low < high` when both given; a param irrelevant to the chosen `mode` is rejected
+- The new rule is appended with `subNumber = max(existing subNumbers) + 1` to avoid the `"Adv exist!"` collision (Quirk 32)
+- Validation (before any write): temp 32–212 °F; humidity 0–100 %; VPD 0.0–9.9 kPa; `min_level`/`max_level` 0–10 with `min ≤ max`; `cycle_*_minutes` 0–1439; `low < high` when both thresholds given; buffer XOR transition per sensor; target XOR trigger per sensor; any param irrelevant to the chosen `mode` is rejected
 
 ---
 
-### `update_automation_rule(device_id, program_name, ports, begin_time=None, end_time=None, mode=None, speed=None, target=None, target_kpa=None, low=None, high=None, low_f=None, high_f=None, direction=None, cycle_on_minutes=None, cycle_off_minutes=None, new_begin_time=None, new_end_time=None, dry_run=True)`
+### `update_automation_rule(device_id, program_name, ports, begin_time=None, end_time=None, mode=None, control_style=None, min_level=None, max_level=None, temp_high_f=None, temp_low_f=None, humidity_high=None, humidity_low=None, temp_target_f=None, humidity_target=None, vpd_target=None, vpd_high=None, vpd_low=None, temp_buffer=None, temp_transition=None, humidity_buffer=None, humidity_transition=None, vpd_buffer=None, vpd_transition=None, cycle_on_minutes=None, cycle_off_minutes=None, new_begin_time=None, new_end_time=None, days=None, continuous=None, dry_run=True)`
 
 Edit one existing rule in place (via the `updateGroupsById` endpoint — Quirk 32). The rule is found by `program_name` + `ports`, optionally disambiguated by the **current** window (`begin_time`/`end_time`). Only the fields you supply change; everything else is preserved read-before-write from the live rule. Defaults to `dry_run=True`.
+
+Two edit shapes:
+- **Same-mode tweak** (omit `mode`): only the supplied sensor/cycle/level/window fields are overlaid onto the live rule body — no signature rebuild.
+- **Mode change** (set `mode`): the full new-mode signature is rebuilt and **all off-mode switch/value fields are zeroed**, so a stale trigger from the previous mode cannot remain active. Set `control_style` when changing to `auto`/`vpd`.
 
 **Parameters:**
 | Parameter | Type | Description |
@@ -3049,11 +3100,18 @@ Edit one existing rule in place (via the `updateGroupsById` endpoint — Quirk 3
 | `program_name` | `str` | The program the rule belongs to |
 | `ports` | `list[int]` | The port number(s) the target rule controls (used to find the rule) |
 | `begin_time` / `end_time` | `int \| None` | **Selector** — the rule's *current* window, to disambiguate when the program has more than one rule on these ports |
-| `mode` | `str \| None` | New behavior type. Omit to keep. A mode change rebuilds the full per-mode signature and zeroes off-mode switches (Quirk 32) |
-| `speed` | `int \| None` | New active fan speed (1–10) |
-| `target` / `target_kpa` / `low` / `high` / `low_f` / `high_f` / `direction` | — | New target params (same semantics as `add_automation_rule`) |
+| `mode` | `str \| None` | New behavior type (`off`/`on`/`cycle`/`auto`/`vpd`). Omit to keep. A mode change rebuilds the full per-mode signature and zeroes off-mode switches (Quirk 32) |
+| `control_style` | `str \| None` | `target` or `trigger` (when changing mode to `auto`/`vpd`) |
+| `min_level` / `max_level` | `int \| None` | New minimum (inactive) / maximum (active) fan level 0–10 |
+| `temp_high_f` / `temp_low_f` / `humidity_high` / `humidity_low` | `int \| None` | New auto **trigger** thresholds (°F / % RH) |
+| `temp_target_f` / `humidity_target` | `int \| None` | New auto **target** setpoints |
+| `vpd_target` / `vpd_high` / `vpd_low` | `float \| None` | New VPD target / thresholds (kPa) |
+| `temp_buffer` / `temp_transition` / `humidity_buffer` / `humidity_transition` | `int \| None` | New buffer / transition bands (auto; buffer XOR transition per sensor) |
+| `vpd_buffer` / `vpd_transition` | `float \| None` | New VPD buffer / transition band kPa (vpd; XOR) |
 | `cycle_on_minutes` / `cycle_off_minutes` | `int \| None` | New cycle on/off minutes |
 | `new_begin_time` / `new_end_time` | `int \| None` | **New** window (minutes since midnight, 0–1439) to move the rule to |
+| `days` | `list[str] \| str \| None` | New day spec (day names, `"all"`, `"weekdays"`, `"weekends"`) |
+| `continuous` | `bool \| None` | Run 24/7 (ignores the window) |
 | `dry_run` | `bool` | Default `True` — previews the change without sending |
 
 **Response (more than one rule matches):**
