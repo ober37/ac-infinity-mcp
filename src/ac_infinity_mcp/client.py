@@ -103,67 +103,107 @@ _SCHEDULE_ALWAYS_ACTIVE: int = 255
 _SESSION_EXPIRED_API_CODES: frozenset[int] = frozenset({10003})
 
 
-def _f_to_c(temp_f: int) -> int:
-    """Convert °F to the °C integer the AC Infinity app pairs with each °F value.
+# ============ Rail sentinels (Issue #284) ============
+# A trigger/target parked at its rail means "inactive" — the app stores the rail value
+# (not the derived/real value) for the unit/family that is not in use. The encoder writes
+# these rails explicitly; the decoder treats a value AT its rail as "not a clause".
+_RAIL_TEMP_HIGH_F = 194
+_RAIL_TEMP_HIGH_C = 90  # the °C the app pairs with the 194°F high rail (a fixed rail, NOT derived)
+_RAIL_TEMP_LOW_F = 32
+_RAIL_TEMP_LOW_C = 0
+_RAIL_HUMI_HIGH = 100
+_RAIL_HUMI_LOW = 0
+_RAIL_VPD_HIGH = 99
+_RAIL_VPD_LOW = 0
 
-    The app rounds to the nearest integer °C; e.g. 110°F → 43, 40°F → 4. Used to
-    derive the autoLow/HighTempC values that mirror the supplied °F triggers so the
-    stored rule matches the shape the app produces.
-    """
-    return round((temp_f - 32) * 5 / 9)
+# currentMode values (single mode pick, matches the app's Modes screen).
+_MODE_ON = 1
+_MODE_OFF = 2
+_MODE_CYCLE = 3
+_MODE_AUTO = 4
+_MODE_VPD = 6
 
 
 def build_groups_payload(
     dev_id: str,
     ports: list[int],
     clean_name: str,
-    on_speed: int,
     begin_time: int,
     end_time: int,
     *,
     mode: str = "on",
-    targets: dict[str, Any] | None = None,
+    control_style: str | None = None,
+    on_speed: int | None = None,
+    min_level: int = 0,
+    max_level: int = 10,
+    temp_high_f: int | None = None,
+    temp_low_f: int | None = None,
+    humidity_high: int | None = None,
+    humidity_low: int | None = None,
+    temp_target_f: int | None = None,
+    humidity_target: int | None = None,
+    vpd_target: float | None = None,
+    vpd_high: float | None = None,
+    vpd_low: float | None = None,
+    temp_buffer: int | None = None,
+    temp_transition: int | None = None,
+    humidity_buffer: int | None = None,
+    humidity_transition: int | None = None,
+    vpd_buffer: float | None = None,
+    vpd_transition: float | None = None,
+    cycle_on_minutes: int | None = None,
+    cycle_off_minutes: int | None = None,
+    switch_time: int = 127,
+    sub_number: int = 0,
     adv_id: int | None = None,
 ) -> dict[str, Any]:
-    """Build the addGroups / updateGroupsById payload for one automation rule.
+    """Build the addGroups / updateGroupsById payload for one Advance Automation rule.
 
-    ``ports`` is a list of 1-based port numbers governed by this single rule; the
-    grouptDevType bitmask is computed as ``sum(2**(p-1) for p in ports)``. ``mode``
-    selects the rule type and ``targets`` supplies the per-mode parameters:
+    Compositional surface (Issue #284, byte-grounded in the user's real rules + capture
+    program "0624"). ``ports`` is a list of 1-based port numbers governed by this single
+    rule; the grouptDevType bitmask is ``sum(2**(p-1) for p in ports)``.
 
-    - ``on``: no extra targets (fixed speed; currentMode=1).
-    - ``cycle``: ``cycle_on_minutes``, ``cycle_off_minutes`` (currentMode=3).
-    - ``temperature``: ``low_f`` / ``high_f`` + ``direction`` (currentMode=4 trigger).
-    - ``humidity`` setpoint: ``target`` (currentMode=4, settingMode=1).
-    - ``humidity`` trigger: ``low`` / ``high`` + ``direction`` (currentMode=4).
-    - ``vpd``: ``target_kpa`` (currentMode=6, settingMode=1).
+    ``mode`` is the single mode pick: ``off`` (currentMode=2), ``on`` (1), ``cycle`` (3),
+    ``auto`` (4), ``vpd`` (6). Auto and VPD additionally take a ``control_style``:
+    ``target`` (settingMode=1) or ``trigger`` (settingMode=0).
 
-    ``direction`` ∈ {``on_below``, ``on_above``, ``both``} selects which *Switch flag(s)
-    are set to 1. ``adv_id`` is included only when not None (the update path).
+    Speed range: ``max_level`` → ``onSpeed``, ``min_level`` → ``offSpeed``. (``on_speed``
+    is a legacy alias for the On-mode max; when given and ``max_level`` is its default it
+    sets onSpeed directly to preserve the original create byte-identity.)
 
-    Each mode branch starts from the same base dict (the verified On-mode signature) and
-    applies only the documented per-mode overrides, so the create path output is unchanged.
+    Sensor targets/triggers are explicitly assigned per field; inactive families are parked
+    at their rail (°C parked at rail, NOT derived). Buffer → ``*Buff``, transition →
+    ``*Trans`` (the two are mutually exclusive per sensor — validated upstream). ``switch_time``
+    bits 0–6 = days (bit0=Mon … bit6=Sun), bit 7 = continuous.
+
+    NO ``{**base, **caller}`` spread — every field is assigned explicitly so an unknown
+    caller param can never reach the payload. ``adv_id`` is included only on the update path.
     """
-    targets = targets or {}
     grp_dev_type = sum(2 ** (p - 1) for p in ports)
+
+    # Resolve the On/Cycle speed: legacy On-mode create passes on_speed; the rule family
+    # passes max_level/min_level. on_speed (when set) takes precedence for the On byte path.
+    resolved_on_speed = on_speed if on_speed is not None else max_level
+    resolved_off_speed = min_level
+
     payload: dict[str, Any] = {
         # devId NOT included here — the inner method injects it.
         # advCode NOT included — absent from addGroups live capture (unlike addAlarms).
         # isFlag (capital F) confirmed for addGroups;
         # isflag (lowercase) for updateGroupsIsOn/delByid.
         "advName": clean_name,
-        "currentMode": 1,
+        "currentMode": _MODE_ON,
         "isOn": 1,
-        "onSpeed": on_speed,
+        "onSpeed": resolved_on_speed,
         # On mode has no user-settable min; port's own min setting is used.
-        "offSpeed": 0,
+        "offSpeed": resolved_off_speed,
         # Map "always active" sentinel to a valid full-day range.
         "beginTime": 0 if begin_time == _SCHEDULE_ALWAYS_ACTIVE else begin_time,
         "endTime": 1439 if end_time == _SCHEDULE_ALWAYS_ACTIVE else end_time,
         "groupNums": 9,
         "sortType": 9,
-        "subNumber": 0,
-        "subNumberSort": 0,
+        "subNumber": sub_number,
+        "subNumberSort": sub_number,
         "isDel": 0,
         "isFlag": 1,
         "returnData": 1,
@@ -191,9 +231,9 @@ def build_groups_payload(
         "cycleOff": 0,
         "onTime": 0,
         "onTimeSwitch": 0,
-        # 127 = binary 01111111 = all 7 days bitmask. 255 has bit 7 set which
-        # causes the app to ignore the schedule and treat it as Continuous.
-        "switchTime": 127,
+        # bits 0-6 = days (bit0=Mon), bit 7 = continuous. 127 = all 7 days scheduled;
+        # 255 (= 127 | 128) sets bit 7 → app treats the rule as Continuous 24/7.
+        "switchTime": switch_time,
         "dualZoneSwitch": 1,
         "photocellSwitch": 0,
         "isOpenDoseTime": 0,
@@ -229,62 +269,190 @@ def build_groups_payload(
         "remarkLangKey": "",
     }
 
-    direction = targets.get("direction")
-
-    if mode == "cycle":
-        payload["currentMode"] = 3
-        payload["cycleOn"] = int(targets["cycle_on_minutes"])
-        payload["cycleOff"] = int(targets["cycle_off_minutes"])
-    elif mode == "temperature":
-        payload["currentMode"] = 4
-        payload["setSelect"] = 1
-        low_f = int(targets["low_f"]) if targets.get("low_f") is not None else 32
-        high_f = int(targets["high_f"]) if targets.get("high_f") is not None else 194
-        payload["autoLowTempF"] = low_f
-        payload["autoHighTempF"] = high_f
-        payload["autoLowTempC"] = _f_to_c(low_f)
-        payload["autoHighTempC"] = _f_to_c(high_f)
-        payload["autoLowTempSwitch"] = 1 if direction in ("on_below", "both") else 0
-        payload["autoHighTempSwitch"] = 1 if direction in ("on_above", "both") else 0
-        # Humidity trigger switches off for a temperature rule.
-        payload["autoLowHumiSwitch"] = 0
-        payload["autoHighHumiSwitch"] = 0
-    elif mode == "humidity":
-        payload["currentMode"] = 4
-        # Zero the temperature trigger switches so no stale temp trigger from the
-        # On-mode base dict reads as active on a humidity rule.
-        payload["autoLowTempSwitch"] = 0
-        payload["autoHighTempSwitch"] = 0
-        if "target" in targets and targets.get("target") is not None:
-            # Setpoint sub-mode.
-            payload["settingMode"] = 1
-            payload["targetHumi"] = int(targets["target"])
-            payload["autoLowHumiSwitch"] = 0
-            payload["autoHighHumiSwitch"] = 0
-        else:
-            # Trigger sub-mode.
-            payload["settingMode"] = 0
-            low = int(targets["low"]) if targets.get("low") is not None else 0
-            high = int(targets["high"]) if targets.get("high") is not None else 100
-            payload["autoLowHumi"] = low
-            payload["autoHighHumi"] = high
-            payload["autoLowHumiSwitch"] = 1 if direction in ("on_below", "both") else 0
-            payload["autoHighHumiSwitch"] = 1 if direction in ("on_above", "both") else 0
+    if mode == "on":
+        # Base dict is the verified On-mode signature — leave as-is.
+        pass
+    elif mode == "off":
+        payload["currentMode"] = _MODE_OFF
+    elif mode == "cycle":
+        payload["currentMode"] = _MODE_CYCLE
+        payload["cycleOn"] = int(cycle_on_minutes or 0)
+        payload["cycleOff"] = int(cycle_off_minutes or 0)
+    elif mode == "auto":
+        _apply_auto(
+            payload,
+            control_style=control_style,
+            temp_high_f=temp_high_f, temp_low_f=temp_low_f,
+            humidity_high=humidity_high, humidity_low=humidity_low,
+            temp_target_f=temp_target_f, humidity_target=humidity_target,
+        )
     elif mode == "vpd":
-        payload["currentMode"] = 6
-        payload["settingMode"] = 1
-        scaled = round(float(targets["target_kpa"]) * 10)
-        payload["targetVpd"] = scaled
-        payload["highVpd"] = scaled
-        payload["highVpdSwitch"] = 1
-        # Zero the On-mode low default so no spurious low trigger remains.
-        payload["lowVpd"] = 0
-        payload["lowVpdSwitch"] = 0
-    # mode == "on": base dict unchanged (currentMode=1).
+        _apply_vpd(
+            payload,
+            control_style=control_style,
+            vpd_target=vpd_target, vpd_high=vpd_high, vpd_low=vpd_low,
+        )
+
+    # Buffer / transition (per sensor). Buffer and transition are mutually exclusive per
+    # sensor (validated upstream); whichever is set lands in its dedicated field.
+    if temp_buffer is not None:
+        payload["temperatureFBuff"] = int(temp_buffer)
+    if temp_transition is not None:
+        payload["temperatureFTrans"] = int(temp_transition)
+    if humidity_buffer is not None:
+        payload["humidityBuff"] = int(humidity_buffer)
+    if humidity_transition is not None:
+        payload["humidityTrans"] = int(humidity_transition)
+    if vpd_buffer is not None:
+        payload["vpdBuff"] = round(float(vpd_buffer) * 10)
+    if vpd_transition is not None:
+        payload["vpdTrans"] = round(float(vpd_transition) * 10)
 
     if adv_id is not None:
         payload["advId"] = adv_id
     return payload
+
+
+def _apply_auto(
+    payload: dict[str, Any],
+    *,
+    control_style: str | None,
+    temp_high_f: int | None,
+    temp_low_f: int | None,
+    humidity_high: int | None,
+    humidity_low: int | None,
+    temp_target_f: int | None,
+    humidity_target: int | None,
+) -> None:
+    """Apply the currentMode=4 (Auto) signature in place.
+
+    Trigger sub-mode (settingMode=0, setSelect=1): each named threshold sets its value +
+    switch=1; the opposite/unused threshold is parked at its rail with switch=0. Target
+    sub-mode (settingMode=1, setSelect=0): rails for the trigger families with switches=1,
+    real values in targetHumi / targetTempF.
+    """
+    payload["currentMode"] = _MODE_AUTO
+
+    if control_style == "target":
+        # Auto-target: settingMode=1, setSelect=0. Trigger families parked at rails,
+        # but with switches=1 (the captured Auto-target signature, Rule 2).
+        payload["settingMode"] = 1
+        payload["setSelect"] = 0
+        payload["autoHighTempF"] = _RAIL_TEMP_HIGH_F
+        payload["autoHighTempC"] = _RAIL_TEMP_HIGH_C
+        payload["autoLowTempF"] = _RAIL_TEMP_LOW_F
+        payload["autoLowTempC"] = _RAIL_TEMP_LOW_C
+        payload["autoHighTempSwitch"] = 1
+        payload["autoLowTempSwitch"] = 1
+        payload["autoHighHumi"] = _RAIL_HUMI_HIGH
+        payload["autoLowHumi"] = _RAIL_HUMI_LOW
+        payload["autoHighHumiSwitch"] = 1
+        payload["autoLowHumiSwitch"] = 1
+        payload["highVpd"] = _RAIL_VPD_HIGH
+        payload["highVpdSwitch"] = 1
+        payload["lowVpd"] = _RAIL_VPD_LOW
+        payload["lowVpdSwitch"] = 1
+        payload["targetTempF"] = (
+            int(temp_target_f) if temp_target_f is not None else _RAIL_TEMP_LOW_F
+        )
+        payload["targetHumi"] = int(humidity_target) if humidity_target is not None else 0
+        payload["targetTSwitch"] = 1
+        payload["targetHumiSwitch"] = 1
+        payload["targetVpdSwitch"] = 1
+        payload["targetVpd"] = 0
+    else:
+        # Auto-trigger: settingMode=0, setSelect=1. Named thresholds active; unused
+        # families parked at rails with switch=0.
+        payload["settingMode"] = 0
+        payload["setSelect"] = 1
+
+        if temp_high_f is not None:
+            payload["autoHighTempF"] = int(temp_high_f)
+            payload["autoHighTempC"] = _RAIL_TEMP_HIGH_C
+            payload["autoHighTempSwitch"] = 1
+        else:
+            payload["autoHighTempF"] = _RAIL_TEMP_HIGH_F
+            payload["autoHighTempC"] = _RAIL_TEMP_HIGH_C
+            payload["autoHighTempSwitch"] = 0
+        if temp_low_f is not None:
+            payload["autoLowTempF"] = int(temp_low_f)
+            payload["autoLowTempC"] = _RAIL_TEMP_LOW_C
+            payload["autoLowTempSwitch"] = 1
+        else:
+            payload["autoLowTempF"] = _RAIL_TEMP_LOW_F
+            payload["autoLowTempC"] = _RAIL_TEMP_LOW_C
+            payload["autoLowTempSwitch"] = 0
+
+        if humidity_high is not None:
+            payload["autoHighHumi"] = int(humidity_high)
+            payload["autoHighHumiSwitch"] = 1
+        else:
+            payload["autoHighHumi"] = _RAIL_HUMI_HIGH
+            payload["autoHighHumiSwitch"] = 0
+        if humidity_low is not None:
+            payload["autoLowHumi"] = int(humidity_low)
+            payload["autoLowHumiSwitch"] = 1
+        else:
+            payload["autoLowHumi"] = _RAIL_HUMI_LOW
+            payload["autoLowHumiSwitch"] = 0
+
+        # VPD family parked at rails (switches stay 1 per captured Auto-trigger signature).
+        payload["highVpd"] = _RAIL_VPD_HIGH
+        payload["highVpdSwitch"] = 1
+        payload["lowVpd"] = _RAIL_VPD_LOW
+        payload["lowVpdSwitch"] = 1
+        # Target family parked at rails with switches=1.
+        payload["targetTempF"] = _RAIL_TEMP_LOW_F
+        payload["targetTSwitch"] = 1
+        payload["targetHumiSwitch"] = 1
+        payload["targetVpdSwitch"] = 1
+        payload["targetHumi"] = 0
+        payload["targetVpd"] = 0
+
+
+def _apply_vpd(
+    payload: dict[str, Any],
+    *,
+    control_style: str | None,
+    vpd_target: float | None,
+    vpd_high: float | None,
+    vpd_low: float | None,
+) -> None:
+    """Apply the currentMode=6 (VPD) signature in place.
+
+    Target (settingMode=1): targetVpd = kpa*10, VPD trigger rails. Trigger (settingMode=0):
+    highVpd/lowVpd = kpa*10 with switch=1; the unused direction parked at its rail/switch=0.
+    Auto temp/humidity fields are don't-care in VPD mode (left at base defaults).
+    """
+    payload["currentMode"] = _MODE_VPD
+
+    if control_style == "trigger":
+        payload["settingMode"] = 0
+        payload["setSelect"] = 0
+        payload["targetVpd"] = 0
+        payload["targetVpdSwitch"] = 1
+        if vpd_high is not None:
+            payload["highVpd"] = round(float(vpd_high) * 10)
+            payload["highVpdSwitch"] = 1
+        else:
+            payload["highVpd"] = _RAIL_VPD_HIGH
+            payload["highVpdSwitch"] = 0
+        if vpd_low is not None:
+            payload["lowVpd"] = round(float(vpd_low) * 10)
+            payload["lowVpdSwitch"] = 1
+        else:
+            payload["lowVpd"] = _RAIL_VPD_LOW
+            payload["lowVpdSwitch"] = 0
+    else:
+        # VPD-target (default): settingMode=1, setSelect=0. VPD trigger family at rails.
+        payload["settingMode"] = 1
+        payload["setSelect"] = 0
+        payload["targetVpd"] = round(float(vpd_target) * 10) if vpd_target is not None else 0
+        payload["targetVpdSwitch"] = 1
+        payload["highVpd"] = _RAIL_VPD_HIGH
+        payload["highVpdSwitch"] = 1
+        payload["lowVpd"] = _RAIL_VPD_LOW
+        payload["lowVpdSwitch"] = 1
 
 
 def build_add_groups_payload(
@@ -304,10 +472,10 @@ def build_add_groups_payload(
         dev_id=dev_id,
         ports=[port],
         clean_name=clean_name,
-        on_speed=on_speed,
         begin_time=begin_time,
         end_time=end_time,
         mode="on",
+        on_speed=on_speed,
     )
 
 

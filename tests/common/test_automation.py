@@ -115,39 +115,53 @@ def test_group_automations_different_names_separate_groups_insertion_order():
 # ============ _decode_rule (Issue #284) ============
 
 
-def test_decode_rule_on_mode():
-    assert _decode_rule({"currentMode": 1, "onSpeed": 7}) == {
-        "mode": "on", "control": "runs at speed 7", "direction": None,
+def test_decode_rule_off_mode():
+    assert _decode_rule({"currentMode": 2}) == {
+        "mode": "off", "control": "off", "direction": None,
     }
+
+
+def test_decode_rule_on_mode():
+    decoded = _decode_rule({"currentMode": 1, "onSpeed": 7, "offSpeed": 0})
+    assert decoded["mode"] == "on"
+    assert decoded["direction"] is None
+    assert "runs at set speed" in decoded["control"]
 
 
 def test_decode_rule_cycle_mode():
-    assert _decode_rule({"currentMode": 3, "cycleOn": 60, "cycleOff": 120}) == {
-        "mode": "cycle", "control": "cycle 60 min on / 120 min off", "direction": None,
-    }
+    decoded = _decode_rule({"currentMode": 3, "cycleOn": 60, "cycleOff": 120,
+                            "onSpeed": 5, "offSpeed": 0})
+    assert decoded["mode"] == "cycle"
+    assert "cycle 60 min on / 120 min off" in decoded["control"]
 
 
-def test_decode_rule_vpd_uses_div10_with_coexisting_switches():
-    """Live VPD rule (targetVpd=9, currentMode=6) decodes to 0.9 kPa despite the rail
-    targetVpdSwitch=1 from the base shape."""
+def test_decode_rule_vpd_target_div10():
+    """Live VPD-target rule (targetVpd=9, currentMode=6) decodes to 0.9 kPa despite the
+    rail VPD-trigger family (highVpd=99 / switch=1)."""
     decoded = _decode_rule(copy.deepcopy(MOCK_RULE_VPD))
-    assert decoded == {"mode": "vpd", "control": "hold VPD at 0.9 kPa", "direction": None}
+    assert decoded["mode"] == "vpd"
+    assert "VPD: hold at 0.9 kPa" in decoded["control"]
+    assert decoded["direction"] is None
 
 
-def test_decode_rule_humidity_setpoint_wins_over_coexisting_switches():
-    """currentMode=4 with settingMode=1 + targetHumi>0 decodes as a humidity hold even
-    though every targetXSwitch and both temp/humi trigger switches are also 1 (live shape)."""
+def test_decode_rule_auto_target_humidity_wins_over_rail_triggers():
+    """currentMode=4 + settingMode=1 + targetHumi>0 decodes as a humidity hold; the
+    rail-parked trigger families (switches=1) are correctly ignored (rail-sentinel rule)."""
     decoded = _decode_rule(copy.deepcopy(MOCK_RULE_HUMIDITY_SETPOINT))
-    assert decoded == {"mode": "humidity", "control": "hold humidity at 65%", "direction": None}
+    assert decoded["mode"] == "auto"
+    assert "humidity: hold at 65%" in decoded["control"]
+    # The rail-parked temperature trigger must NOT produce a clause.
+    assert "temperature: on" not in decoded["control"]
+    assert decoded["direction"] is None
 
 
-def test_decode_rule_temperature_trigger_on_below_sentinel_aware():
-    """autoLowTempF=76 + switch=1 is active; autoHighTempF=194 (rail) is NOT, even with
-    its switch — sentinel rule. Decodes to a single on_below temperature trigger."""
+def test_decode_rule_auto_trigger_on_below_rail_aware():
+    """autoLowTempF=76 + switch=1 is active; autoHighTempF=194 (rail) is NOT. Decodes to a
+    single on-below temperature trigger clause."""
     decoded = _decode_rule(copy.deepcopy(MOCK_RULE_TEMPERATURE_TRIGGER))
-    assert decoded["mode"] == "temperature"
+    assert decoded["mode"] == "auto"
     assert decoded["direction"] == "on_below"
-    assert decoded["control"] == "run when temp drops below 76°F"
+    assert "temperature: on below 76°F" in decoded["control"]
 
 
 def test_decode_rule_unknown_mode():
@@ -170,13 +184,13 @@ def test_group_automations_two_window_per_rule_decode():
     assert pgs[0]["end_time"] == 180
     assert pgs[0]["run_state"] is True
     assert pgs[0]["rule"]["mode"] == "vpd"
-    assert pgs[0]["rule"]["control"] == "hold VPD at 0.9 kPa"
-    # Second entry: humidity setpoint lights-off window 180–540, not running.
+    assert "VPD: hold at 0.9 kPa" in pgs[0]["rule"]["control"]
+    # Second entry: auto-target humidity lights-off window 180–540, not running.
     assert pgs[1]["begin_time"] == 180
     assert pgs[1]["end_time"] == 540
     assert pgs[1]["run_state"] is False
-    assert pgs[1]["rule"]["mode"] == "humidity"
-    assert pgs[1]["rule"]["control"] == "hold humidity at 65%"
+    assert pgs[1]["rule"]["mode"] == "auto"
+    assert "humidity: hold at 65%" in pgs[1]["rule"]["control"]
 
 
 def test_group_automations_additive_keys_do_not_disturb_program_or_old_per_element_keys():

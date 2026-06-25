@@ -34,137 +34,232 @@ def _sanitize_api_string(value: str | None, max_len: int = 64) -> str:
     return cleaned if cleaned else "(unnamed)"
 
 
-# Sentinel values that mean "trigger not really set" even when the paired switch is 1.
-# Observed across all live rules: an inactive temp/humi trigger carries the rail value.
-_HUMI_HIGH_SENTINEL = 100
-_HUMI_LOW_SENTINEL = 0
-_TEMP_HIGH_F_SENTINEL = 194
-_TEMP_LOW_F_SENTINEL = 32
+# Rail sentinels (Issue #284): a value AT its rail means "inactive" even when the paired
+# switch is 1. The app parks the unused unit/family at its rail. Mirrors client.py rails.
+_RAIL_TEMP_HIGH_F = 194
+_RAIL_TEMP_LOW_F = 32
+_RAIL_HUMI_HIGH = 100
+_RAIL_HUMI_LOW = 0
+_RAIL_VPD_HIGH = 99
+_RAIL_VPD_LOW = 0
+_RAIL_TARGET_TEMP_F = 32
+_RAIL_TARGET_HUMI = 0
+_RAIL_TARGET_VPD = 0
+
+# switchTime bit 7 (128) = continuous flag; bits 0–6 = days (bit0=Mon … bit6=Sun).
+_SWITCHTIME_CONTINUOUS_BIT = 0x80
+_SWITCHTIME_ALL_DAYS = 127
+_SWITCHTIME_WEEKDAYS = 31  # Mon–Fri
+_DAY_ABBR = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def _fmt_hhmm(minutes: int | None) -> str:
+    """Format minutes-since-midnight as HH:MM (clamped to a valid clock value)."""
+    m = int(minutes or 0) % 1440
+    return f"{m // 60:02d}:{m % 60:02d}"
+
+
+def _decode_schedule(entry: dict) -> str | None:
+    """Return a human-readable schedule modifier, or None when no window applies.
+
+    ``switchTime`` bit 7 set (e.g. 255) → "runs continuously" (window suppressed). Else
+    decode the day bitmask (127→"every day", 31→"Mon–Fri", otherwise named days) and append
+    the HH:MM–HH:MM window.
+    """
+    switch_time = int(entry.get("switchTime") or 0)
+    if switch_time & _SWITCHTIME_CONTINUOUS_BIT:
+        return "runs continuously"
+
+    begin = entry.get("beginTime")
+    end = entry.get("endTime")
+    days_mask = switch_time & 0x7F
+    if days_mask == _SWITCHTIME_ALL_DAYS:
+        day_str = "every day"
+    elif days_mask == _SWITCHTIME_WEEKDAYS:
+        day_str = "Mon–Fri"
+    elif days_mask == 0:
+        day_str = None
+    else:
+        day_str = ", ".join(_DAY_ABBR[i] for i in range(7) if days_mask & (1 << i))
+
+    if begin is None and end is None and day_str is None:
+        return None
+    window = f"{_fmt_hhmm(begin)}–{_fmt_hhmm(end)}"
+    return f"{day_str} {window}" if day_str else window
+
+
+def _decode_modifiers(entry: dict) -> list[str]:
+    """Return speed-range + buffer/transition modifier phrases for the control string."""
+    mods: list[str] = []
+    min_level = int(entry.get("offSpeed") or 0)
+    max_level = int(entry.get("onSpeed") or 0)
+    if entry.get("currentMode") == 1:
+        # On mode runs at a single speed (the port's own min is used when inactive); there
+        # is no user-settable min, so render just the active speed, not a range.
+        mods.append(f"speed {max_level}")
+    else:
+        min_render = "0 (off)" if min_level == 0 else str(min_level)
+        mods.append(f"speed {min_render}–{max_level}")
+
+    if int(entry.get("temperatureFBuff") or 0) > 0:
+        mods.append(f"temperature buffer {entry['temperatureFBuff']}°F")
+    if int(entry.get("temperatureFTrans") or 0) > 0:
+        mods.append(f"temperature transition {entry['temperatureFTrans']}°F")
+    if int(entry.get("humidityBuff") or 0) > 0:
+        mods.append(f"humidity buffer {entry['humidityBuff']}%")
+    if int(entry.get("humidityTrans") or 0) > 0:
+        mods.append(f"humidity transition {entry['humidityTrans']}%")
+    if int(entry.get("vpdBuff") or 0) > 0:
+        mods.append(f"VPD buffer {entry['vpdBuff'] / 10:g} kPa")
+    if int(entry.get("vpdTrans") or 0) > 0:
+        mods.append(f"VPD transition {entry['vpdTrans'] / 10:g} kPa")
+    return mods
+
+
+def _decode_auto_clauses(entry: dict) -> tuple[list[str], str | None]:
+    """Collect sensor-labeled clauses for a currentMode=4 (Auto) rule. Returns (clauses, dir).
+
+    Target sub-mode (settingMode==1): collect every non-rail target. Trigger sub-mode:
+    collect every active threshold (switch==1 AND value non-rail). ``direction`` is reported
+    for a single-sensor trigger (back-compat with the trigger round-trip tests).
+    """
+    clauses: list[str] = []
+    direction: str | None = None
+
+    if entry.get("settingMode") == 1:
+        temp_t = entry.get("targetTempF")
+        if temp_t is not None and int(temp_t) != _RAIL_TARGET_TEMP_F:
+            clauses.append(f"temperature: hold at {int(temp_t)}°F")
+        humi_t = entry.get("targetHumi")
+        if humi_t is not None and int(humi_t) != _RAIL_TARGET_HUMI:
+            clauses.append(f"humidity: hold at {int(humi_t)}%")
+        return clauses, direction
+
+    # Trigger sub-mode.
+    temp_high = (
+        entry.get("autoHighTempSwitch") == 1
+        and int(entry.get("autoHighTempF") or 0) < _RAIL_TEMP_HIGH_F
+    )
+    temp_low = (
+        entry.get("autoLowTempSwitch") == 1
+        and int(entry.get("autoLowTempF") or 0) > _RAIL_TEMP_LOW_F
+    )
+    if temp_high or temp_low:
+        clause, direction = _trigger_clause(
+            "temperature", "°F",
+            high=temp_high, low=temp_low,
+            high_value=int(entry.get("autoHighTempF") or 0),
+            low_value=int(entry.get("autoLowTempF") or 0),
+        )
+        clauses.append(clause)
+
+    humi_high = (
+        entry.get("autoHighHumiSwitch") == 1
+        and int(entry.get("autoHighHumi") or 0) < _RAIL_HUMI_HIGH
+    )
+    humi_low = (
+        entry.get("autoLowHumiSwitch") == 1
+        and int(entry.get("autoLowHumi") or 0) > _RAIL_HUMI_LOW
+    )
+    if humi_high or humi_low:
+        clause, humi_dir = _trigger_clause(
+            "humidity", "%",
+            high=humi_high, low=humi_low,
+            high_value=int(entry.get("autoHighHumi") or 0),
+            low_value=int(entry.get("autoLowHumi") or 0),
+        )
+        clauses.append(clause)
+        # Single-sensor trigger: surface the direction; multi-sensor leaves it None.
+        direction = humi_dir if not (temp_high or temp_low) else None
+
+    return clauses, direction
+
+
+def _trigger_clause(
+    sensor: str, unit: str, *, high: bool, low: bool, high_value: int, low_value: int
+) -> tuple[str, str]:
+    """Build one sensor-labeled trigger clause + its direction."""
+    if high and low:
+        return (
+            f"{sensor}: on above {high_value}{unit} or below {low_value}{unit}",
+            "both",
+        )
+    if high:
+        return f"{sensor}: on above {high_value}{unit}", "on_above"
+    return f"{sensor}: on below {low_value}{unit}", "on_below"
+
+
+def _decode_vpd_clauses(entry: dict) -> tuple[list[str], str | None]:
+    """Collect VPD clauses for a currentMode=6 rule. Returns (clauses, direction)."""
+    if entry.get("settingMode") == 1:
+        kpa = int(entry.get("targetVpd") or 0) / 10
+        return [f"VPD: hold at {kpa:g} kPa"], None
+
+    high = (
+        entry.get("highVpdSwitch") == 1
+        and int(entry.get("highVpd") or 0) < _RAIL_VPD_HIGH
+    )
+    low = (
+        entry.get("lowVpdSwitch") == 1
+        and int(entry.get("lowVpd") or 0) > _RAIL_VPD_LOW
+    )
+    high_kpa = int(entry.get("highVpd") or 0) / 10
+    low_kpa = int(entry.get("lowVpd") or 0) / 10
+    if high and low:
+        return [f"VPD: on above {high_kpa:g} or below {low_kpa:g} kPa"], "both"
+    if high:
+        return [f"VPD: on above {high_kpa:g} kPa"], "on_above"
+    if low:
+        return [f"VPD: on below {low_kpa:g} kPa"], "on_below"
+    return [], None
 
 
 def _decode_rule(entry: dict) -> dict:
     """Decode a raw getGroups entry into a grower-readable rule description.
 
-    Returns ``{"mode": <on|cycle|temperature|humidity|vpd>, "control": <plain string>,
-    "direction": <on_below|on_above|both|None>}``. This is the single source of truth
-    for read-back and is the exact mirror of ``build_groups_payload``'s encoder.
+    Returns ``{"mode": <off|on|cycle|auto|vpd>, "control": <plain string>,
+    "direction": <on_below|on_above|both|None>}``. This is the single source of truth for
+    read-back and the exact mirror of ``build_groups_payload``'s encoder.
 
-    Authority order for the shared ``currentMode==4`` shape (storage-verified, not
-    behavior-verified — see plan Open items): humidity setpoint (``settingMode==1`` with
-    a real ``targetHumi``) wins; then a temperature trigger; then a humidity trigger. A
-    switch counts as active only when set AND its paired value is non-sentinel.
+    Additive multi-clause: for Auto/VPD every active (non-rail) target or trigger across all
+    sensors is collected into a sensor-labeled clause, joined by "; ", then speed-range and
+    schedule and buffer/transition modifiers are appended. A value AT its rail is NEVER a
+    clause, so a Target rule's rail-parked triggers (switches=1) are correctly ignored.
     """
     current_mode = entry.get("currentMode")
 
-    if current_mode == 1:
-        speed = entry.get("onSpeed", 0)
-        return {"mode": "on", "control": f"runs at speed {speed}", "direction": None}
+    if current_mode == 2:
+        return {"mode": "off", "control": "off", "direction": None}
 
-    if current_mode == 3:
+    if current_mode == 1:
+        clauses: list[str] = ["runs at set speed"]
+        direction: str | None = None
+        mode = "on"
+    elif current_mode == 3:
         on_min = entry.get("cycleOn", 0)
         off_min = entry.get("cycleOff", 0)
-        return {
-            "mode": "cycle",
-            "control": f"cycle {on_min} min on / {off_min} min off",
-            "direction": None,
-        }
+        clauses = [f"cycle {on_min} min on / {off_min} min off"]
+        direction = None
+        mode = "cycle"
+    elif current_mode == 4:
+        clauses, direction = _decode_auto_clauses(entry)
+        if not clauses:
+            clauses = ["auto (no rule set)"]
+        mode = "auto"
+    elif current_mode == 6:
+        clauses, direction = _decode_vpd_clauses(entry)
+        if not clauses:
+            clauses = ["VPD (no rule set)"]
+        mode = "vpd"
+    else:
+        return {"mode": "unknown", "control": "unknown rule type", "direction": None}
 
-    if current_mode == 6:
-        kpa = entry.get("targetVpd", 0) / 10
-        return {
-            "mode": "vpd",
-            "control": f"hold VPD at {kpa:g} kPa",
-            "direction": None,
-        }
-
-    if current_mode == 4:
-        # Humidity setpoint wins.
-        if entry.get("settingMode") == 1 and (entry.get("targetHumi") or 0) > 0:
-            target = entry.get("targetHumi", 0)
-            return {
-                "mode": "humidity",
-                "control": f"hold humidity at {target}%",
-                "direction": None,
-            }
-
-        # Temperature trigger.
-        temp_low_active = (
-            entry.get("autoLowTempSwitch") == 1
-            and (entry.get("autoLowTempF") or 0) > _TEMP_LOW_F_SENTINEL
-        )
-        temp_high_active = (
-            entry.get("autoHighTempSwitch") == 1
-            and (entry.get("autoHighTempF") or 0) < _TEMP_HIGH_F_SENTINEL
-        )
-        if temp_low_active or temp_high_active:
-            return _decode_trigger(
-                "temp",
-                "°F",
-                low_active=temp_low_active,
-                high_active=temp_high_active,
-                low_value=entry.get("autoLowTempF", 0),
-                high_value=entry.get("autoHighTempF", 0),
-            )
-
-        # Humidity trigger.
-        humi_low_active = (
-            entry.get("autoLowHumiSwitch") == 1
-            and (entry.get("autoLowHumi") or 0) > _HUMI_LOW_SENTINEL
-        )
-        humi_high_active = (
-            entry.get("autoHighHumiSwitch") == 1
-            and (entry.get("autoHighHumi") or 0) < _HUMI_HIGH_SENTINEL
-        )
-        if humi_low_active or humi_high_active:
-            return _decode_trigger(
-                "humidity",
-                "%",
-                low_active=humi_low_active,
-                high_active=humi_high_active,
-                low_value=entry.get("autoLowHumi", 0),
-                high_value=entry.get("autoHighHumi", 0),
-            )
-
-        # currentMode=4 with no active trigger or setpoint — surface as auto without target.
-        return {"mode": "humidity", "control": "auto (no target set)", "direction": None}
-
-    return {"mode": "unknown", "control": "unknown rule type", "direction": None}
-
-
-def _decode_trigger(
-    variable: str,
-    unit: str,
-    *,
-    low_active: bool,
-    high_active: bool,
-    low_value: int,
-    high_value: int,
-) -> dict:
-    """Build a unified trigger control string + direction for temp/humidity triggers.
-
-    "run when <var> rises above N" (on_above) / "run when <var> drops below N" (on_below).
-    When both directions are active the control names both bounds.
-    """
-    if low_active and high_active:
-        return {
-            "mode": "temperature" if variable == "temp" else "humidity",
-            "control": (
-                f"run when {variable} rises above {high_value}{unit}"
-                f" or drops below {low_value}{unit}"
-            ),
-            "direction": "both",
-        }
-    if high_active:
-        return {
-            "mode": "temperature" if variable == "temp" else "humidity",
-            "control": f"run when {variable} rises above {high_value}{unit}",
-            "direction": "on_above",
-        }
-    return {
-        "mode": "temperature" if variable == "temp" else "humidity",
-        "control": f"run when {variable} drops below {low_value}{unit}",
-        "direction": "on_below",
-    }
+    parts = list(clauses)
+    parts.extend(_decode_modifiers(entry))
+    schedule = _decode_schedule(entry)
+    if schedule:
+        parts.append(schedule)
+    return {"mode": mode, "control": "; ".join(parts), "direction": direction}
 
 
 def _group_automations(raw_entries: list[dict]) -> list[dict]:
@@ -200,6 +295,7 @@ def _group_automations(raw_entries: list[dict]) -> list[dict]:
                     # consumers stay above; these are for the per-rule read/CRUD path).
                     "begin_time": e.get("beginTime"),
                     "end_time": e.get("endTime"),
+                    "switch_time": e.get("switchTime"),
                     "run_state": bool(e.get("runState", 0)),
                     "current_mode": e.get("currentMode"),
                     "rule": _decode_rule(e),
