@@ -803,6 +803,19 @@ def test_authenticate_uses_appPasswordl_typo(client):
     assert "appPassword=" not in body
 
 
+@responses_lib.activate
+def test_delByid_isflag_scope_whole_program_vs_single_rule(authed_client):
+    """delByid isflag selects scope (verified live): whole_program=True -> isflag=1
+    (delete the entire program slot); whole_program=False -> isflag=0 (delete ONLY this
+    rule). Regression guard for the bug where delete_automation_rule nuked whole programs."""
+    url = "https://www.acinfinityserver.com/api/version=2.0/dev/delByid"
+    responses_lib.add(responses_lib.POST, url, json={"code": 200, "msg": "success."}, status=200)
+    authed_client.delete_advance_automation("12345", 99)  # default: whole program
+    assert "isflag=1" in responses_lib.calls[-1].request.body
+    authed_client.delete_advance_automation("12345", 99, whole_program=False)  # single rule
+    assert "isflag=0" in responses_lib.calls[-1].request.body
+
+
 def test_authenticate_password_truncated_to_25_chars():
     c = ACInfinityClient("test@example.com", "a" * 30)
     assert len(c.password) == 25

@@ -10081,6 +10081,8 @@ async def test_delete_rule_live_deletes_single_advid(mock_client):
     assert data["sent"] is True
     mock_client.delete_advance_automation.assert_called_once()
     assert mock_client.delete_advance_automation.call_args.args[1] == 5002
+    # Must delete ONLY this rule (isflag=0), NOT the whole program slot (isflag=1).
+    assert mock_client.delete_advance_automation.call_args.kwargs.get("whole_program") is False
 
 
 async def test_delete_rule_wedged_friendly_no_upstream_echo(mock_client):

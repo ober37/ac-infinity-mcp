@@ -4995,8 +4995,11 @@ async def delete_automation_rule(
                 ),
             })
         try:
+            # whole_program=False → delByid isflag=0 removes ONLY this rule, not the
+            # whole program slot (isflag=1 would nuke every rule in the program).
             await asyncio.to_thread(
-                _client().delete_advance_automation, str(dev_id), int(match_now["advId"])
+                _client().delete_advance_automation, str(dev_id),
+                int(match_now["advId"]), whole_program=False,
             )
         except ACInfinityAPIError as e:
             friendly = _map_write_failure(e)

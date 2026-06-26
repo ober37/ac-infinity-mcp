@@ -1421,18 +1421,27 @@ class ACInfinityClient:
         logger.info("Updated automation for devId=%s, advId=%s", dev_id, payload.get("advId"))
         return data
 
-    def delete_advance_automation(self, dev_id: str, adv_id: int) -> dict:
-        """Delete an advance automation group entry (with transparent 401 refresh).
+    def delete_advance_automation(
+        self, dev_id: str, adv_id: int, *, whole_program: bool = True
+    ) -> dict:
+        """Delete via delByid (with transparent 401 refresh).
+
+        The ``isflag`` field on delByid selects the scope (verified live):
+        ``isflag=1`` deletes the ENTIRE program (the whole groupNums/sortType slot —
+        all its rules); ``isflag=0`` deletes only the single rule identified by ``adv_id``.
 
         Args:
             dev_id: Numeric device ID string.
-            adv_id: Automation entry ID to delete.
+            adv_id: Automation entry (rule) ID to delete.
+            whole_program: True (default) → delete the whole program (isflag=1), used by
+                the delete-whole-automation tool. False → delete only this one rule
+                (isflag=0), used by delete_automation_rule on multi-rule programs.
 
         Returns:
             API response dict.
         """
         return self._call_with_token_refresh(
-            self._delete_advance_automation_inner, dev_id, adv_id
+            self._delete_advance_automation_inner, dev_id, adv_id, whole_program
         )
 
     @retry(
@@ -1441,8 +1450,11 @@ class ACInfinityClient:
         retry=retry_if_exception_type(requests.exceptions.ConnectionError),
         reraise=True,
     )
-    def _delete_advance_automation_inner(self, dev_id: str, adv_id: int) -> dict:
-        """POST /api/version=2.0/dev/delByid — deletes automation entry."""
+    def _delete_advance_automation_inner(
+        self, dev_id: str, adv_id: int, whole_program: bool = True
+    ) -> dict:
+        """POST /api/version=2.0/dev/delByid — isflag=1 deletes the whole program slot,
+        isflag=0 deletes only this rule."""
         if not self.token:
             raise ACInfinityAuthError("Not authenticated — call authenticate() first")
 
@@ -1450,7 +1462,7 @@ class ACInfinityClient:
         try:
             resp = self.session.post(
                 self.V2_DEL_BY_ID_ENDPOINT,
-                data={"advId": adv_id, "isDel": 1, "isflag": 1},
+                data={"advId": adv_id, "isDel": 1, "isflag": 1 if whole_program else 0},
                 headers=self._v2_headers(),
                 timeout=10,
             )
