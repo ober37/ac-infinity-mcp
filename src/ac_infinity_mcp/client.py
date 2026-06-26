@@ -294,8 +294,10 @@ def build_groups_payload(
         payload["currentMode"] = _MODE_OFF
     elif mode == "cycle":
         payload["currentMode"] = _MODE_CYCLE
-        payload["cycleOn"] = int(cycle_on_minutes or 0)
-        payload["cycleOff"] = int(cycle_off_minutes or 0)
+        # cycleOn/cycleOff are stored in SECONDS on the controller (the app shows
+        # minutes = seconds/60; verified live: cycleOn=30 rendered as "0 min").
+        payload["cycleOn"] = int(cycle_on_minutes or 0) * 60
+        payload["cycleOff"] = int(cycle_off_minutes or 0) * 60
     elif mode == "auto":
         _apply_auto(
             payload,

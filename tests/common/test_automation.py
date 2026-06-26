@@ -129,7 +129,8 @@ def test_decode_rule_on_mode():
 
 
 def test_decode_rule_cycle_mode():
-    decoded = _decode_rule({"currentMode": 3, "cycleOn": 60, "cycleOff": 120,
+    # cycleOn/cycleOff are SECONDS on the device; decoder shows minutes = seconds/60.
+    decoded = _decode_rule({"currentMode": 3, "cycleOn": 3600, "cycleOff": 7200,
                             "onSpeed": 5, "offSpeed": 0})
     assert decoded["mode"] == "cycle"
     assert "cycle 60 min on / 120 min off" in decoded["control"]

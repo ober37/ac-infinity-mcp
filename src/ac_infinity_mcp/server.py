@@ -4541,10 +4541,11 @@ def _overlay_same_mode(
     target settingMode/rail shape from the captured signature).
     """
     if mode == "cycle":
+        # cycleOn/cycleOff are stored in SECONDS (minutes × 60); see build_groups_payload.
         if cycle_on_minutes is not None:
-            body["cycleOn"] = cycle_on_minutes
+            body["cycleOn"] = cycle_on_minutes * 60
         if cycle_off_minutes is not None:
-            body["cycleOff"] = cycle_off_minutes
+            body["cycleOff"] = cycle_off_minutes * 60
         return
 
     if mode == "auto":

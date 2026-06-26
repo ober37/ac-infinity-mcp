@@ -250,8 +250,9 @@ def _decode_rule(entry: dict) -> dict:
         direction: str | None = None
         mode = "on"
     elif current_mode == 3:
-        on_min = entry.get("cycleOn", 0)
-        off_min = entry.get("cycleOff", 0)
+        # cycleOn/cycleOff are stored in SECONDS; the app shows minutes = seconds/60.
+        on_min = int(entry.get("cycleOn") or 0) // 60
+        off_min = int(entry.get("cycleOff") or 0) // 60
         clauses = [f"cycle {on_min} min on / {off_min} min off"]
         direction = None
         mode = "cycle"

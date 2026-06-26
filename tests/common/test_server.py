@@ -10285,8 +10285,9 @@ async def test_update_rule_same_mode_cycle_targets(mock_client):
         cycle_on_minutes=45, cycle_off_minutes=20, dry_run=False,
     )
     sent = mock_client.update_advance_automation.call_args.args[1]
-    assert sent["cycleOn"] == 45
-    assert sent["cycleOff"] == 20
+    # cycleOn/cycleOff stored in SECONDS (minutes × 60).
+    assert sent["cycleOn"] == 2700
+    assert sent["cycleOff"] == 1200
     assert sent["currentMode"] == 3
 
 

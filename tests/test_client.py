@@ -223,8 +223,9 @@ def test_golden_cycle():
         mode="cycle", cycle_on_minutes=60, cycle_off_minutes=120,
     )
     assert p["currentMode"] == 3
-    assert p["cycleOn"] == 60
-    assert p["cycleOff"] == 120
+    # cycleOn/cycleOff are stored in SECONDS (minutes × 60); verified live.
+    assert p["cycleOn"] == 3600
+    assert p["cycleOff"] == 7200
 
 
 # ============ Auto-trigger directional / single-sensor sub-cases ============
