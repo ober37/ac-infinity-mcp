@@ -10014,8 +10014,38 @@ async def test_update_rule_one_sided_min_level_inversion_rejected(mock_client):
         min_level=8, dry_run=False,
     )
     data = json.loads(result)
-    assert "min_level must be less than or equal to max_level" in data["error"]
+    assert "minimum speed can't be higher than the maximum" in data["error"]
     mock_client.update_advance_automation.assert_not_called()
+
+
+async def test_update_rule_one_sided_max_level_inversion_rejected(mock_client):
+    """The reverse direction: lowering max_level below the live min (offSpeed) is rejected."""
+    program = _seedling_program()
+    program[0]["offSpeed"] = 6
+    mock_client.get_advance_automations.return_value = program
+    result = await update_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=540, end_time=180,
+        max_level=3, dry_run=False,
+    )
+    data = json.loads(result)
+    assert "minimum speed can't be higher than the maximum" in data["error"]
+    mock_client.update_advance_automation.assert_not_called()
+
+
+async def test_update_rule_inverted_live_speeds_dont_block_unrelated_edit(mock_client):
+    """A rule whose live speeds are already inverted (external write) is still editable when
+    the edit doesn't touch speed — the inversion guard only fires when a level is supplied."""
+    program = _seedling_program()
+    program[0]["offSpeed"] = 9
+    program[0]["onSpeed"] = 4   # already inverted, not by this tool
+    mock_client.get_advance_automations.return_value = program
+    result = await update_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=540, end_time=180,
+        vpd_transition=0.3, dry_run=False,
+    )
+    data = json.loads(result)
+    assert "error" not in data
+    mock_client.update_advance_automation.assert_called_once()
 
 
 # ---- M3: trigger thresholds on their inactive rail are rejected (lossy round-trip) ----
@@ -10048,6 +10078,67 @@ async def test_add_rule_trigger_just_inside_rail_allowed(mock_client):
     data = json.loads(result)
     assert "error" not in data
     assert "humidity: on above 99%" in data["rule"]["control"]
+
+
+async def test_update_rule_trigger_on_rail_rejected(mock_client):
+    """The rail guard is enforced on the update path too (not just add)."""
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await update_automation_rule(
+        "C58ZA", "Seedling", [2], begin_time=540, end_time=180,
+        mode="auto", control_style="trigger", humidity_high=100, dry_run=True,
+    )
+    assert "to trigger" in json.loads(result)["error"]
+    mock_client.update_advance_automation.assert_not_called()
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"humidity_target": 0},   # _RAIL_TARGET_HUMI
+    {"temp_target_f": 32},    # _RAIL_TARGET_TEMP_F
+])
+async def test_add_rule_target_on_rail_rejected(mock_client, kwargs):
+    """A target sitting on its inactive rail decodes back as 'no rule set' → rejected."""
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await add_automation_rule(
+        "C58ZA", "Seedling", [1], "auto", control_style="target", dry_run=True, **kwargs,
+    )
+    assert "to hold" in json.loads(result)["error"]
+    mock_client.create_advance_automation.assert_not_called()
+
+
+async def test_add_rule_target_just_inside_rail_allowed(mock_client):
+    """One unit above the target rail is accepted and round-trips."""
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await add_automation_rule(
+        "C58ZA", "Seedling", [1], "auto", control_style="target",
+        humidity_target=1, dry_run=True,
+    )
+    data = json.loads(result)
+    assert "error" not in data
+    assert "humidity: hold at 1%" in data["rule"]["control"]
+
+
+async def test_add_rule_invalid_string_day_token_rejected(mock_client):
+    """A bad scalar-string day (not a list) is rejected (covers the string-branch _err)."""
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await add_automation_rule(
+        "C58ZA", "Seedling", [1], "on", days="funday", dry_run=True,
+    )
+    assert "days must be" in json.loads(result)["error"]
+    mock_client.create_advance_automation.assert_not_called()
+
+
+async def test_update_rule_continuous_false_with_mode_change_preserves_clear(mock_client):
+    """continuous=False alongside a mode change still clears bit7 (rebuild doesn't clobber it)."""
+    program = _seedling_program()
+    program[0]["switchTime"] = 255
+    mock_client.get_advance_automations.return_value = program
+    await update_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=540, end_time=180,
+        mode="on", continuous=False, dry_run=False,
+    )
+    sent = mock_client.update_advance_automation.call_args.args[1]
+    assert sent["currentMode"] == 1     # mode change applied
+    assert sent["switchTime"] == 127    # continuous bit still cleared after rebuild
 
 
 # ---- days list: empty rejected, mixed valid/invalid rejected ----

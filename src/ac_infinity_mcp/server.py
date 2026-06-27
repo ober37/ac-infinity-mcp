@@ -28,6 +28,8 @@ from ac_infinity_mcp.analytics import (
 from ac_infinity_mcp.automation import (
     _RAIL_HUMI_HIGH,
     _RAIL_HUMI_LOW,
+    _RAIL_TARGET_HUMI,
+    _RAIL_TARGET_TEMP_F,
     _RAIL_TEMP_HIGH_F,
     _RAIL_TEMP_LOW_F,
     _RAIL_VPD_HIGH,
@@ -527,6 +529,12 @@ def _validate_auto(
         return _err(f"humidity_high must be below {_RAIL_HUMI_HIGH}% to trigger")
     if humidity_low is not None and humidity_low <= _RAIL_HUMI_LOW:
         return _err(f"humidity_low must be above {_RAIL_HUMI_LOW}% to trigger")
+    # A target sitting on its inactive rail decodes back as "no rule set" too (same lossy
+    # round-trip as the triggers above). VPD targets have no rail, so only temp/humidity here.
+    if temp_target_f is not None and temp_target_f <= _RAIL_TARGET_TEMP_F:
+        return _err(f"temp_target_f must be above {_RAIL_TARGET_TEMP_F}°F to hold")
+    if humidity_target is not None and humidity_target <= _RAIL_TARGET_HUMI:
+        return _err(f"humidity_target must be above {_RAIL_TARGET_HUMI}% to hold")
 
     # Buffer XOR transition per sensor.
     if temp_buffer is not None and temp_transition is not None:
@@ -4837,9 +4845,13 @@ async def update_automation_rule(
             body["onSpeed"] = max_level
         # One-sided speed update must not invert the rule: cross-check against the live body,
         # since _validate's min<=max check only fires when BOTH levels are supplied at once.
-        if int(body.get("offSpeed") or 0) > int(body.get("onSpeed") or 0):
+        # Only when a level was actually supplied — never block an unrelated edit on a rule
+        # whose live speeds were already inverted by some other writer.
+        if (min_level is not None or max_level is not None) and (
+            int(body.get("offSpeed") or 0) > int(body.get("onSpeed") or 0)
+        ):
             return json.dumps({
-                "error": "min_level must be less than or equal to max_level"
+                "error": "The minimum speed can't be higher than the maximum speed."
             })
         if new_begin_time is not None:
             body["beginTime"] = new_begin_time
