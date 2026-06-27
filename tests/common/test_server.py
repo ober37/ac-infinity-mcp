@@ -6121,6 +6121,54 @@ async def test_set_vpd_automation_on_incapable_port_rejected(mock_client):
     mock_client.set_port_mode.assert_not_called()
 
 
+async def test_apply_grow_stage_template_on_incapable_port_rejected(mock_client):
+    """The grow-stage template writes a VPD target → gated on a legacy port too."""
+    mock_client.get_devices.return_value = [_device_with_modetye({1: 0})]
+    result = await apply_grow_stage_template("C58ZA", 1, "veg", dry_run=True)
+    assert "doesn't support target" in json.loads(result)["error"]
+    mock_client.set_port_mode.assert_not_called()
+
+
+async def test_add_humidity_target_on_incapable_port_rejected(mock_client):
+    """Gate is sensor-agnostic: an auto humidity TARGET is blocked on a legacy port too."""
+    mock_client.get_devices.return_value = [_device_with_modetye({1: 0})]
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await add_automation_rule(
+        "C58ZA", "Seedling", [1], "auto", control_style="target", humidity_target=65,
+        dry_run=True,
+    )
+    assert "doesn't support target" in json.loads(result)["error"]
+    mock_client.create_advance_automation.assert_not_called()
+
+
+async def test_update_to_target_on_capable_port_not_blocked(mock_client):
+    """No false-block: a target edit on a capable port (modeTye=15) passes the gate."""
+    mock_client.get_devices.return_value = [_device_with_modetye({1: 15})]
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await update_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=540, end_time=180,
+        mode="vpd", control_style="target", vpd_target=1.0, dry_run=True,
+    )
+    assert "doesn't support target" not in result
+
+
+def test_ports_without_target_support_malformed_device_fails_open():
+    from ac_infinity_mcp.server import _ports_without_target_support
+    # deviceInfo.ports not a list of dicts → exception path → fail open (no block).
+    assert _ports_without_target_support({"deviceInfo": {"ports": "oops"}}, [1]) == []
+
+
+async def test_create_partial_window_is_scheduled_not_continuous(mock_client):
+    """#287: only one of begin/end given → treated as an explicit schedule, not continuous."""
+    result = await create_advance_automation(
+        "C58ZA", "Partial", on_speed=3, port=1, begin_time=300, dry_run=True
+    )
+    data = json.loads(result)
+    assert data["begin_time"] == "05:00"
+    assert data["end_time"] == "23:59"
+    assert "continuous" not in data["schedule_summary"].lower()
+
+
 async def test_create_advance_automation_dry_run_port_no_name(mock_client):
     """Port with no portName falls back to 'Port N' in dry_run response, not '(unnamed)'."""
     import copy
