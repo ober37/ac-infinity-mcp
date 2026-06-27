@@ -846,7 +846,7 @@ REST probing of 200+ legacy-path variants returned only HTTP 404.
 | `/api/version=2.0/dev/addGroups` | POST | Full form fields (~50 fields), incl. `isFlag` | Creates **or** appends a rule. `isFlag=1` → new program slot; `isFlag=0` + the program's `groupNums`/`sortType` + `subNumber=max+1` → appends to that program. Server assigns `advId` in response. See Quirk 32 |
 | `/api/version=2.0/dev/updateGroupsById` | POST | Full form fields + `advId` + `devId` | **Edits a rule in place** by `advId` (same advId, fields updated). The app's rule-edit path — see Quirk 32 |
 | `/api/version=2.0/dev/updateGroupsIsOn` | POST | `advId=...&isDel=0&isflag=1` | **TOGGLES** current `isOn` state — server inverts; no explicit `isOn` field |
-| `/api/version=2.0/dev/delByid` | POST | `advId=...&isDel=1&isflag=1` | Deletes automation |
+| `/api/version=2.0/dev/delByid` | POST | `advId=...&isDel=1&isflag=<scope>` | Deletes by `advId`. `isflag=1` → whole program (all rules); `isflag=0` → single rule only. See Quirk 32 |
 
 **Confirmed alarm management endpoints (v2.0 path prefix):**
 
@@ -1439,7 +1439,7 @@ via live probing on device 8T4TC (devType=18, legacy) on 2026-06-24 (Issue #284)
 |---|---|---|
 | `1` | **On** (`on`) — fixed speed | No control fields beyond name/ports/schedule/speed (optional `onTime` ramp) |
 | `2` | **Off** (`off`) | Port forced off during the window. All trigger/target fields are don't-care (app leaves base defaults). Captured live (program "0624", Rule 4) — this is a real, supported rule type, not the "no rule" pseudo-state described in earlier revisions |
-| `3` | **Cycle** (`cycle`) | `cycleOn` / `cycleOff` (minutes) |
+| `3` | **Cycle** (`cycle`) | `cycleOn` / `cycleOff` stored in **seconds** — see "Cycle units" below |
 | `4` | **Auto** (`auto`) — temperature/humidity, target or trigger | Sub-mode resolved by `settingMode`/`setSelect` (see below) |
 | `6` | **VPD** (`vpd`) — target or trigger | `settingMode=1` + `targetVpd` (target), or `settingMode=0` + `highVpd`/`lowVpd` (trigger) |
 
@@ -1455,6 +1455,19 @@ rules (capture program "0624", device 8T4TC, 2026-06-24):
 - **VPD:** `vpd_target` → `targetVpd=round(kPa×10)`, `targetVpdSwitch=1`, `settingMode=1`; `vpd_high`/`vpd_low` → `highVpd`/`lowVpd` = `round(kPa×10)` with matching switch, `settingMode=0`. VPD **target has no direction** (single kPa value). `targetVpd` is **÷10** — `targetVpd=9` → 0.9 kPa (same scaling as the alarm `highVpd` field and the legacy `addDevMode` quirk).
 - **Buffer vs transition (per sensor, mutually exclusive):** `*_buffer` → `temperatureFBuff` / `humidityBuff` / `vpdBuff`; `*_transition` → `temperatureFTrans` / `humidityTrans` / `vpdTrans`. Distinguished purely by which family is non-zero. VPD buffer/transition are stored ÷10 like the VPD value.
 - **°C drift (do NOT derive):** the app stores the display-unit value (°F) and **parks the other unit at its rail** (e.g. `autoHighTempF=85` pairs with `autoHighTempC=90`, *not* 29 °C). The encoder mirrors the rails verbatim — `_RAIL_TEMP_HIGH_C=90` / `_RAIL_TEMP_LOW_C=0` — rather than converting.
+
+**Cycle units — `cycleOn`/`cycleOff` are stored in SECONDS (discovered Issue #284).** The
+controller stores Cycle on/off durations in **seconds**; the app displays **minutes =
+seconds ÷ 60**. The Groups encoder writes `cycle_on_minutes × 60` and the decoder shows
+`cycleOn // 60`. Verified live: a "30 min on / 90 min off" rule stores `cycleOn=1800` /
+`cycleOff=5400` and renders as 30/90 min in the app — whereas a raw value of `30` rendered
+as "0 min" (30 s ÷ 60, truncated). Read-back of existing Cycle rules applies the same ÷60.
+Note the **deliberate unit difference** between the two cycle surfaces: the Groups tools
+`add_automation_rule` / `create_advance_automation` take `cycle_on_minutes` /
+`cycle_off_minutes` (minutes, matching the app's Cycle editor and converted ×60 on the
+wire); the legacy port-level `set_port_mode` takes `cycle_on_seconds` /
+`timer_duration_seconds` (seconds, no conversion). Both are correct for their respective
+endpoints.
 
 **Schedule — `switchTime` bitmask (`days` / `continuous`):** bits 0–6 = days (bit0=Mon …
 bit6=Sun), bit 7 (128) = continuous flag. Confirmed values:
@@ -1516,12 +1529,24 @@ rule's full `getGroups` body so structural defaults (`switchTime`, `dualZoneSwit
 switch/value fields**, so a stale trigger from the previous mode cannot remain active on the
 device.
 
-**Delete — `delByid`, and the delete-wedge:** a rule is removed with
-`/api/version=2.0/dev/delByid` (`advId=<id>&isDel=1&isflag=1`), leaving the rest of the program
-intact. A rapid sequence of writes can throttle the controller into rejecting deletes with
-`error 100001` ("busy"); the rejected rule remains **wedged** until the controller is restarted
-(power-cycle clears it). `delete_automation_rule` / `add_automation_rule` map `error 100001` to a
-grower-readable "controller is busy — wait and retry, or restart it" message.
+**Delete — `delByid` `isflag` selects scope (verified live, Issue #284):** delete is POSTed to
+`/api/version=2.0/dev/delByid` (`advId=<id>&isDel=1&isflag=<scope>`), and the `isflag` field
+chooses **what** is deleted:
+
+- **`isflag=1` → delete the ENTIRE program** — the whole `(groupNums, sortType)` slot and **all
+  of its rules**. This is the `delete_advance_automation` path (remove the whole automation).
+- **`isflag=0` → delete only the SINGLE rule** identified by `advId`, leaving the rest of the
+  program's rules intact. This is the `delete_automation_rule` path (remove one rule from a
+  multi-rule program). The client selects scope via a `whole_program` flag: `whole_program=True`
+  → `isflag=1`, `whole_program=False` → `isflag=0`.
+
+Earlier revisions used `isflag=1` for both tools, which silently wiped the **whole** program when
+the intent was to remove a single rule — caught only by live/app Gate-5 testing.
+
+**The delete-wedge:** a rapid sequence of writes can throttle the controller into rejecting
+deletes with `error 100001` ("busy"); the rejected rule remains **wedged** until the controller
+is restarted (power-cycle clears it). `delete_automation_rule` / `add_automation_rule` map
+`error 100001` to a grower-readable "controller is busy — wait and retry, or restart it" message.
 
 > **Behavior-verification caveat (Gate-5 pending):** The `currentMode` map, the per-mode field
 > signatures, the `currentMode=4` setpoint-vs-trigger authority (the `settingMode` vs `setSelect`
@@ -1550,7 +1575,7 @@ All use HTTPS (TLSv1.3 — see Quirk 8).
 | `/api/version=2.0/dev/addGroups` | POST | Full form (~50 fields): `advName`, `devId`, `grouptDevType`, `currentMode`, `isOn`, `onSpeed`, `offSpeed`, `beginTime`, `endTime`, `groupNums`, `sortType`, `subNumber`, `isFlag`, `returnData=1`, + others | Creates a new program (`isFlag=1`) or appends a rule to an existing one (`isFlag=0` + the program's slot + `subNumber=max+1`); returns the automation object with server-assigned `advId`. See Quirk 32 |
 | `/api/version=2.0/dev/updateGroupsById` | POST | Full rule body (read-before-write) + `advId` + `devId` | Edits a rule in place by `advId`; preserves structural defaults from the live rule (Quirk 13 + Quirk 32) |
 | `/api/version=2.0/dev/updateGroupsIsOn` | POST | `advId=<id>&isDel=0&isflag=1` | Toggles `isOn` state server-side; no explicit `isOn` field in body |
-| `/api/version=2.0/dev/delByid` | POST | `advId=<id>&isDel=1&isflag=1` | Deletes automation by `advId` |
+| `/api/version=2.0/dev/delByid` | POST | `advId=<id>&isDel=1&isflag=<scope>` | Deletes by `advId`. `isflag=1` → whole program (all rules, `delete_advance_automation`); `isflag=0` → single rule only (`delete_automation_rule`). See Quirk 32 |
 
 ### Alarm Management
 
@@ -2954,7 +2979,7 @@ The optional `mode` parameter sets the behavior of the automation's **first rule
 
 ### `delete_advance_automation(device_id, automation_id, dry_run=True)`
 
-Delete an Advance Automation. If currently enabled, disables it first.
+Delete an Advance Automation — removes the **entire program** (the whole `(groupNums, sortType)` slot and all of its rules) via `delByid` `isflag=1` (Quirk 32). To remove a single rule from a multi-rule program while keeping the others, use `delete_automation_rule` instead. If currently enabled, disables it first.
 
 **Parameters:**
 | Parameter | Type | Description |
