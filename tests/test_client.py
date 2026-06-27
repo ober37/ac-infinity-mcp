@@ -145,9 +145,10 @@ def test_golden_auto_trigger_combined_temp_humidity():
         "autoHighTempF": 85, "autoLowTempF": 60, "autoHighTempC": 90, "autoLowTempC": 0,
         "autoHighTempSwitch": 1, "autoLowTempSwitch": 1,
         "autoHighHumi": 70, "autoLowHumi": 50, "autoHighHumiSwitch": 1, "autoLowHumiSwitch": 1,
-        "highVpd": 99, "lowVpd": 0, "highVpdSwitch": 1, "lowVpdSwitch": 1,
+        # VPD family is zeroed in Auto mode (#288 — app does not park it at the rail here).
+        "highVpd": 0, "lowVpd": 0, "highVpdSwitch": 0, "lowVpdSwitch": 0,
         "targetTempF": 32, "targetHumi": 0, "targetVpd": 0,
-        "targetTSwitch": 1, "targetHumiSwitch": 1, "targetVpdSwitch": 1,
+        "targetTSwitch": 1, "targetHumiSwitch": 1, "targetVpdSwitch": 0,
         "offSpeed": 2, "onSpeed": 8,
         "temperatureFBuff": 3, "humidityBuff": 5, "vpdBuff": 0,
         "temperatureFTrans": 0, "humidityTrans": 0, "vpdTrans": 0,
@@ -167,9 +168,10 @@ def test_golden_auto_target_humidity():
         "autoHighTempF": 194, "autoLowTempF": 32, "autoHighTempC": 90, "autoLowTempC": 0,
         "autoHighTempSwitch": 1, "autoLowTempSwitch": 1,
         "autoHighHumi": 100, "autoLowHumi": 0, "autoHighHumiSwitch": 1, "autoLowHumiSwitch": 1,
-        "highVpd": 99, "lowVpd": 0, "highVpdSwitch": 1, "lowVpdSwitch": 1,
+        # VPD family is zeroed in Auto mode (#288).
+        "highVpd": 0, "lowVpd": 0, "highVpdSwitch": 0, "lowVpdSwitch": 0,
         "targetTempF": 32, "targetHumi": 65, "targetVpd": 0,
-        "targetTSwitch": 1, "targetHumiSwitch": 1, "targetVpdSwitch": 1,
+        "targetTSwitch": 1, "targetHumiSwitch": 1, "targetVpdSwitch": 0,
         "offSpeed": 1, "onSpeed": 10,
         "temperatureFBuff": 0, "humidityBuff": 0, "vpdBuff": 0,
         "temperatureFTrans": 2, "humidityTrans": 4, "vpdTrans": 0,
@@ -178,7 +180,9 @@ def test_golden_auto_target_humidity():
 
 
 def test_golden_vpd_target():
-    """Rule 3 (0624): VPD-target targetVpd=12 (1.2 kPa), VPD trigger family at rails."""
+    """VPD-target (matches the app's Clone Transplant signature, #288): the setpoint is
+    mirrored into targetVpd AND highVpd (highVpdSwitch=1); lowVpd off; and all the auto
+    temp/humidity + temp/humidity-target families are zeroed (inert in VPD mode)."""
     p = build_groups_payload(
         dev_id="X", ports=[1], clean_name="V", begin_time=0, end_time=1439,
         mode="vpd", control_style="target", vpd_target=1.2,
@@ -188,10 +192,14 @@ def test_golden_vpd_target():
     assert p["setSelect"] == 0
     assert p["targetVpd"] == 12
     assert p["targetVpdSwitch"] == 1
-    assert p["highVpd"] == 99
+    assert p["highVpd"] == 12          # mirrors the setpoint (app behavior), not the 99 rail
     assert p["highVpdSwitch"] == 1
     assert p["lowVpd"] == 0
-    assert p["lowVpdSwitch"] == 1
+    assert p["lowVpdSwitch"] == 0      # low off (was wrongly 1 before #288 fix)
+    # Auto + temp/humidity-target families are inert/zeroed in VPD mode.
+    assert p["autoHighHumiSwitch"] == 0 and p["autoLowHumiSwitch"] == 0
+    assert p["autoHighTempSwitch"] == 0 and p["autoLowTempSwitch"] == 0
+    assert p["targetHumiSwitch"] == 0 and p["targetTSwitch"] == 0
 
 
 def test_golden_vpd_trigger():

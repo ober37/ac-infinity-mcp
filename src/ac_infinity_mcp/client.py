@@ -353,9 +353,21 @@ def _apply_auto(
     """
     payload["currentMode"] = _MODE_AUTO
 
+    # VPD family is inert in Auto mode — the app zeroes it (value 0, switch 0) for BOTH
+    # target and trigger sub-modes (verified live against app-made Auto rules). The old code
+    # parked it at the 99 rail with switches=1, which the app rendered as phantom VPD high/low
+    # triggers on an Auto rule (#288 root cause).
+    payload["highVpd"] = 0
+    payload["highVpdSwitch"] = 0
+    payload["lowVpd"] = 0
+    payload["lowVpdSwitch"] = 0
+    payload["targetVpd"] = 0
+    payload["targetVpdSwitch"] = 0
+
     if control_style == "target":
-        # Auto-target: settingMode=1, setSelect=0. Trigger families parked at rails,
-        # but with switches=1 (the captured Auto-target signature, Rule 2).
+        # Auto-target: settingMode=1, setSelect=0. Trigger families parked at rails with
+        # switches=1; the held setpoint goes in targetHumi / targetTempF. Both target
+        # switches stay 1 (captured signature); the unused sensor sits at its rail.
         payload["settingMode"] = 1
         payload["setSelect"] = 0
         payload["autoHighTempF"] = _RAIL_TEMP_HIGH_F
@@ -368,18 +380,12 @@ def _apply_auto(
         payload["autoLowHumi"] = _RAIL_HUMI_LOW
         payload["autoHighHumiSwitch"] = 1
         payload["autoLowHumiSwitch"] = 1
-        payload["highVpd"] = _RAIL_VPD_HIGH
-        payload["highVpdSwitch"] = 1
-        payload["lowVpd"] = _RAIL_VPD_LOW
-        payload["lowVpdSwitch"] = 1
         payload["targetTempF"] = (
             int(temp_target_f) if temp_target_f is not None else _RAIL_TEMP_LOW_F
         )
         payload["targetHumi"] = int(humidity_target) if humidity_target is not None else 0
         payload["targetTSwitch"] = 1
         payload["targetHumiSwitch"] = 1
-        payload["targetVpdSwitch"] = 1
-        payload["targetVpd"] = 0
     else:
         # Auto-trigger: settingMode=0, setSelect=1. Named thresholds active; unused
         # families parked at rails with switch=0.
@@ -416,18 +422,11 @@ def _apply_auto(
             payload["autoLowHumi"] = _RAIL_HUMI_LOW
             payload["autoLowHumiSwitch"] = 0
 
-        # VPD family parked at rails (switches stay 1 per captured Auto-trigger signature).
-        payload["highVpd"] = _RAIL_VPD_HIGH
-        payload["highVpdSwitch"] = 1
-        payload["lowVpd"] = _RAIL_VPD_LOW
-        payload["lowVpdSwitch"] = 1
-        # Target family parked at rails with switches=1.
+        # Target family parked at rails with switches=1 (captured Auto-trigger signature).
         payload["targetTempF"] = _RAIL_TEMP_LOW_F
         payload["targetTSwitch"] = 1
         payload["targetHumiSwitch"] = 1
-        payload["targetVpdSwitch"] = 1
         payload["targetHumi"] = 0
-        payload["targetVpd"] = 0
 
 
 def _apply_vpd(
@@ -440,17 +439,38 @@ def _apply_vpd(
 ) -> None:
     """Apply the currentMode=6 (VPD) signature in place.
 
-    Target (settingMode=1): targetVpd = kpa*10, VPD trigger rails. Trigger (settingMode=0):
+    The auto temp/humidity families and the temp/humidity target families are INERT in VPD
+    mode — the app zeroes them (values at 0/32 rails, all switches 0). The old code left them
+    at the base defaults (90/110 with switches=1), which the app rendered as phantom triggers
+    on a VPD rule (#288 — verified live against the app's Clone Transplant VPD-target rule).
+
+    Target (settingMode=1): the app mirrors the setpoint into both targetVpd and highVpd
+    (highVpdSwitch=1) and leaves lowVpd=0 with lowVpdSwitch=0. Trigger (settingMode=0):
     highVpd/lowVpd = kpa*10 with switch=1; the unused direction parked at its rail/switch=0.
-    Auto temp/humidity fields are don't-care in VPD mode (left at base defaults).
     """
     payload["currentMode"] = _MODE_VPD
+
+    # Zero the auto + temp/humidity-target families (inert in VPD mode; see docstring / #288).
+    payload["autoHighHumi"] = 0
+    payload["autoLowHumi"] = 0
+    payload["autoHighHumiSwitch"] = 0
+    payload["autoLowHumiSwitch"] = 0
+    payload["autoHighTempF"] = _RAIL_TEMP_LOW_F
+    payload["autoLowTempF"] = _RAIL_TEMP_LOW_F
+    payload["autoHighTempC"] = 0
+    payload["autoLowTempC"] = 0
+    payload["autoHighTempSwitch"] = 0
+    payload["autoLowTempSwitch"] = 0
+    payload["targetHumi"] = 0
+    payload["targetHumiSwitch"] = 0
+    payload["targetTempF"] = _RAIL_TEMP_LOW_F
+    payload["targetTSwitch"] = 0
 
     if control_style == "trigger":
         payload["settingMode"] = 0
         payload["setSelect"] = 0
         payload["targetVpd"] = 0
-        payload["targetVpdSwitch"] = 1
+        payload["targetVpdSwitch"] = 0
         if vpd_high is not None:
             payload["highVpd"] = round(float(vpd_high) * 10)
             payload["highVpdSwitch"] = 1
@@ -464,15 +484,16 @@ def _apply_vpd(
             payload["lowVpd"] = _RAIL_VPD_LOW
             payload["lowVpdSwitch"] = 0
     else:
-        # VPD-target (default): settingMode=1, setSelect=0. VPD trigger family at rails.
+        # VPD-target: mirror the setpoint into targetVpd + highVpd; lowVpd off (captured sig).
         payload["settingMode"] = 1
         payload["setSelect"] = 0
-        payload["targetVpd"] = round(float(vpd_target) * 10) if vpd_target is not None else 0
+        tgt = round(float(vpd_target) * 10) if vpd_target is not None else 0
+        payload["targetVpd"] = tgt
         payload["targetVpdSwitch"] = 1
-        payload["highVpd"] = _RAIL_VPD_HIGH
+        payload["highVpd"] = tgt
         payload["highVpdSwitch"] = 1
-        payload["lowVpd"] = _RAIL_VPD_LOW
-        payload["lowVpdSwitch"] = 1
+        payload["lowVpd"] = 0
+        payload["lowVpdSwitch"] = 0
 
 
 def build_add_groups_payload(

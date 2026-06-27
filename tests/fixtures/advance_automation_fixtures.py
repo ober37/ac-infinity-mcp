@@ -69,8 +69,9 @@ MOCK_RULE_HUMIDITY_SETPOINT = {
     "autoLowTempF": 32, "autoHighTempF": 194, "autoLowTempC": 0, "autoHighTempC": 90,
     "autoLowTempSwitch": 1, "autoHighTempSwitch": 1,
     "autoLowHumi": 0, "autoHighHumi": 100, "autoLowHumiSwitch": 1, "autoHighHumiSwitch": 1,
-    "lowVpd": 0, "highVpd": 99, "lowVpdSwitch": 1, "highVpdSwitch": 1, "targetVpd": 0,
-    "targetTSwitch": 1, "targetHumiSwitch": 1, "targetVpdSwitch": 1,
+    # VPD family is zeroed in Auto mode (real app signature; #288).
+    "lowVpd": 0, "highVpd": 0, "lowVpdSwitch": 0, "highVpdSwitch": 0, "targetVpd": 0,
+    "targetTSwitch": 1, "targetHumiSwitch": 1, "targetVpdSwitch": 0,
     "temperatureFBuff": 0, "temperatureFTrans": 0, "humidityBuff": 0, "humidityTrans": 0,
     "vpdBuff": 0, "vpdTrans": 0,
     "cycleOn": 0, "cycleOff": 0, "onTimeSwitch": 0,
@@ -86,8 +87,9 @@ MOCK_RULE_TEMPERATURE_TRIGGER = {
     "autoLowTempF": 76, "autoHighTempF": 194, "autoLowTempC": 0, "autoHighTempC": 90,
     "autoLowTempSwitch": 1, "autoHighTempSwitch": 0,
     "autoLowHumi": 0, "autoHighHumi": 100, "autoLowHumiSwitch": 0, "autoHighHumiSwitch": 0,
-    "lowVpd": 0, "highVpd": 99, "lowVpdSwitch": 1, "highVpdSwitch": 1, "targetVpd": 0,
-    "targetTSwitch": 1, "targetHumiSwitch": 1, "targetVpdSwitch": 1,
+    # VPD family is zeroed in Auto mode (real app signature; #288).
+    "lowVpd": 0, "highVpd": 0, "lowVpdSwitch": 0, "highVpdSwitch": 0, "targetVpd": 0,
+    "targetTSwitch": 1, "targetHumiSwitch": 1, "targetVpdSwitch": 0,
     "temperatureFBuff": 0, "temperatureFTrans": 0, "humidityBuff": 0, "humidityTrans": 0,
     "vpdBuff": 0, "vpdTrans": 0,
     "cycleOn": 0, "cycleOff": 0, "onTimeSwitch": 0,
@@ -101,7 +103,8 @@ MOCK_RULE_VPD = {
     "setSelect": 0, "settingMode": 1, "targetVpd": 9,
     "autoLowTempF": 32, "autoHighTempF": 32, "autoLowTempSwitch": 0, "autoHighTempSwitch": 0,
     "autoLowHumi": 0, "autoHighHumi": 0, "autoLowHumiSwitch": 0, "autoHighHumiSwitch": 0,
-    "lowVpd": 0, "highVpd": 99, "lowVpdSwitch": 1, "highVpdSwitch": 1,
+    # Real Clone Transplant signature: setpoint mirrored into highVpd, low off (#288).
+    "lowVpd": 0, "highVpd": 9, "lowVpdSwitch": 0, "highVpdSwitch": 1,
     "targetTSwitch": 0, "targetHumiSwitch": 0, "targetVpdSwitch": 1, "targetTempF": 32,
     "targetHumi": 0, "temperatureFBuff": 0, "temperatureFTrans": 0,
     "humidityBuff": 0, "humidityTrans": 0, "vpdBuff": 0, "vpdTrans": 0,
