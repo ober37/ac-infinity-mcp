@@ -1456,6 +1456,28 @@ rules (capture program "0624", device 8T4TC, 2026-06-24):
 - **Buffer vs transition (per sensor, mutually exclusive):** `*_buffer` → `temperatureFBuff` / `humidityBuff` / `vpdBuff`; `*_transition` → `temperatureFTrans` / `humidityTrans` / `vpdTrans`. Distinguished purely by which family is non-zero. VPD buffer/transition are stored ÷10 like the VPD value.
 - **°C drift (do NOT derive):** the app stores the display-unit value (°F) and **parks the other unit at its rail** (e.g. `autoHighTempF=85` pairs with `autoHighTempC=90`, *not* 29 °C). The encoder mirrors the rails verbatim — `_RAIL_TEMP_HIGH_C=90` / `_RAIL_TEMP_LOW_C=0` — rather than converting.
 
+**Cross-mode switches MUST be zeroed — the app renders phantom triggers otherwise (#288).**
+The per-mode field signature was corrected after a live read-back diff against the user's own
+app-made rules (Gate 5, 2026-06-27). The earlier encoder parked the *other* mode's sensor
+families at their rails with **switches left = 1**; the controller stored that faithfully, but
+the app then rendered those parked rails as **phantom high/low triggers** on a rule that was
+supposed to be a clean target/VPD rule. The fix: when writing one mode, zero the families that
+belong to the other mode (value 0/rail **and** switch 0). The verified per-mode signatures
+(`client.py` `_apply_vpd` / `_apply_auto`):
+
+| Mode | Active families (switch=1) | Zeroed families (value 0/rail, switch=0) |
+|---|---|---|
+| **VPD-target** (`currentMode=6`, `settingMode=1`) | `targetVpd`=kPa×10 (`targetVpdSwitch=1`); `highVpd`=same kPa×10 (`highVpdSwitch=1`); `lowVpd`=0 (`lowVpdSwitch=0`) | All auto temp/humidity (`autoHigh/LowTempF/C`, `autoHigh/LowHumi`); both temp/humidity targets (`targetTempF`, `targetHumi`) |
+| **VPD-trigger** (`currentMode=6`, `settingMode=0`) | `highVpd`/`lowVpd`=kPa×10 with matching switch; unused direction parked, switch=0; `targetVpd=0`, `targetVpdSwitch=0` | Same auto + temp/humidity-target families as above |
+| **Auto** (`currentMode=4`, target or trigger) | The relevant temp/humidity target or trigger families (see compositional list above) | The **entire VPD family** — `highVpd`/`lowVpd`/`targetVpd` all 0 with all VPD switches 0 |
+
+Key points: (1) VPD-target **mirrors** the setpoint into both `targetVpd` and `highVpd` (with
+`highVpdSwitch=1`) while `lowVpd` stays off — this is the app's own signature, not an arbitrary
+choice. (2) In Auto mode the VPD family is fully inert (all 0/switch 0), not parked at the 99
+rail. These were derived by diffing the encoder output against live read-back of the user's
+real app rules, then verified live — a class of bug the mock-based unit tests could not catch
+(the mocks asserted the encoder's *own* output, not the app's ground truth).
+
 **Cycle units — `cycleOn`/`cycleOff` are stored in SECONDS (discovered Issue #284).** The
 controller stores Cycle on/off durations in **seconds**; the app displays **minutes =
 seconds ÷ 60**. The Groups encoder writes `cycle_on_minutes × 60` and the decoder shows
@@ -1483,6 +1505,31 @@ bit6=Sun), bit 7 (128) = continuous flag. Confirmed values:
 `onTimeSwitch` is **not** the continuous flag — `switchTime` bit 7 is (Quirk 21 covers the
 read-side `onTimeSwitch` interpretation). The earlier `switchTime=255 → Continuous` note
 (Quirk 18) is the same fact: `255` = all-days bits *plus* the continuous bit.
+
+**Continuous is the default when no schedule is given (#287).** When a rule is created or added
+with **no schedule at all** — `begin_time` and `end_time` both omitted (and for
+`add_automation_rule`, `days` also omitted and `continuous` left False) — the tools default to
+the **continuous 24/7 toggle (`switchTime=255`)**, matching the app's own default, *not* a
+00:00–23:59 windowed rule. Any explicit signal — a `begin_time`/`end_time` window, a `days`
+spec, or `continuous=True` — is honored as given. `create_advance_automation`'s response reads
+`"Runs continuously (24/7)"` and reports `begin_time`/`end_time` as `"continuous"` in this case.
+(`begin_time`/`end_time` are `int | None` on both tools; an explicit window still validates to
+0–1439 or the 255 always-active sentinel.)
+
+**Per-port target/setpoint capability — gate on `modeTye`, never `devType` (#288).**
+`devInfoListAll` exposes a per-port `modeTye` field (note the API's typo — *not* `modeType`):
+observed `15` = target-capable (UIS Pro+ / AI firmware), `0` = legacy port with **no
+target/setpoint support**. The capability is **per-port**: a single `devType=22` controller
+mixes `0` and `15` across its ports, so a target write must **never** be gated by `devType`.
+The tools that issue a target/hold write — `create_advance_automation`/`add_automation_rule`
+with `control_style="target"`, `update_automation_rule` resolving to target, `set_vpd_automation`
+(always a VPD target), and `apply_grow_stage_template` (sets a VPD target) — first check the
+governed ports' `modeTye`. If any governed port reports `modeTye == 0`, the write is rejected
+with a friendly *"doesn't support target/hold mode on this controller — use high/low thresholds
+(trigger) instead"* message rather than producing a garbage rail-trigger rule. A port that does
+**not** report the field is treated as **capable** (never false-blocked), so a device that omits
+`modeTye` entirely is unaffected. Helpers: `_ports_without_target_support` /
+`_target_capability_error` in `server.py`.
 
 **Program = a `(groupNums, sortType)` slot; `addGroups` append is gated by `isFlag`.** A
 program is a shared `(groupNums, sortType)` **slot**, and its rules are entries with sequential
@@ -1580,13 +1627,13 @@ round-trip described above:
   forms (day names, `"all"`, `"weekdays"`, `"weekends"`) — an empty schedule would silently
   disable the rule.
 
-> **Behavior-verification caveat (Gate-5 pending):** The `currentMode` map, the per-mode field
-> signatures, the `currentMode=4` setpoint-vs-trigger authority (the `settingMode` vs `setSelect`
-> distinction), and the `targetVpd ÷10` factor are **storage-verified** — confirmed by reading
-> back what the server stored after a write to a throwaway **disabled** rule, with the active grow
-> never actuated. They are **not yet behavior-verified** — i.e. it is not yet confirmed that the
-> controller *acts* on these fields identically to how the AC Infinity app renders them. These are
-> the open Gate-5 behavioral checks for this phase. Newer fields returned by `getGroups`
+> **Behavior-verification status (Gate 5 passed 2026-06-27):** The `currentMode` map, the
+> per-mode field signatures (as corrected by #288 above), the `currentMode=4` setpoint-vs-trigger
+> authority (the `settingMode` vs `setSelect` distinction), and the `targetVpd ÷10` factor were
+> originally **storage-verified** (read-back of a write to a throwaway **disabled** rule) and are
+> now **behavior-verified**: the VPD-target and Auto signatures were diffed against the user's own
+> app-made rules via live read-back, the cross-mode-switch phantom-trigger leak was fixed, and the
+> full live battery (A1/A2/B/C1/C2/D1/D2/E) passed. Newer fields returned by `getGroups`
 > (`sensorModeData`, `triggerSwitch`, `triggerValue`, `targetSwitch`, `targetValue`, `fanLevel`,
 > `minLevel`) are `0`/`None` on all legacy entries — purpose unknown, likely AI+/newer-firmware
 > only. `currentMode=2` (Off) and a CO2 target field were not located on this device.
@@ -2336,7 +2383,7 @@ Switches the port to VPD mode (`atType=8`) and sets the VPD target.
 | `target_vpd` | `float` | Target VPD in kPa, range 0.1–3.0 |
 | `dry_run` | `bool` | Default `True` — returns payload without writing |
 
-**Validation:** `target_vpd` must be 0.1–3.0. Sub-0.1 kPa and over-3.0 kPa are rejected.
+**Validation:** `target_vpd` must be 0.1–3.0. Sub-0.1 kPa and over-3.0 kPa are rejected. Because this is a VPD **target/hold**, the port must support setpoints — a port reporting `modeTye == 0` is rejected with a "use high/low thresholds instead" message (#288 / Quirk 32).
 
 **Encoding:** `targetVpd = round(target_vpd × 10)` — e.g. 1.4 kPa → stored as 14 (Quirk 4 analogue for writes).
 Also sets `vpdSettingMode=1`, `targetVpdSwitch=1`, `atType=8`.
@@ -2671,6 +2718,8 @@ and `set_humidity_automation` in sequence using the VPD midpoint and full ranges
 | `stage` | `str` | One of: `clones`, `seedling`, `veg`, `early_flower`, `mid_flower`, `late_flower` |
 | `dry_run` | `bool` | Default `True` — returns payloads without writing |
 
+The template sets a VPD **target** (`vpdSettingMode=1`), so the port must support setpoints: a port reporting `modeTye == 0` is rejected with a "use high/low thresholds instead" message (#288 / Quirk 32).
+
 **Stage targets (VPD is the midpoint of the stage range):**
 | Stage | VPD (kPa) | Temp (°C) | Humidity (%) |
 |---|---|---|---|
@@ -2913,7 +2962,7 @@ Disable a currently enabled Advance Automation. No-ops if already disabled.
 
 ---
 
-### `create_advance_automation(device_id, name, on_speed, port, off_speed=0, begin_time=0, end_time=1439, mode="on", control_style=None, temp_high_f=None, temp_low_f=None, humidity_high=None, humidity_low=None, temp_target_f=None, humidity_target=None, vpd_target=None, vpd_high=None, vpd_low=None, cycle_on_minutes=None, cycle_off_minutes=None, dry_run=True)`
+### `create_advance_automation(device_id, name, on_speed, port, off_speed=0, begin_time=None, end_time=None, mode="on", control_style=None, temp_high_f=None, temp_low_f=None, humidity_high=None, humidity_low=None, temp_target_f=None, humidity_target=None, vpd_target=None, vpd_high=None, vpd_low=None, cycle_on_minutes=None, cycle_off_minutes=None, dry_run=True)`
 
 Create a new Advance Automation on a device. Defaults to `dry_run=True` for safety. Set `dry_run=False` to send the automation to the device. The port bitmask (`grouptDevType`) is computed automatically from the port number (Port N → 2^(N-1)).
 
@@ -2927,8 +2976,8 @@ The optional `mode` parameter sets the behavior of the automation's **first rule
 | `on_speed` | `int` | Fan speed when active (1–10) — becomes the rule's MAX level (`onSpeed`) |
 | `port` | `int` | 1-based port number the automation should control (1–8) |
 | `off_speed` | `int` | Minimum fan level when inactive (0–10) — becomes the rule's MIN level (`offSpeed`). Default: 0 |
-| `begin_time` | `int` | Schedule start as minutes since midnight (0–1439, or 255 = always active). Default: 0 (midnight) |
-| `end_time` | `int` | Schedule end as minutes since midnight (0–1439, or 255 = always active). Default: 1439 (23:59) |
+| `begin_time` | `int \| None` | Schedule start as minutes since midnight (0–1439, or 255 = always active). **Omit (with `end_time`) for a continuous 24/7 rule** — the app's default toggle (#287, Quirk 32) |
+| `end_time` | `int \| None` | Schedule end as minutes since midnight (0–1439, or 255 = always active). **Omit (with `begin_time`) for a continuous 24/7 rule** |
 | `mode` | `str` | First-rule behavior: `on` (default), `off`, `cycle`, `auto`, `vpd`. Default `"on"` is the legacy byte-identical path. |
 | `control_style` | `str \| None` | `target` or `trigger` — **required** for `mode="auto"` and `mode="vpd"` |
 | `temp_high_f` / `temp_low_f` | `int \| None` | Turn on above / below this °F (auto **trigger**) |
@@ -2998,14 +3047,14 @@ The optional `mode` parameter sets the behavior of the automation's **first rule
 - `port_name` — resolved from `devInfoListAll` for the given port number
 - `min_speed` — the port's configured minimum speed (read from `offSpead` in `getdevModeSettingList`); used by the device when the automation is inactive
 - `off_speed` — now sent to the device as the rule's MIN level (`offSpeed`); default `0`. (Earlier revisions discarded this parameter; the compositional rebuild wires it through.)
-- `begin_time` / `end_time` — returned as `"HH:MM"` formatted strings in the response (input is still minutes-since-midnight integer); use 255 for "always active" (maps to full-day range 0/1439)
-- `schedule_summary` — human-readable schedule description (e.g. `"Active 10:00 PM – 6:00 AM"` or `"Always active"`)
+- `begin_time` / `end_time` — returned as `"HH:MM"` formatted strings in the response (input is still minutes-since-midnight integer); use 255 for "always active" (maps to full-day range 0/1439). When both are **omitted** (continuous-default, #287) they are returned as the string `"continuous"`
+- `schedule_summary` — human-readable schedule description (e.g. `"Active 10:00 PM – 6:00 AM"`, `"Always active"`, or `"Runs continuously (24/7)"` when no schedule was given)
 - `automation_id` — server-assigned `advId`; present in live response for programmatic chaining only — do not surface to the user; reference the automation by `name` instead
 - `automation_id_note` — in-band reminder that `automation_id` is internal
 - `note` — present in dry_run response only; prompts user to confirm before creating
-- `switchTime` — always sent as `127` (binary `01111111`, all 7 days bitmask); value `255` causes the app to ignore the schedule and treat it as Continuous mode (see Quirk 18)
+- `switchTime` — `255` (Continuous, all-days bits + continuous bit) when no schedule is given (continuous-default, #287); otherwise `127` (all 7 days, binary `01111111`) for a windowed rule (see Quirk 18 / Quirk 32)
 
-**Validation:** `on_speed` 1–10; `off_speed` 0–10; `begin_time` and `end_time` each 0–1439 or both 255 (both must be 255 or neither); wrap-around windows (`begin_time > end_time`) are allowed; `name` must not be empty or all control characters.
+**Validation:** `on_speed` 1–10; `off_speed` 0–10; when a window is given, `begin_time` and `end_time` each 0–1439 or both 255 (both must be 255 or neither); omit both for a continuous 24/7 rule (#287); wrap-around windows (`begin_time > end_time`) are allowed; `name` must not be empty or all control characters. A `target` rule is rejected if the port reports `modeTye == 0` (#288, Quirk 32).
 
 ---
 
@@ -3098,7 +3147,7 @@ manual control. Ports in other automations are unaffected.
 
 ---
 
-### `add_automation_rule(device_id, program_name, ports, mode, control_style=None, min_level=0, max_level=10, temp_high_f=None, temp_low_f=None, humidity_high=None, humidity_low=None, temp_target_f=None, humidity_target=None, vpd_target=None, vpd_high=None, vpd_low=None, temp_buffer=None, temp_transition=None, humidity_buffer=None, humidity_transition=None, vpd_buffer=None, vpd_transition=None, cycle_on_minutes=None, cycle_off_minutes=None, begin_time=0, end_time=1439, days=None, continuous=False, dry_run=True)`
+### `add_automation_rule(device_id, program_name, ports, mode, control_style=None, min_level=0, max_level=10, temp_high_f=None, temp_low_f=None, humidity_high=None, humidity_low=None, temp_target_f=None, humidity_target=None, vpd_target=None, vpd_high=None, vpd_low=None, temp_buffer=None, temp_transition=None, humidity_buffer=None, humidity_transition=None, vpd_buffer=None, vpd_transition=None, cycle_on_minutes=None, cycle_off_minutes=None, begin_time=None, end_time=None, days=None, continuous=False, dry_run=True)`
 
 Append one rule to an existing Advance Automation program (matched by `program_name`). A **rule** is one schedule window + behavior for one or more ports inside that program. Defaults to `dry_run=True`. See Quirk 32 for the per-mode encoding.
 
@@ -3115,7 +3164,7 @@ The surface is **compositional**, mirroring the AC Infinity app's rule editor: a
 | `min_level` / `max_level` | `int` | Minimum (inactive) / maximum (active) fan level 0–10. Defaults 0 / 10. `MIN→offSpeed`, `MAX→onSpeed` |
 | `temp_high_f` / `temp_low_f` | `int \| None` | Turn on above / below this °F (auto **trigger**), 32–212 |
 | `humidity_high` / `humidity_low` | `int \| None` | Turn on above / below this % RH (auto **trigger**), 0–100 |
-| `temp_target_f` | `int \| None` | Hold this °F (auto **target**; device-gated) |
+| `temp_target_f` | `int \| None` | Hold this °F (auto **target**; device-gated — rejected if any port reports `modeTye == 0`, #288 / Quirk 32) |
 | `humidity_target` | `int \| None` | Hold this % RH (auto **target**) |
 | `vpd_target` | `float \| None` | Hold this kPa (vpd **target**, 0.0–9.9) |
 | `vpd_high` / `vpd_low` | `float \| None` | Turn on above / below this kPa (vpd **trigger**) |
@@ -3123,9 +3172,9 @@ The surface is **compositional**, mirroring the AC Infinity app's rule editor: a
 | `humidity_buffer` / `humidity_transition` | `int \| None` | Humidity deadband / ramp band % (auto). Mutually exclusive |
 | `vpd_buffer` / `vpd_transition` | `float \| None` | VPD deadband / ramp band kPa (vpd). Mutually exclusive |
 | `cycle_on_minutes` / `cycle_off_minutes` | `int \| None` | Minutes on / off (for `mode="cycle"`, 0–1439) |
-| `begin_time` / `end_time` | `int` | Window start / end, minutes since midnight (0–1439). **Wrap-around (begin > end) is permitted** — a lights-on window like 09:00→03:00 is allowed. Defaults 0 / 1439 |
-| `days` | `list[str] \| str \| None` | Day names (`mon`–`sun`), or `"all"` / `"weekdays"` / `"weekends"`. Default: all 7 days |
-| `continuous` | `bool` | Run 24/7, ignoring the window (sets `switchTime=255`). Default `False` |
+| `begin_time` / `end_time` | `int \| None` | Window start / end, minutes since midnight (0–1439). **Wrap-around (begin > end) is permitted** — a lights-on window like 09:00→03:00 is allowed. **Omit both** (with `days` omitted and `continuous=False`) for a continuous 24/7 rule — the app's default (#287) |
+| `days` | `list[str] \| str \| None` | Day names (`mon`–`sun`), or `"all"` / `"weekdays"` / `"weekends"`. Default: all 7 days. Supplying any value opts out of the continuous-default |
+| `continuous` | `bool` | Run 24/7, ignoring the window (sets `switchTime=255`). Default `False`. Note: when no schedule signal is given at all, the rule defaults to continuous anyway (#287) |
 | `dry_run` | `bool` | Default `True` — previews the rule without sending |
 
 **Buffer vs transition:** a *buffer* is a deadband (the fan holds until the reading crosses the band); a *transition* ramps fan speed across the band. Pick at most one per sensor.
@@ -3180,14 +3229,14 @@ Two edit shapes:
 | `control_style` | `str \| None` | `target` or `trigger` (when changing mode to `auto`/`vpd`) |
 | `min_level` / `max_level` | `int \| None` | New minimum (inactive) / maximum (active) fan level 0–10 |
 | `temp_high_f` / `temp_low_f` / `humidity_high` / `humidity_low` | `int \| None` | New auto **trigger** thresholds (°F / % RH) |
-| `temp_target_f` / `humidity_target` | `int \| None` | New auto **target** setpoints |
+| `temp_target_f` / `humidity_target` | `int \| None` | New auto **target** setpoints (target rules are gated on `modeTye` — a port reporting `modeTye == 0` is rejected, #288 / Quirk 32) |
 | `vpd_target` / `vpd_high` / `vpd_low` | `float \| None` | New VPD target / thresholds (kPa) |
 | `temp_buffer` / `temp_transition` / `humidity_buffer` / `humidity_transition` | `int \| None` | New buffer / transition bands (auto; buffer XOR transition per sensor) |
 | `vpd_buffer` / `vpd_transition` | `float \| None` | New VPD buffer / transition band kPa (vpd; XOR) |
 | `cycle_on_minutes` / `cycle_off_minutes` | `int \| None` | New cycle on/off minutes |
 | `new_begin_time` / `new_end_time` | `int \| None` | **New** window (minutes since midnight, 0–1439) to move the rule to |
 | `days` | `list[str] \| str \| None` | New day spec (day names, `"all"`, `"weekdays"`, `"weekends"`) |
-| `continuous` | `bool \| None` | Run 24/7 (ignores the window) |
+| `continuous` | `bool \| None` | `True` runs 24/7 (sets `switchTime` bit 7); `False` clears the 24/7 bit while keeping the existing day pattern (e.g. 255→127); omit (`None`) to leave the schedule unchanged (Quirk 32) |
 | `dry_run` | `bool` | Default `True` — previews the change without sending |
 
 **Response (more than one rule matches):**

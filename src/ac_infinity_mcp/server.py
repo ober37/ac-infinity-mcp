@@ -2752,6 +2752,10 @@ async def set_vpd_automation(
         dry_run: If True (default), returns the payload that would be sent
             without writing.
 
+    This is a target/hold write, so the port must support setpoints. A port that
+    does not report target capability is rejected with guidance to use high/low
+    thresholds instead.
+
     Returns:
         JSON with action, device_id, port, target_vpd_kpa, dry_run,
         controller_type, sent, and payload (when dry_run=True).
