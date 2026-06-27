@@ -524,6 +524,15 @@ def _validate_auto(
     humidity_transition: int | None,
 ) -> str | None:
     """Validate Auto-mode sensor params, populating ``kwargs`` in place. Returns err or None."""
+    # #291: a temperature setpoint ("hold temp at X") is not supported by the AC Infinity app
+    # in Auto mode — it renders as thresholds, and no app-made rule ever sets one (targetTempF
+    # is always the rail). The encoder path was inferred without ground truth and is wrong.
+    # Reject with a redirect; humidity target and VPD target are supported and unaffected.
+    if temp_target_f is not None:
+        return _err(
+            "Holding a temperature setpoint isn't supported — use temperature high/low"
+            " thresholds (a trigger), or a VPD target, instead."
+        )
     is_trigger_param = any(
         v is not None for v in (temp_high_f, temp_low_f, humidity_high, humidity_low)
     )
@@ -4002,7 +4011,9 @@ async def create_advance_automation(
         temp_low_f: Turn on below this °F (auto trigger).
         humidity_high: Turn on above this % (auto trigger).
         humidity_low: Turn on below this % (auto trigger).
-        temp_target_f: Hold this °F (auto target; device-gated).
+        temp_target_f: NOT SUPPORTED — holding a temperature setpoint isn't offered by the
+            AC Infinity app and renders as thresholds; this is rejected. Use temperature
+            high/low thresholds (a trigger), or a VPD target, instead.
         humidity_target: Hold this % (auto target).
         vpd_target: Hold this kPa (vpd target).
         vpd_high: Turn on above this kPa (vpd trigger).
@@ -4455,7 +4466,9 @@ async def add_automation_rule(
         temp_low_f: Turn on below this °F (auto trigger).
         humidity_high: Turn on above this % (auto trigger).
         humidity_low: Turn on below this % (auto trigger).
-        temp_target_f: Hold this °F (auto target; device-gated).
+        temp_target_f: NOT SUPPORTED — holding a temperature setpoint isn't offered by the
+            AC Infinity app and renders as thresholds; this is rejected. Use temperature
+            high/low thresholds (a trigger), or a VPD target, instead.
         humidity_target: Hold this % (auto target).
         vpd_target: Hold this kPa (vpd target).
         vpd_high: Turn on above this kPa (vpd trigger).

@@ -1531,6 +1531,15 @@ with a friendly *"doesn't support target/hold mode on this controller — use hi
 `modeTye` entirely is unaffected. Helpers: `_ports_without_target_support` /
 `_target_capability_error` in `server.py`.
 
+**Temperature target is unsupported (#291).** Separately from the per-port `modeTye` gate, a
+*temperature* setpoint (`temp_target_f`, "hold temp at X") is rejected outright in `_validate_auto`
+for every tool. The AC Infinity app offers no temperature-hold in Auto mode and renders such a
+rule as thresholds; across real app-made rules `targetTempF` is **always** the 32 rail (never a
+live setpoint), and the encoder path for it was inferred without a captured sample. Humidity
+target and VPD target are supported and verified. The rejection redirects to temperature high/low
+thresholds (a trigger) or a VPD target. (A real temperature-hold, if it exists for specific
+hardware like a heater load, is a future enhancement gated on a captured app sample.)
+
 **Program = a `(groupNums, sortType)` slot; `addGroups` append is gated by `isFlag`.** A
 program is a shared `(groupNums, sortType)` **slot**, and its rules are entries with sequential
 `subNumber` (0, 1, 2, …). `addGroups` builds **either** a brand-new program **or** appends a

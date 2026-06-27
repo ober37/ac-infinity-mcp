@@ -6093,6 +6093,39 @@ async def test_create_target_on_capable_port_allowed(mock_client):
     assert "error" not in json.loads(result)
 
 
+# ---- #291: temperature target is unsupported (renders as thresholds) ----
+
+
+async def test_create_temp_target_rejected_unsupported(mock_client):
+    """A temperature setpoint is rejected even on a target-capable port (#291)."""
+    mock_client.get_devices.return_value = [_device_with_modetye({1: 15})]
+    result = await create_advance_automation(
+        "C58ZA", "Hold", on_speed=5, port=1, mode="auto", control_style="target",
+        temp_target_f=75, dry_run=True,
+    )
+    assert "temperature setpoint isn't supported" in json.loads(result)["error"]
+    mock_client.create_advance_automation.assert_not_called()
+
+
+async def test_add_temp_target_rejected_unsupported(mock_client):
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await add_automation_rule(
+        "C58ZA", "Seedling", [1], "auto", control_style="target", temp_target_f=75, dry_run=True,
+    )
+    assert "temperature setpoint isn't supported" in json.loads(result)["error"]
+    mock_client.create_advance_automation.assert_not_called()
+
+
+async def test_humidity_target_still_allowed(mock_client):
+    """Humidity target remains supported (only temperature target is rejected)."""
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await add_automation_rule(
+        "C58ZA", "Seedling", [1], "auto", control_style="target", humidity_target=55,
+        dry_run=True,
+    )
+    assert "error" not in json.loads(result)
+
+
 async def test_add_target_on_incapable_port_rejected(mock_client):
     mock_client.get_devices.return_value = [_device_with_modetye({1: 0})]
     mock_client.get_advance_automations.return_value = _seedling_program()
@@ -10264,8 +10297,7 @@ async def test_update_rule_trigger_on_rail_rejected(mock_client):
 
 
 @pytest.mark.parametrize("kwargs", [
-    {"humidity_target": 0},   # _RAIL_TARGET_HUMI
-    {"temp_target_f": 32},    # _RAIL_TARGET_TEMP_F
+    {"humidity_target": 0},   # _RAIL_TARGET_HUMI (temp_target_f is rejected outright, #291)
 ])
 async def test_add_rule_target_on_rail_rejected(mock_client, kwargs):
     """A target sitting on its inactive rail decodes back as 'no rule set' → rejected."""
@@ -10392,8 +10424,8 @@ async def test_update_rule_same_mode_vpd_target_on_trigger_rejected(mock_client)
     (2, (540, 180), dict(temp_transition=2), "temperatureFTrans", 2),
     (2, (540, 180), dict(humidity_buffer=5), "humidityBuff", 5),
     (2, (540, 180), dict(humidity_transition=4), "humidityTrans", 4),
-    # port-1 humidity-target rule
-    (1, (180, 540), dict(temp_target_f=72), "targetTempF", 72),
+    # port-1 humidity-target rule (temp target is unsupported, #291 — use humidity target)
+    (1, (180, 540), dict(humidity_target=70), "targetHumi", 70),
 ])
 async def test_update_rule_same_mode_overlay_carries_value(
     mock_client, port, window, kwargs, field, expected
@@ -10577,9 +10609,11 @@ _VRI_REJECT_CASES = [
     # auto buffer XOR transition
     ("auto", {"control_style": "trigger", "temp_high_f": 80, "temp_buffer": 3,
               "temp_transition": 2}, True, "buffer or a transition"),
-    # auto target/trigger mutual exclusion (temperature)
-    ("auto", {"control_style": "trigger", "temp_target_f": 70, "temp_high_f": 80}, True,
+    # auto target/trigger mutual exclusion (humidity; temp target is rejected outright, #291)
+    ("auto", {"control_style": "trigger", "humidity_target": 60, "humidity_high": 80}, True,
      "pick one"),
+    # temperature target is unsupported (#291)
+    ("auto", {"control_style": "target", "temp_target_f": 72}, True, "isn't supported"),
     # auto trigger with no threshold
     ("auto", {"control_style": "trigger"}, True, "at least one"),
     # auto target with no target
@@ -10621,7 +10655,6 @@ _VRI_PASS_CASES = [
     ("cycle", {"cycle_on_minutes": 30, "cycle_off_minutes": 15}, True),
     ("auto", {"control_style": "trigger", "temp_high_f": 80, "humidity_low": 50}, True),
     ("auto", {"control_style": "target", "humidity_target": 65}, True),
-    ("auto", {"control_style": "target", "temp_target_f": 72}, True),
     ("vpd", {"control_style": "target", "vpd_target": 1.2}, True),
     ("vpd", {"control_style": "trigger", "vpd_high": 1.5, "vpd_low": 0.8}, True),
     # boundary: min == max allowed
