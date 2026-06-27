@@ -26,6 +26,12 @@ from ac_infinity_mcp.analytics import (
     detect_trends,
 )  # noqa: E402 (ruff isort: private names _ZERO_LOAD_DEV_TYPES/_filter_…/_parse_… sorted before public)
 from ac_infinity_mcp.automation import (
+    _RAIL_HUMI_HIGH,
+    _RAIL_HUMI_LOW,
+    _RAIL_TEMP_HIGH_F,
+    _RAIL_TEMP_LOW_F,
+    _RAIL_VPD_HIGH,
+    _RAIL_VPD_LOW,
     _build_advance_conflict_response,
     _decode_rule,  # noqa: F401 — re-exported for test compatibility
     _find_governing_automation,
@@ -392,6 +398,10 @@ def _validate_rule_inputs(
 
     # Schedule (days → switchTime). continuous overrides days.
     if days is not None and not isinstance(days, str):
+        if not days:
+            return None, _err(
+                "days can't be empty — give day names or 'all'/'weekdays'/'weekends'"
+            )
         for tok in days:
             if str(tok).strip().lower() not in _DAY_TOKENS:
                 return None, _err(
@@ -506,6 +516,18 @@ def _validate_auto(
     if humidity_low is not None and humidity_high is not None and humidity_low >= humidity_high:
         return _err("humidity_low must be less than humidity_high")
 
+    # A trigger threshold sitting on its inactive rail decodes back as "no rule set" — reject
+    # it so the write is never silently lossy (a trigger above 100% RH / below freezing / at
+    # the temp ceiling can never fire anyway).
+    if temp_high_f is not None and temp_high_f >= _RAIL_TEMP_HIGH_F:
+        return _err(f"temp_high_f must be below {_RAIL_TEMP_HIGH_F}°F to trigger")
+    if temp_low_f is not None and temp_low_f <= _RAIL_TEMP_LOW_F:
+        return _err(f"temp_low_f must be above {_RAIL_TEMP_LOW_F}°F to trigger")
+    if humidity_high is not None and humidity_high >= _RAIL_HUMI_HIGH:
+        return _err(f"humidity_high must be below {_RAIL_HUMI_HIGH}% to trigger")
+    if humidity_low is not None and humidity_low <= _RAIL_HUMI_LOW:
+        return _err(f"humidity_low must be above {_RAIL_HUMI_LOW}% to trigger")
+
     # Buffer XOR transition per sensor.
     if temp_buffer is not None and temp_transition is not None:
         return _err("set either a temperature buffer or a transition, not both")
@@ -565,6 +587,12 @@ def _validate_vpd(
             return _err(f"{label} must be {_VPD_MIN}–{_VPD_MAX} kPa")
     if vpd_low is not None and vpd_high is not None and vpd_low >= vpd_high:
         return _err("vpd_low must be less than vpd_high")
+    # A VPD trigger on its inactive rail (highVpd≥99 i.e. ≥9.9 kPa, or lowVpd≤0) decodes back
+    # as "no rule set" — reject the lossy write. VPD rails are stored ×10.
+    if vpd_high is not None and round(vpd_high * 10) >= _RAIL_VPD_HIGH:
+        return _err(f"vpd_high must be below {_RAIL_VPD_HIGH / 10:g} kPa to trigger")
+    if vpd_low is not None and round(vpd_low * 10) <= _RAIL_VPD_LOW:
+        return _err(f"vpd_low must be above {_RAIL_VPD_LOW / 10:g} kPa to trigger")
     if vpd_buffer is not None and vpd_transition is not None:
         return _err("set either a VPD buffer or a transition, not both")
     for label, val in (("vpd_buffer", vpd_buffer), ("vpd_transition", vpd_transition)):
@@ -4703,7 +4731,9 @@ async def update_automation_rule(
             cycle_on_minutes, cycle_off_minutes,
             new_begin_time, new_end_time, days,
         ]
-        if all(f is None for f in change_fields) and not continuous:
+        # `continuous` is bool | None here, so an explicit False ("stop running 24/7") is a
+        # real change, distinct from the None default. Only None counts as "not supplied".
+        if all(f is None for f in change_fields) and continuous is None:
             return json.dumps({
                 "error": "Nothing to change — supply at least one field to update."
             })
@@ -4791,12 +4821,26 @@ async def update_automation_rule(
             return verr
         assert kwargs is not None
 
+        # Turn OFF continuous: _validate only emits switch_time for days or continuous=True,
+        # so an explicit continuous=False (with no days) clears the continuous bit on the
+        # live schedule while preserving its day pattern (e.g. 255 → 127, not a reset to all).
+        if continuous is False and days is None and "switch_time" not in kwargs:
+            kwargs["switch_time"] = (
+                int(match.get("switchTime") or 127) & ~_SWITCHTIME_CONTINUOUS_BIT
+            )
+
         # Read-before-write: start from the live rule body, overlay only changed fields.
         body = copy.deepcopy(match)
         if min_level is not None:
             body["offSpeed"] = min_level
         if max_level is not None:
             body["onSpeed"] = max_level
+        # One-sided speed update must not invert the rule: cross-check against the live body,
+        # since _validate's min<=max check only fires when BOTH levels are supplied at once.
+        if int(body.get("offSpeed") or 0) > int(body.get("onSpeed") or 0):
+            return json.dumps({
+                "error": "min_level must be less than or equal to max_level"
+            })
         if new_begin_time is not None:
             body["beginTime"] = new_begin_time
         if new_end_time is not None:
