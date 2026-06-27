@@ -4816,7 +4816,8 @@ async def update_automation_rule(
         max_level: New maximum/active fan level (0–10).
         temp_high_f / temp_low_f: New temperature thresholds °F (auto trigger).
         humidity_high / humidity_low: New humidity thresholds % (auto trigger).
-        temp_target_f / humidity_target: New auto target setpoints.
+        humidity_target: New auto humidity target setpoint.
+        temp_target_f: NOT SUPPORTED (rejected) — use temperature thresholds or a VPD target.
         vpd_target / vpd_high / vpd_low: New VPD target or thresholds (kPa).
         temp_buffer / temp_transition / humidity_buffer / humidity_transition: New
             buffer/transition bands (auto; buffer XOR transition per sensor).

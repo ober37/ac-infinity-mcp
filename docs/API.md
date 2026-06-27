@@ -1450,7 +1450,7 @@ rules (capture program "0624", device 8T4TC, 2026-06-24):
 
 - **Speed range:** `max_level` → `onSpeed`; `min_level` → `offSpeed`. (`minLevel`/`fanLevel` unused = 0.)
 - **`control_style`:** `target` → `settingMode=1, setSelect=0`; `trigger` → `settingMode=0, setSelect=1` (Auto trigger) / `setSelect=0` (VPD trigger). Target/trigger are mutually exclusive per sensor.
-- **Auto target:** `humidity_target` → `targetHumi`, `targetHumiSwitch=1`; `temp_target_f` → `targetTempF` (**device-gated** — a humidifier exposes humidity target only; no general temp target). Off-target rails are parked at their sentinel values with switches=1.
+- **Auto target:** `humidity_target` → `targetHumi`, `targetHumiSwitch=1`. `temp_target_f` is **rejected outright** (unsupported — no temperature hold in the app; #291). Off-target rails are parked at their sentinel values with switches=1.
 - **Auto trigger:** `temp_high_f`/`temp_low_f` → `autoHighTempF`/`autoLowTempF` with the matching `auto*TempSwitch=1`; `humidity_high`/`humidity_low` → `autoHighHumi`/`autoLowHumi` with `auto*HumiSwitch=1`. The unused direction's switch → `0`. The server stores switches **as sent** — single-direction triggers are reliable at the rule level.
 - **VPD:** `vpd_target` → `targetVpd=round(kPa×10)`, `targetVpdSwitch=1`, `settingMode=1`; `vpd_high`/`vpd_low` → `highVpd`/`lowVpd` = `round(kPa×10)` with matching switch, `settingMode=0`. VPD **target has no direction** (single kPa value). `targetVpd` is **÷10** — `targetVpd=9` → 0.9 kPa (same scaling as the alarm `highVpd` field and the legacy `addDevMode` quirk).
 - **Buffer vs transition (per sensor, mutually exclusive):** `*_buffer` → `temperatureFBuff` / `humidityBuff` / `vpdBuff`; `*_transition` → `temperatureFTrans` / `humidityTrans` / `vpdTrans`. Distinguished purely by which family is non-zero. VPD buffer/transition are stored ÷10 like the VPD value.
@@ -1614,8 +1614,9 @@ round-trip described above:
 - **Rail-collision rejection.** A trigger threshold *or* an auto target written **on its
   inactive rail** decodes back as "no rule set" — a silent no-op. The tools reject these values
   up front: `temp_high_f ≥ 194`, `temp_low_f ≤ 32`, `humidity_high ≥ 100`, `humidity_low ≤ 0`,
-  `vpd_high ≥ 9.9 kPa`, `vpd_low ≤ 0`, `temp_target_f ≤ 32`, `humidity_target ≤ 0`. **VPD
-  target has no rail** (any positive kPa is a real setpoint), so it is exempt. Rail constants
+  `vpd_high ≥ 9.9 kPa`, `vpd_low ≤ 0`, `humidity_target ≤ 0`. **VPD target has no rail** (any
+  positive kPa is a real setpoint), so it is exempt; `temp_target_f` is rejected outright as
+  unsupported (#291), so its rail check is moot. Rail constants
   live in `automation.py` (`_RAIL_TEMP_HIGH_F=194`, `_RAIL_TEMP_LOW_F=32`, `_RAIL_HUMI_HIGH=100`,
   `_RAIL_HUMI_LOW=0`, `_RAIL_VPD_HIGH=99` i.e. 9.9 kPa, `_RAIL_VPD_LOW=0`, `_RAIL_TARGET_TEMP_F=32`,
   `_RAIL_TARGET_HUMI=0`). This is the same rail family the encoder parks off-direction values on
@@ -2991,7 +2992,7 @@ The optional `mode` parameter sets the behavior of the automation's **first rule
 | `control_style` | `str \| None` | `target` or `trigger` — **required** for `mode="auto"` and `mode="vpd"` |
 | `temp_high_f` / `temp_low_f` | `int \| None` | Turn on above / below this °F (auto **trigger**) |
 | `humidity_high` / `humidity_low` | `int \| None` | Turn on above / below this % RH (auto **trigger**) |
-| `temp_target_f` | `int \| None` | Hold this °F (auto **target**; device-gated — see Quirk 32) |
+| `temp_target_f` | `int \| None` | **NOT SUPPORTED** — temperature hold isn't offered by the app; rejected with a redirect to thresholds or a VPD target (#291) |
 | `humidity_target` | `int \| None` | Hold this % RH (auto **target**) |
 | `vpd_target` | `float \| None` | Hold this kPa (vpd **target**, 0.0–9.9) |
 | `vpd_high` / `vpd_low` | `float \| None` | Turn on above / below this kPa (vpd **trigger**) |
@@ -3173,7 +3174,7 @@ The surface is **compositional**, mirroring the AC Infinity app's rule editor: a
 | `min_level` / `max_level` | `int` | Minimum (inactive) / maximum (active) fan level 0–10. Defaults 0 / 10. `MIN→offSpeed`, `MAX→onSpeed` |
 | `temp_high_f` / `temp_low_f` | `int \| None` | Turn on above / below this °F (auto **trigger**), 32–212 |
 | `humidity_high` / `humidity_low` | `int \| None` | Turn on above / below this % RH (auto **trigger**), 0–100 |
-| `temp_target_f` | `int \| None` | Hold this °F (auto **target**; device-gated — rejected if any port reports `modeTye == 0`, #288 / Quirk 32) |
+| `temp_target_f` | `int \| None` | **NOT SUPPORTED** — temperature hold isn't offered by the app; rejected with a redirect to thresholds or a VPD target (#291) |
 | `humidity_target` | `int \| None` | Hold this % RH (auto **target**) |
 | `vpd_target` | `float \| None` | Hold this kPa (vpd **target**, 0.0–9.9) |
 | `vpd_high` / `vpd_low` | `float \| None` | Turn on above / below this kPa (vpd **trigger**) |
@@ -3238,7 +3239,8 @@ Two edit shapes:
 | `control_style` | `str \| None` | `target` or `trigger` (when changing mode to `auto`/`vpd`) |
 | `min_level` / `max_level` | `int \| None` | New minimum (inactive) / maximum (active) fan level 0–10 |
 | `temp_high_f` / `temp_low_f` / `humidity_high` / `humidity_low` | `int \| None` | New auto **trigger** thresholds (°F / % RH) |
-| `temp_target_f` / `humidity_target` | `int \| None` | New auto **target** setpoints (target rules are gated on `modeTye` — a port reporting `modeTye == 0` is rejected, #288 / Quirk 32) |
+| `humidity_target` | `int \| None` | New auto humidity **target** setpoint (gated on `modeTye` — a port reporting `modeTye == 0` is rejected, #288 / Quirk 32) |
+| `temp_target_f` | `int \| None` | **NOT SUPPORTED** — rejected with a redirect to thresholds or a VPD target (#291) |
 | `vpd_target` / `vpd_high` / `vpd_low` | `float \| None` | New VPD target / thresholds (kPa) |
 | `temp_buffer` / `temp_transition` / `humidity_buffer` / `humidity_transition` | `int \| None` | New buffer / transition bands (auto; buffer XOR transition per sensor) |
 | `vpd_buffer` / `vpd_transition` | `float \| None` | New VPD buffer / transition band kPa (vpd; XOR) |
