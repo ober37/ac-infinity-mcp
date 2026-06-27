@@ -4717,7 +4717,8 @@ async def update_automation_rule(
         new_begin_time: New window start (0–1439).
         new_end_time: New window end (0–1439).
         days: New day spec (day names, "all", "weekdays", "weekends").
-        continuous: Run 24/7 (ignores the window).
+        continuous: True runs the rule 24/7 (ignores the window); False stops it running
+            24/7, keeping the existing day pattern. Omit to leave the schedule unchanged.
         dry_run: If True (default), previews the change without sending it.
 
     Returns:

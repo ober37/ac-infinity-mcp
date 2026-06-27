@@ -1547,6 +1547,38 @@ the intent was to remove a single rule — caught only by live/app Gate-5 testin
 deletes with `error 100001` ("busy"); the rejected rule remains **wedged** until the controller
 is restarted (power-cycle clears it). `delete_automation_rule` / `add_automation_rule` map
 `error 100001` to a grower-readable "controller is busy — wait and retry, or restart it" message.
+The same `100001` wedge can strike an **add/update** mid-write — the rule "may or may not have
+applied." Those tools surface a friendly "list the rules before retrying" message rather than
+asserting success or failure; the upstream code/text is never echoed.
+
+**Rule-write validation guards (added across Issue #284 review cycles).** These are
+input-validation rules enforced before any write, ground-truthed against the lossy storage
+round-trip described above:
+
+- **Rail-collision rejection.** A trigger threshold *or* an auto target written **on its
+  inactive rail** decodes back as "no rule set" — a silent no-op. The tools reject these values
+  up front: `temp_high_f ≥ 194`, `temp_low_f ≤ 32`, `humidity_high ≥ 100`, `humidity_low ≤ 0`,
+  `vpd_high ≥ 9.9 kPa`, `vpd_low ≤ 0`, `temp_target_f ≤ 32`, `humidity_target ≤ 0`. **VPD
+  target has no rail** (any positive kPa is a real setpoint), so it is exempt. Rail constants
+  live in `automation.py` (`_RAIL_TEMP_HIGH_F=194`, `_RAIL_TEMP_LOW_F=32`, `_RAIL_HUMI_HIGH=100`,
+  `_RAIL_HUMI_LOW=0`, `_RAIL_VPD_HIGH=99` i.e. 9.9 kPa, `_RAIL_VPD_LOW=0`, `_RAIL_TARGET_TEMP_F=32`,
+  `_RAIL_TARGET_HUMI=0`). This is the same rail family the encoder parks off-direction values on
+  (the °C-drift / off-target-rail behavior above): a value *equal to* the rail is
+  indistinguishable from "unset," so it is refused.
+- **`continuous=False` turns OFF 24/7.** On `update_automation_rule`, `continuous` is `bool | None`.
+  An explicit `continuous=False` (with no `days` given) **clears the continuous bit while
+  preserving the existing day pattern** — e.g. `switchTime 255 → 127`, not a reset to all-days.
+  Implemented as `live_switchTime & ~0x80`. `None` means "leave the schedule alone"; only
+  `continuous=True` *sets* the bit (→ 255).
+- **One-sided speed-inversion guard.** `_validate`'s `min_level ≤ max_level` check only fires when
+  **both** levels are supplied together. A one-sided update (only `min_level` or only `max_level`)
+  is therefore cross-checked against the live rule body so it cannot invert the rule
+  (`offSpeed > onSpeed`) — returning "The minimum speed can't be higher than the maximum speed."
+  The guard only engages when a level was actually supplied, so it never blocks an unrelated edit
+  on a rule whose live speeds were already inverted by some other writer.
+- **Empty `days` rejected.** `days=[]` (an empty list) is refused with a message naming the valid
+  forms (day names, `"all"`, `"weekdays"`, `"weekends"`) — an empty schedule would silently
+  disable the rule.
 
 > **Behavior-verification caveat (Gate-5 pending):** The `currentMode` map, the per-mode field
 > signatures, the `currentMode=4` setpoint-vs-trigger authority (the `settingMode` vs `setSelect`
