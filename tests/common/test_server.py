@@ -5992,9 +5992,133 @@ async def test_create_advance_automation_dry_run(mock_client):
     assert data["port"] == 1
     assert data["port_name"] == "Intake Fan"
     assert "note" in data
-    assert data["begin_time"] == "00:00"
-    assert data["end_time"] == "23:59"
+    # #287: no window given → continuous 24/7 by default (not a 00:00–23:59 schedule).
+    assert data["begin_time"] == "continuous"
+    assert data["end_time"] == "continuous"
+    assert data["schedule_summary"] == "Runs continuously (24/7)"
     mock_client.create_advance_automation.assert_not_called()
+
+
+async def test_create_advance_automation_explicit_window_still_scheduled(mock_client):
+    """#287: an explicit window is honored as a normal schedule, not overridden to continuous."""
+    result = await create_advance_automation(
+        "C58ZA", "Night Cycle", on_speed=3, port=1, begin_time=360, end_time=720, dry_run=True
+    )
+    data = json.loads(result)
+    assert data["begin_time"] == "06:00"
+    assert data["end_time"] == "12:00"
+    assert "continuous" not in data["schedule_summary"].lower()
+
+
+# ============ #287 continuous-default + #288 target-capability gating ============
+
+
+def _device_with_modetye(modetye_by_port: dict) -> dict:
+    """Deep copy of the legacy mock device with per-port modeTye set (#288 capability)."""
+    d = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    for p in d["deviceInfo"]["ports"]:
+        if p["port"] in modetye_by_port:
+            p["modeTye"] = modetye_by_port[p["port"]]
+    return d
+
+
+def test_ports_without_target_support_helper():
+    from ac_infinity_mcp.server import _ports_without_target_support
+    dev = _device_with_modetye({1: 0, 2: 15})
+    assert _ports_without_target_support(dev, [1]) == [1]      # modeTye 0 → no target
+    assert _ports_without_target_support(dev, [2]) == []       # modeTye 15 → target ok
+    assert _ports_without_target_support(dev, [1, 2]) == [1]   # only the incapable one
+
+
+def test_ports_without_target_support_missing_field_allows():
+    """A port that doesn't report modeTye is treated as capable (never false-blocked)."""
+    from ac_infinity_mcp.server import _ports_without_target_support
+    dev = copy.deepcopy(MOCK_DEVICE_LEGACY)  # no modeTye on any port
+    assert _ports_without_target_support(dev, [1, 2]) == []
+
+
+# ---- #287: no window → continuous 24/7 ----
+
+
+async def test_create_no_window_defaults_continuous_live(mock_client):
+    mock_client.create_advance_automation.return_value = {"advId": 9001}
+    await create_advance_automation("C58ZA", "AllDay", on_speed=4, port=1, dry_run=False)
+    _, payload = mock_client.create_advance_automation.call_args[0]
+    assert payload["switchTime"] == 255      # continuous toggle, not a 00:00–23:59 schedule
+
+
+async def test_create_explicit_window_is_scheduled_live(mock_client):
+    mock_client.create_advance_automation.return_value = {"advId": 9002}
+    await create_advance_automation(
+        "C58ZA", "Sched", on_speed=4, port=1, begin_time=360, end_time=720, dry_run=False
+    )
+    _, payload = mock_client.create_advance_automation.call_args[0]
+    assert payload["switchTime"] == 127
+    assert payload["beginTime"] == 360
+
+
+async def test_add_rule_no_schedule_defaults_continuous(mock_client):
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await add_automation_rule("C58ZA", "Seedling", [1], "on", max_level=5, dry_run=True)
+    assert "runs continuously" in json.loads(result)["rule"]["control"].lower()
+
+
+async def test_add_rule_explicit_window_not_continuous(mock_client):
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await add_automation_rule(
+        "C58ZA", "Seedling", [1], "on", max_level=5, begin_time=360, end_time=720, dry_run=True
+    )
+    assert "continuous" not in json.loads(result)["rule"]["control"].lower()
+
+
+# ---- #288: target gated by port modeTye capability, across all surfaces ----
+
+
+async def test_create_target_on_incapable_port_rejected(mock_client):
+    mock_client.get_devices.return_value = [_device_with_modetye({1: 0})]
+    result = await create_advance_automation(
+        "C58ZA", "Hold", on_speed=5, port=1, mode="vpd", control_style="target",
+        vpd_target=1.0, dry_run=True,
+    )
+    assert "doesn't support target" in json.loads(result)["error"]
+    mock_client.create_advance_automation.assert_not_called()
+
+
+async def test_create_target_on_capable_port_allowed(mock_client):
+    mock_client.get_devices.return_value = [_device_with_modetye({1: 15})]
+    result = await create_advance_automation(
+        "C58ZA", "Hold", on_speed=5, port=1, mode="vpd", control_style="target",
+        vpd_target=1.0, dry_run=True,
+    )
+    assert "error" not in json.loads(result)
+
+
+async def test_add_target_on_incapable_port_rejected(mock_client):
+    mock_client.get_devices.return_value = [_device_with_modetye({1: 0})]
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await add_automation_rule(
+        "C58ZA", "Seedling", [1], "vpd", control_style="target", vpd_target=1.0, dry_run=True,
+    )
+    assert "doesn't support target" in json.loads(result)["error"]
+    mock_client.create_advance_automation.assert_not_called()
+
+
+async def test_update_to_target_on_incapable_port_rejected(mock_client):
+    mock_client.get_devices.return_value = [_device_with_modetye({1: 0})]
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    result = await update_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=540, end_time=180,
+        mode="vpd", control_style="target", vpd_target=1.0, dry_run=True,
+    )
+    assert "doesn't support target" in json.loads(result)["error"]
+    mock_client.update_advance_automation.assert_not_called()
+
+
+async def test_set_vpd_automation_on_incapable_port_rejected(mock_client):
+    mock_client.get_devices.return_value = [_device_with_modetye({1: 0})]
+    result = await set_vpd_automation("C58ZA", 1, 1.0, dry_run=True)
+    assert "doesn't support target" in json.loads(result)["error"]
+    mock_client.set_port_mode.assert_not_called()
 
 
 async def test_create_advance_automation_dry_run_port_no_name(mock_client):
@@ -7735,8 +7859,8 @@ async def test_create_advance_automation_port_dry_run(mock_client):
     assert data["port_name"] == "Exhaust Fan"
     assert "note" in data
     assert "Preview only" in data["note"]
-    assert data["begin_time"] == "00:00"
-    assert data["end_time"] == "23:59"
+    assert data["begin_time"] == "continuous"   # #287: no window → continuous default
+    assert data["end_time"] == "continuous"
 
 
 async def test_create_advance_automation_port_zero_error(mock_client):
@@ -8036,7 +8160,7 @@ async def test_create_advance_automation_off_speed_is_min_level(mock_client):
     assert data["sent"] is True
     _, payload = mock_client.create_advance_automation.call_args[0]
     assert payload["offSpeed"] == 5
-    assert payload["switchTime"] == 127
+    assert payload["switchTime"] == 255   # #287: no window → continuous (switchTime 255)
 
 
 async def test_create_advance_automation_mixed_255_sentinel_rejected(mock_client):

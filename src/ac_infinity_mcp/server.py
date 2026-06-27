@@ -283,6 +283,49 @@ def _ports_bitmask(ports: list[int]) -> int:
     return sum(2 ** (p - 1) for p in ports)
 
 
+# Per-port target/setpoint capability (#288). devInfoListAll exposes a `modeTye` field per
+# port (note the API's typo): observed 15 = target-capable (UIS Pro+/AI firmware), 0 = legacy
+# with no target/setpoint support. It is PER-PORT — a devType=22 controller mixes 0 and 15
+# across its ports — so target must NEVER be gated by devType. A port that does not report
+# the field is treated as capable, so a device that omits it is never false-blocked.
+_MODETYE_NO_TARGET = 0
+
+
+def _ports_without_target_support(device: dict, ports: list[int]) -> list[int]:
+    """Return the subset of ``ports`` whose ``modeTye`` marks them as not target-capable."""
+    info_ports: dict[int, object] = {}
+    try:
+        for p in device.get("deviceInfo", {}).get("ports", []):
+            pn = p.get("port")
+            if pn is not None:
+                info_ports[int(pn)] = p.get("modeTye")
+    except (TypeError, ValueError, AttributeError):
+        return []
+    return [pt for pt in ports if info_ports.get(pt) == _MODETYE_NO_TARGET]
+
+
+def _target_capability_error(device: dict, ports: list[int]) -> str | None:
+    """Friendly error JSON if any governed port lacks target/setpoint support, else None.
+
+    Mirrors the AC Infinity app, which only offers a target/hold option on capable ports;
+    on a legacy port a target write renders as garbage rail triggers (#288).
+    """
+    bad = _ports_without_target_support(device, ports)
+    if not bad:
+        return None
+    labels = _ports_label(_build_port_name_map(device), bad)
+    return json.dumps({
+        "error": (
+            f"{labels} doesn't support target/hold mode on this controller —"
+            " use high/low thresholds (trigger) instead."
+        ),
+        "suggested_reply": (
+            f"{labels} can't hold a setpoint on this controller. I can set it to turn on"
+            " above or below a threshold instead — want me to do that?"
+        ),
+    })
+
+
 def _port_label_for(port_name_map: dict[int, str], port: int) -> str:
     """Return 'Name (Port N)' or 'Port N' for a single port."""
     raw = port_name_map.get(port, f"Port {port}")
@@ -2725,6 +2768,12 @@ async def set_vpd_automation(
             return err
         assert device is not None
 
+        # #288: VPD automation here is a target/hold (vpdSettingMode=1). Gate on the port's
+        # modeTye capability — a target on a legacy port renders as garbage rail triggers.
+        cap_err = _target_capability_error(device, [port])
+        if cap_err:
+            return cap_err
+
         updates = {
             "atType": 8,  # VPD mode
             "vpdSettingMode": 1,
@@ -3290,6 +3339,12 @@ async def apply_grow_stage_template(
     if err:
         return err
     assert device is not None
+
+    # #288: the grow-stage template sets a VPD target (vpdSettingMode=1). Gate on the port's
+    # modeTye capability so a legacy port doesn't get a garbage rail-trigger rule.
+    cap_err = _target_capability_error(device, [port])
+    if cap_err:
+        return cap_err
 
     # Single atomic write: VPD mode active, temp/humidity thresholds stored on the
     # controller for fallback if the user later switches to AUTO mode. Earlier
@@ -3898,8 +3953,8 @@ async def create_advance_automation(
     on_speed: int,
     port: int,
     off_speed: int = 0,
-    begin_time: int = 0,
-    end_time: int = 1439,
+    begin_time: int | None = None,
+    end_time: int | None = None,
     mode: str = "on",
     control_style: str | None = None,
     temp_high_f: int | None = None,
@@ -3932,10 +3987,10 @@ async def create_advance_automation(
         on_speed: Fan speed when automation is active (1–10).
         port: 1-based port number the automation should control (1–8).
         off_speed: Minimum fan level when inactive (0–10). Default 0.
-        begin_time: Schedule start in minutes since midnight (0–1439, or 255=always active).
-            Default: 0 (midnight). Use 255 for "always active" (runs 00:00–23:59 every day).
-        end_time: Schedule end in minutes since midnight (0–1439, or 255=always active).
-            Default: 1439 (23:59). Use 255 for "always active".
+        begin_time: Schedule start in minutes since midnight (0–1439). Omit (with end_time)
+            for a continuous 24/7 automation — the app's default toggle.
+        end_time: Schedule end in minutes since midnight (0–1439). Omit (with begin_time)
+            for a continuous 24/7 automation.
         mode: Behavior of the first rule — on (default), off, cycle, auto, vpd.
         control_style: "target" or "trigger" (required for auto and vpd). Inference:
             "hold/keep/maintain at X" -> target; "above/below/turn on at" -> trigger.
@@ -3992,6 +4047,11 @@ async def create_advance_automation(
         if _rule_err:
             return _rule_err
         assert rule_kwargs is not None
+        # #287: with no schedule given at all, default to the continuous 24/7 toggle (what the
+        # app does) rather than a 00:00–23:59 window. An explicit window is honored as-is.
+        create_continuous = begin_time is None and end_time is None
+        begin_time = 0 if begin_time is None else begin_time
+        end_time = 1439 if end_time is None else end_time
         if not (0 <= begin_time <= 1439 or begin_time == _SCHEDULE_ALWAYS_ACTIVE):
             return json.dumps({"error": "begin_time must be 0–1439 or 255 (no schedule)"})
         if not (0 <= end_time <= 1439 or end_time == _SCHEDULE_ALWAYS_ACTIVE):
@@ -4055,10 +4115,25 @@ async def create_advance_automation(
         raw_port_nm = port_obj.get("portName")
         port_name = _sanitize_api_string(raw_port_nm, 64) if raw_port_nm else f"Port {port}"
 
+        # #288: a target/hold rule on a port that doesn't support target mode renders as
+        # garbage rail triggers. Gate on the port's modeTye capability (mirrors the app).
+        if control_style == "target":
+            cap_err = _target_capability_error(device, [port])
+            if cap_err:
+                return cap_err
+
         port_settings = await asyncio.to_thread(_client().get_mode_settings, str(dev_id), port)
         min_speed = int(port_settings.get("offSpead", 0))
 
-        schedule_summary = _format_schedule_summary(begin_time, end_time)
+        disp_begin: str | None
+        disp_end: str | None
+        if create_continuous:
+            schedule_summary = "Runs continuously (24/7)"
+            disp_begin = disp_end = "continuous"
+        else:
+            schedule_summary = _format_schedule_summary(begin_time, end_time)
+            disp_begin = _format_schedule_time(begin_time)
+            disp_end = _format_schedule_time(end_time)
 
         if dry_run:
             return json.dumps({
@@ -4068,8 +4143,8 @@ async def create_advance_automation(
                 "port_name": port_name,
                 "on_speed": on_speed,
                 "min_speed": min_speed,
-                "begin_time": _format_schedule_time(begin_time),
-                "end_time": _format_schedule_time(end_time),
+                "begin_time": disp_begin,
+                "end_time": disp_end,
                 "schedule_summary": schedule_summary,
                 "dry_run": True,
                 "sent": False,
@@ -4081,6 +4156,10 @@ async def create_advance_automation(
 
         # Live path: build full addGroups payload via client helper. mode="on" reproduces
         # the original single-port On-mode payload byte-for-byte (on_speed passed directly).
+        # #287: continuous → switch_time 255 (the 24/7 toggle), else the default day schedule.
+        build_extra = {k: v for k, v in rule_kwargs.items() if k not in ("min_level", "max_level")}
+        if create_continuous:
+            build_extra["switch_time"] = _days_to_switchtime(None, True)
         payload = build_groups_payload(
             dev_id=str(dev_id),
             ports=[port],
@@ -4089,8 +4168,7 @@ async def create_advance_automation(
             end_time=end_time,
             on_speed=on_speed,
             min_level=off_speed,
-            **{k: v for k, v in rule_kwargs.items()
-               if k not in ("min_level", "max_level")},
+            **build_extra,
         )
 
         result = await asyncio.to_thread(_client().create_advance_automation, str(dev_id), payload)
@@ -4324,8 +4402,8 @@ async def add_automation_rule(
     vpd_transition: float | None = None,
     cycle_on_minutes: int | None = None,
     cycle_off_minutes: int | None = None,
-    begin_time: int = 0,
-    end_time: int = 1439,
+    begin_time: int | None = None,
+    end_time: int | None = None,
     days: list[str] | str | None = None,
     continuous: bool = False,
     dry_run: bool = True,
@@ -4386,8 +4464,8 @@ async def add_automation_rule(
         vpd_transition: VPD ramp band kPa (vpd).
         cycle_on_minutes: Minutes on, for a cycle rule.
         cycle_off_minutes: Minutes off, for a cycle rule.
-        begin_time: Window start, minutes since midnight (0–1439). Default 0.
-        end_time: Window end, minutes since midnight (0–1439). Default 1439.
+        begin_time: Window start, minutes since midnight (0–1439). Omit for a 24/7 rule.
+        end_time: Window end, minutes since midnight (0–1439). Omit for a 24/7 rule.
         days: Day names, "all", "weekdays", or "weekends". Default all days.
         continuous: Run 24/7 (ignores the window). Default False.
         dry_run: If True (default), previews the rule without sending it.
@@ -4397,6 +4475,13 @@ async def add_automation_rule(
         sent/preview status. On failure returns ``{"error": "..."}``.
     """
     try:
+        # #287: with no schedule given at all, default to continuous 24/7 (the app's default
+        # toggle) rather than a 00:00–23:59 scheduled window. An explicit window or days, or
+        # continuous=True, is honored as-is.
+        if begin_time is None and end_time is None and days is None and not continuous:
+            continuous = True
+        begin_time = 0 if begin_time is None else begin_time
+        end_time = 1439 if end_time is None else end_time
         for label, val in (("begin_time", begin_time), ("end_time", end_time)):
             if not 0 <= val <= 1439:
                 return json.dumps({"error": f"{label} must be 0–1439 (minutes since midnight)"})
@@ -4429,6 +4514,12 @@ async def add_automation_rule(
         perr = _validate_rule_ports(ports, device, device_id)
         if perr:
             return perr
+
+        # #288: gate target/hold on the governed ports' modeTye capability.
+        if control_style == "target":
+            cap_err = _target_capability_error(device, ports)
+            if cap_err:
+                return cap_err
 
         port_name_map = _build_port_name_map(device)
         tz_label = device.get("zoneId") or "device-local time"
@@ -4811,6 +4902,12 @@ async def update_automation_rule(
             and effective_mode in ("auto", "vpd")
         ):
             effective_style = "target" if match.get("settingMode") == 1 else "trigger"
+
+        # #288: gate target/hold on the governed ports' modeTye capability.
+        if effective_style == "target":
+            cap_err = _target_capability_error(device, ports)
+            if cap_err:
+                return cap_err
 
         kwargs, verr = _validate_rule_inputs(
             effective_mode, control_style=effective_style,
