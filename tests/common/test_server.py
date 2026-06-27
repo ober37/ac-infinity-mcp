@@ -6174,6 +6174,18 @@ async def test_add_humidity_target_on_incapable_port_rejected(mock_client):
     mock_client.create_advance_automation.assert_not_called()
 
 
+async def test_update_same_mode_target_on_incapable_port_rejected(mock_client):
+    """The gate fires via effective-style INFERENCE too: a same-mode edit (no mode/style) on a
+    rule already in target mode, on an incapable port, is rejected — not just explicit style."""
+    mock_client.get_devices.return_value = [_device_with_modetye({1: 0})]
+    mock_client.get_advance_automations.return_value = _seedling_program()  # rule[0] = VPD target
+    result = await update_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=540, end_time=180, vpd_target=1.1, dry_run=True,
+    )
+    assert "doesn't support target" in json.loads(result)["error"]
+    mock_client.update_advance_automation.assert_not_called()
+
+
 async def test_update_to_target_on_capable_port_not_blocked(mock_client):
     """No false-block: a target edit on a capable port (modeTye=15) passes the gate."""
     mock_client.get_devices.return_value = [_device_with_modetye({1: 15})]
