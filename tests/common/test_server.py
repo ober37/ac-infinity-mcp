@@ -10091,6 +10091,7 @@ async def test_update_rule_mode_change_to_vpd_target(mock_client):
     sent = mock_client.update_advance_automation.call_args.args[1]
     assert sent["currentMode"] == 6
     assert sent["targetVpd"] == 12
+    assert sent["highVpd"] == 12       # encoder rebuild mirrors the setpoint into highVpd too
     assert "VPD: hold at 1.2 kPa" in _decode_rule(sent)["control"]
 
 
@@ -10762,6 +10763,9 @@ async def test_update_rule_same_mode_vpd_target(mock_client):
     )
     sent = mock_client.update_advance_automation.call_args.args[1]
     assert sent["targetVpd"] == 13
+    assert sent["highVpd"] == 13       # mirror must track the setpoint (no targetVpd != highVpd)
+    assert sent["highVpdSwitch"] == 1
+    assert sent["lowVpdSwitch"] == 0
     assert sent["currentMode"] == 6
     assert "VPD: hold at 1.3 kPa" in _decode_rule(sent)["control"]
 

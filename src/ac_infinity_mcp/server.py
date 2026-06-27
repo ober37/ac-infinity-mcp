@@ -4742,7 +4742,15 @@ def _overlay_same_mode(
 
     if mode == "vpd":
         if vpd_target is not None:
-            body["targetVpd"] = round(vpd_target * 10)
+            # VPD-target mirrors the setpoint into BOTH targetVpd and highVpd (the app's
+            # signature; see _apply_vpd / #288). The same-mode overlay must mirror too, or the
+            # rule ends up with targetVpd != highVpd — a shape no app rule ever has.
+            tgt = round(vpd_target * 10)
+            body["targetVpd"] = tgt
+            body["highVpd"] = tgt
+            body["highVpdSwitch"] = 1
+            body["lowVpd"] = 0
+            body["lowVpdSwitch"] = 0
         if vpd_high is not None:
             body["highVpd"] = round(vpd_high * 10)
             body["highVpdSwitch"] = 1
