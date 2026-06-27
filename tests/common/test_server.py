@@ -9808,6 +9808,44 @@ async def test_update_rule_read_before_write_preserves_structural_field(mock_cli
     assert sent["advId"] == 5002         # re-resolved at write time
 
 
+async def test_update_rule_more_than_one_program_same_name_rejected(mock_client):
+    """G1: a name mapping to >1 distinct slot is ambiguous for update too — refuse, no write."""
+    program = _seedling_program()
+    program[2]["groupNums"] = 2  # second distinct slot under the same advName
+    mock_client.get_advance_automations.return_value = program
+    result = await update_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=540, end_time=180, max_level=5, dry_run=False,
+    )
+    data = json.loads(result)
+    assert "More than one program" in data["error"]
+    mock_client.update_advance_automation.assert_not_called()
+
+
+async def test_update_rule_vpd_transition_same_mode_roundtrip(mock_client):
+    """Same-mode update of vpd_transition writes vpdTrans (kPa × 10), mode unchanged."""
+    mock_client.get_advance_automations.return_value = _seedling_program()
+    await update_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=540, end_time=180,
+        vpd_transition=0.3, dry_run=False,
+    )
+    sent = mock_client.update_advance_automation.call_args.args[1]
+    assert sent["vpdTrans"] == 3
+    assert sent["advId"] == 5001         # the VPD rule, not the humidity-setpoint one
+
+
+async def test_update_rule_min_level_same_mode_roundtrip(mock_client):
+    """Same-mode update of min_level writes offSpeed, leaving onSpeed untouched."""
+    program = _seedling_program()
+    program[0]["onSpeed"] = 7
+    mock_client.get_advance_automations.return_value = program
+    await update_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=540, end_time=180, min_level=2, dry_run=False,
+    )
+    sent = mock_client.update_advance_automation.call_args.args[1]
+    assert sent["offSpeed"] == 2
+    assert sent["onSpeed"] == 7          # unchanged
+
+
 async def test_update_rule_mode_change_to_on_decodes_as_on(mock_client):
     program = _seedling_program()
     mock_client.get_advance_automations.return_value = program
@@ -9967,6 +10005,7 @@ async def test_update_rule_same_mode_vpd_target_on_trigger_rejected(mock_client)
     # Make the port-2 rule a VPD-trigger rule.
     program[2] = {**copy.deepcopy(MOCK_RULE_VPD), "advName": "Seedling",
                   "grouptDevType": 2, "beginTime": 540, "endTime": 180, "advId": 5003,
+                  "groupNums": 1, "sortType": 6, "subNumber": 2, "subNumberSort": 2,
                   "settingMode": 0, "setSelect": 0, "highVpd": 15, "highVpdSwitch": 1,
                   "lowVpd": 8, "lowVpdSwitch": 1, "targetVpd": 0}
     mock_client.get_advance_automations.return_value = program
@@ -10010,6 +10049,7 @@ async def test_update_rule_same_mode_vpd_trigger_overlay_carries_value(mock_clie
     program = _seedling_program()
     program[2] = {**copy.deepcopy(MOCK_RULE_VPD), "advName": "Seedling",
                   "grouptDevType": 2, "beginTime": 540, "endTime": 180, "advId": 5003,
+                  "groupNums": 1, "sortType": 6, "subNumber": 2, "subNumberSort": 2,
                   "settingMode": 0, "setSelect": 0, "highVpd": 15, "highVpdSwitch": 1,
                   "lowVpd": 8, "lowVpdSwitch": 1, "targetVpd": 0}
     mock_client.get_advance_automations.return_value = program
@@ -10095,8 +10135,22 @@ async def test_delete_rule_wedged_friendly_no_upstream_echo(mock_client):
         "C58ZA", "Seedling", [1], begin_time=180, end_time=540, dry_run=False,
     )
     data = json.loads(result)
-    assert "didn't accept that" in data["error"]
+    assert "may or may not have applied" in data["error"]
+    assert "list the program's rules" in data["error"]   # steer to read-back, not blind retry
     assert "100001" not in result
+
+
+async def test_delete_rule_more_than_one_program_same_name_rejected(mock_client):
+    """G1: a name mapping to >1 distinct slot is ambiguous for delete too — refuse, no write."""
+    program = _seedling_program()
+    program[2]["groupNums"] = 2  # second distinct slot under the same advName
+    mock_client.get_advance_automations.return_value = program
+    result = await delete_automation_rule(
+        "C58ZA", "Seedling", [1], begin_time=180, end_time=540, dry_run=False,
+    )
+    data = json.loads(result)
+    assert "More than one program" in data["error"]
+    mock_client.delete_advance_automation.assert_not_called()
 
 
 # ---- two-window no false conflict ----

@@ -165,6 +165,41 @@ def test_decode_rule_auto_trigger_on_below_rail_aware():
     assert "temperature: on below 76°F" in decoded["control"]
 
 
+def test_decode_rule_auto_trigger_on_above_single_sensor():
+    """Mirror of the on_below test: high active, low parked at its rail → on_above."""
+    entry = copy.deepcopy(MOCK_RULE_TEMPERATURE_TRIGGER)
+    entry["autoHighTempF"] = 85
+    entry["autoHighTempSwitch"] = 1
+    entry["autoLowTempF"] = 32        # park the low trigger at its rail (inactive)
+    decoded = _decode_rule(entry)
+    assert decoded["direction"] == "on_above"
+    assert "temperature: on above 85°F" in decoded["control"]
+
+
+def test_decode_rule_auto_no_rule_set_fallback():
+    """currentMode=4 with every trigger parked at its rail → graceful 'no rule set'."""
+    entry = copy.deepcopy(MOCK_RULE_TEMPERATURE_TRIGGER)
+    entry["settingMode"] = 0
+    entry["autoHighTempF"] = 194
+    entry["autoLowTempF"] = 32
+    entry["autoHighHumi"] = 100
+    entry["autoLowHumi"] = 0
+    decoded = _decode_rule(entry)
+    assert decoded["mode"] == "auto"
+    assert "auto (no rule set)" in decoded["control"]
+
+
+def test_decode_rule_vpd_no_rule_set_fallback():
+    """currentMode=6 trigger style with both VPD rails parked → graceful 'no rule set'."""
+    entry = copy.deepcopy(MOCK_RULE_VPD)
+    entry["settingMode"] = 0
+    entry["highVpd"] = 99
+    entry["lowVpd"] = 0
+    decoded = _decode_rule(entry)
+    assert decoded["mode"] == "vpd"
+    assert "VPD (no rule set)" in decoded["control"]
+
+
 def test_decode_rule_unknown_mode():
     decoded = _decode_rule({"currentMode": 99})
     assert decoded["mode"] == "unknown"

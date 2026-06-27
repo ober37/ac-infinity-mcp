@@ -627,6 +627,23 @@ def _resolve_rule(
     if not program_entries:
         return None, [], [], None  # caller decides program-not-found vs empty
 
+    # A program is a shared (groupNums, sortType) SLOT. If the name maps to more than one
+    # slot, editing/deleting "a rule in it" is ambiguous — we could mutate the wrong
+    # program. Refuse and ask the user to make the names unique (mirrors add_automation_rule).
+    slots = {(e.get("groupNums"), e.get("sortType")) for e in program_entries}
+    if len(slots) > 1:
+        ambiguous = json.dumps({
+            "error": (
+                f"More than one program named '{clean_target}'."
+                " Rename them so they're unique, then try again."
+            ),
+            "suggested_reply": (
+                f"There's more than one program called '{clean_target}', so I can't tell"
+                " which one you mean. Rename them to be unique and we'll try again."
+            ),
+        })
+        return None, [], program_rules, ambiguous
+
     matches = [
         e for e in program_entries
         if int(e.get("grouptDevType") or 0) == bitmask
@@ -4224,7 +4241,9 @@ _OVERLAP_FRIENDLY = (
     " or update the existing rule."
 )
 _WEDGED_FRIENDLY = (
-    "The controller didn't accept that — it may be busy; wait and retry, or restart"
+    "The controller was busy and may or may not have applied that change. Before trying"
+    " again, ask me to list the program's rules so we can see whether it took — retrying"
+    " blindly can apply it twice. If it didn't take and the controller stays busy, restart"
     " the controller."
 )
 
@@ -4706,7 +4725,7 @@ async def update_automation_rule(
         tz_label = device.get("zoneId") or "device-local time"
 
         raw = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
-        match, disambig, program_rules, _ = _resolve_rule(
+        match, disambig, program_rules, ambiguous_program = _resolve_rule(
             raw, program_name, ports, begin_time, end_time, port_name_map, tz_label
         )
         clean_program = _sanitize_api_string(program_name, 64)
@@ -4719,6 +4738,8 @@ async def update_automation_rule(
                 "error": f"No program named '{clean_program}' on device {device_id}",
                 "existing_programs": names,
             })
+        if ambiguous_program is not None:
+            return ambiguous_program
         if len(disambig) > 0:
             return json.dumps({
                 "error": "More than one rule matches — pick which window to edit.",
@@ -4933,7 +4954,7 @@ async def delete_automation_rule(
         tz_label = device.get("zoneId") or "device-local time"
 
         raw = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
-        match, disambig, program_rules, _ = _resolve_rule(
+        match, disambig, program_rules, ambiguous_program = _resolve_rule(
             raw, program_name, ports, begin_time, end_time, port_name_map, tz_label
         )
         clean_program = _sanitize_api_string(program_name, 64)
@@ -4946,6 +4967,8 @@ async def delete_automation_rule(
                 "error": f"No program named '{clean_program}' on device {device_id}",
                 "existing_programs": names,
             })
+        if ambiguous_program is not None:
+            return ambiguous_program
         if len(disambig) > 0:
             return json.dumps({
                 "error": "More than one rule matches — pick which window to remove.",
