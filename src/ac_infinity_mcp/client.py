@@ -17,31 +17,48 @@ from ac_infinity_mcp.schema import (
 
 logger = logging.getLogger(__name__)
 
-_SENSOR_TYPE_LABELS: dict[int, str] = {
-    10: "soil_moisture",
-    11: "co2",
-    12: "light",
-    13: "ph",
-    14: "ec_us_cm",
-    15: "ec_ms_cm",
-    16: "tds_ppm",
-    17: "tds_ppt",
-    18: "water_temp_c",
-    19: "water_temp_f",
-    20: "water_level",
+# Maps AC Infinity sensorType → (grower-readable label, unit). The unit is a
+# property of the sensorType itself: AC Infinity assigns a distinct type per unit
+# variant (EC µS/cm=14 vs mS/cm=15, TDS ppm=16 vs ppt=17, water-temp °F=18 vs °C=19),
+# so the type alone is unambiguous — the raw `sensorUnit` field is only an F/C flag and
+# is intentionally not surfaced. Confirmed against the HA `ac_infinity` integration.
+# Water-temp polarity (18=°F, 19=°C) follows HA const.py (even=°F/odd=°C across all its
+# temperature types) and the API's own waterTempHighValueF/waterTempHighValue convention;
+# unverified against live hydro hardware. Unit "" means the quantity is genuinely unitless.
+_SENSOR_TYPE_INFO: dict[int, tuple[str, str]] = {
+    10: ("Soil Moisture", "%"),
+    11: ("CO2", "ppm"),
+    12: ("Light", "%"),
+    13: ("pH", ""),
+    14: ("EC", "µS/cm"),
+    15: ("EC", "mS/cm"),
+    16: ("TDS", "ppm"),
+    17: ("TDS", "ppt"),
+    18: ("Water Temp", "°F"),
+    19: ("Water Temp", "°C"),
+    20: ("Water Level", ""),
 }
 
 
 def _sensor_label(sensor_type: int | None) -> str:
-    """Return human-readable label for sensor type, or a safe fallback."""
-    if sensor_type in _SENSOR_TYPE_LABELS:
-        return _SENSOR_TYPE_LABELS[sensor_type]
+    """Return grower-readable label for sensor type, or a safe fallback."""
+    if sensor_type in _SENSOR_TYPE_INFO:
+        return _SENSOR_TYPE_INFO[sensor_type][0]
     if sensor_type is not None:
         try:
-            return f"unrecognized (type {int(sensor_type)})"
+            return f"Unrecognized (type {int(sensor_type)})"
         except (ValueError, TypeError):
-            return "unknown"
-    return "unknown"
+            return "Unknown"
+    return "Unknown"
+
+
+def _sensor_unit(sensor_type: int | None) -> str:
+    """Return the unit for a sensor type (derived from the type, not the API
+    ``sensorUnit`` field). Empty string for unitless quantities (pH, water level)
+    and for unrecognized/None types."""
+    if sensor_type in _SENSOR_TYPE_INFO:
+        return _SENSOR_TYPE_INFO[sensor_type][1]
+    return ""
 
 
 def _should_include_sensor(s: dict) -> bool:
@@ -49,7 +66,7 @@ def _should_include_sensor(s: dict) -> bool:
     sensor_type = s.get("sensorType")
     if sensor_type is None:
         return False
-    if sensor_type in _SENSOR_TYPE_LABELS:
+    if sensor_type in _SENSOR_TYPE_INFO:
         return True  # recognized external sensor type (10–20): always include
     try:
         if int(sensor_type) < 10:
@@ -1554,6 +1571,7 @@ class ACInfinityClient:
                         "sensor_type": s.get("sensorType"),
                         "sensor_type_label": _sensor_label(s.get("sensorType")),
                         "value": _sensor_value(s),
+                        "unit": _sensor_unit(s.get("sensorType")),
                     }
                     for s in sensors
                     if _should_include_sensor(s)

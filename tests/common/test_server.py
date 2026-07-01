@@ -27,6 +27,7 @@ from ac_infinity_mcp.server import (
     _find_governing_automation,
     _find_governing_port_group,
     _format_schedule_time,
+    _format_sensor_clause,
     _format_window_dt,
     _get_device,
     _get_port_label,
@@ -674,6 +675,112 @@ async def test_get_all_device_readings_human_summary_table(mock_client):
     summary = data["human_summary"]
     assert "| Device | Temp | Humidity | VPD |" in summary
     assert "kPa" in summary
+
+
+# ============ _format_sensor_clause + external-sensor prose (#255, #264, #265) ============
+
+
+def _parsed_sensor(sensor_type_label, value, unit, sensor_type=11, access_port=1):
+    """A parsed external-sensor dict, matching client.parse_device_data's shape."""
+    return {
+        "sensor_id": f"{access_port}.{sensor_type}",
+        "sensor_type": sensor_type,
+        "sensor_type_label": sensor_type_label,
+        "value": value,
+        "unit": unit,
+    }
+
+
+def test_format_sensor_clause_empty_is_blank():
+    """No external sensors → '' (keeps human_summary byte-identical to pre-sensor output)."""
+    assert _format_sensor_clause([]) == ""
+
+
+def test_format_sensor_clause_multi_sensor():
+    clause = _format_sensor_clause([
+        _parsed_sensor("CO2", 793, "ppm"),
+        _parsed_sensor("pH", 6.5, "", sensor_type=13),
+        _parsed_sensor("Light", 100.0, "%", sensor_type=12),
+    ])
+    assert clause == "External sensors — CO2: 793 ppm, pH: 6.5, Light: 100.0%"
+
+
+@pytest.mark.parametrize("label,value,sensor_type", [
+    ("pH", 6.5, 13),
+    ("Water Level", 3, 20),
+    ("Unrecognized (type 77)", 1234, 77),
+])
+def test_format_sensor_clause_empty_unit_no_trailing_space(label, value, sensor_type):
+    """Unitless / unrecognized sensors render with no trailing space or orphan separator."""
+    clause = _format_sensor_clause(
+        [_parsed_sensor(label, value, "", sensor_type=sensor_type)]
+    )
+    assert clause == f"External sensors — {label}: {value}"
+    assert not clause.endswith(" ")
+
+
+@pytest.mark.parametrize("label,value,unit,expected_part", [
+    ("Light", 100.0, "%", "Light: 100.0%"),
+    ("Water Temp", 24.5, "°C", "Water Temp: 24.5°C"),
+    ("Water Temp", 68, "°F", "Water Temp: 68°F"),
+    ("CO2", 793, "ppm", "CO2: 793 ppm"),
+    ("EC", 2.1, "µS/cm", "EC: 2.1 µS/cm"),
+])
+def test_format_sensor_clause_unit_spacing(label, value, unit, expected_part):
+    """% and degree units attach to the number; ppm/µS/cm take a leading space."""
+    clause = _format_sensor_clause([_parsed_sensor(label, value, unit)])
+    assert clause == f"External sensors — {expected_part}"
+
+
+def test_format_sensor_clause_no_pipe():
+    """The clause must never contain '|' — it would break the ≥3-device table heuristic."""
+    clause = _format_sensor_clause([
+        _parsed_sensor("EC", 2.1, "µS/cm", sensor_type=14),
+        _parsed_sensor("TDS", 500, "ppm", sensor_type=16),
+    ])
+    assert "|" not in clause
+
+
+async def test_get_device_reading_human_summary_with_sensors(mock_client):
+    """External sensors appear in the get_device_reading human_summary prose."""
+    mock_client.parse_device_data.return_value["external_sensors"] = [
+        _parsed_sensor("CO2", 793, "ppm"),
+        _parsed_sensor("pH", 6.5, "", sensor_type=13),
+    ]
+    summary = json.loads(await get_device_reading("C58ZA"))["human_summary"]
+    assert "External sensors — CO2: 793 ppm, pH: 6.5" in summary
+    assert "|" not in summary
+    assert "Reading from" in summary
+
+
+async def test_get_device_reading_human_summary_without_sensors_unchanged(mock_client):
+    """No external sensors → summary keeps the exact '…kPa. Reading from …' shape."""
+    mock_client.parse_device_data.return_value["external_sensors"] = []
+    summary = json.loads(await get_device_reading("C58ZA"))["human_summary"]
+    assert "External sensors" not in summary
+    assert "kPa. Reading from" in summary  # no stray clause or doubled space inserted
+
+
+async def test_get_all_device_readings_prose_with_sensors(mock_client):
+    """1–2-device prose includes each device's external-sensor clause; no pipe."""
+    d1 = {**MOCK_DEVICE_LEGACY, "devCode": "C58ZA"}
+    d2 = {**MOCK_DEVICE_LEGACY, "devCode": "D2"}
+    mock_client.get_devices.return_value = [d1, d2]
+
+    def side_effect(device):
+        base = copy.deepcopy(mock_client.parse_device_data.return_value)
+        base["device_name"] = device.get("devCode")
+        base["external_sensors"] = (
+            [_parsed_sensor("CO2", 793, "ppm")]
+            if device.get("devCode") == "C58ZA"
+            else []
+        )
+        return base
+
+    mock_client.parse_device_data.side_effect = side_effect
+    summary = json.loads(await get_all_device_readings())["human_summary"]
+    assert "External sensors — CO2: 793 ppm" in summary
+    assert "|" not in summary
 
 
 # ============ get_historical_readings ============
@@ -5503,37 +5610,40 @@ def _device_with_sensors(sensors: list[dict]) -> dict:
 
 
 def test_external_sensor_type_label_co2():
-    """sensorType=11 → sensor_type_label='co2'."""
+    """sensorType=11 → sensor_type_label='CO2', unit='ppm'."""
     from ac_infinity_mcp.client import ACInfinityClient
     client = ACInfinityClient("test@example.com", "pw")
     device = _device_with_sensors([
         {"accessPort": 1, "sensorType": 11, "sensorData": 1100, "sensorPrecision": 1},
     ])
     parsed = client.parse_device_data(device)
-    assert parsed["external_sensors"][0]["sensor_type_label"] == "co2"
+    assert parsed["external_sensors"][0]["sensor_type_label"] == "CO2"
+    assert parsed["external_sensors"][0]["unit"] == "ppm"
     assert parsed["external_sensors"][0]["sensor_type"] == 11
 
 
 def test_external_sensor_type_label_soil_moisture():
-    """sensorType=10 → sensor_type_label='soil_moisture'."""
+    """sensorType=10 → sensor_type_label='Soil Moisture', unit='%'."""
     from ac_infinity_mcp.client import ACInfinityClient
     client = ACInfinityClient("test@example.com", "pw")
     device = _device_with_sensors([
         {"accessPort": 1, "sensorType": 10, "sensorData": 455, "sensorPrecision": 2},
     ])
     parsed = client.parse_device_data(device)
-    assert parsed["external_sensors"][0]["sensor_type_label"] == "soil_moisture"
+    assert parsed["external_sensors"][0]["sensor_type_label"] == "Soil Moisture"
+    assert parsed["external_sensors"][0]["unit"] == "%"
 
 
 def test_external_sensor_type_label_unknown():
-    """Unrecognized sensorType with non-zero data → label includes type number."""
+    """Unrecognized sensorType with non-zero data → label includes type number, no unit."""
     from ac_infinity_mcp.client import ACInfinityClient
     client = ACInfinityClient("test@example.com", "pw")
     device = _device_with_sensors([
         {"accessPort": 1, "sensorType": 99, "sensorData": 100, "sensorPrecision": 1},
     ])
     parsed = client.parse_device_data(device)
-    assert parsed["external_sensors"][0]["sensor_type_label"] == "unrecognized (type 99)"
+    assert parsed["external_sensors"][0]["sensor_type_label"] == "Unrecognized (type 99)"
+    assert parsed["external_sensors"][0]["unit"] == ""
 
 
 def test_external_sensor_precision_1_passthrough():
@@ -5595,7 +5705,8 @@ def test_external_sensor_light_type_12_is_percentage():
     ])
     parsed = client.parse_device_data(device)
     sensor = parsed["external_sensors"][0]
-    assert sensor["sensor_type_label"] == "light"
+    assert sensor["sensor_type_label"] == "Light"
+    assert sensor["unit"] == "%"
     assert sensor["value"] == pytest.approx(100.0)
     assert 0 <= sensor["value"] <= 100
 

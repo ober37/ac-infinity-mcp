@@ -346,11 +346,13 @@ def test_parse_device_data_phantom_unrecognized_zero_excluded(client):
 
 
 def test_parse_device_data_unrecognized_nonzero_included(client):
-    """sensorType=99, sensorData=9900 → included with label 'unrecognized (type 99)'."""
+    """sensorType=99, sensorData=9900 → included with label 'Unrecognized (type 99)'."""
     device = _device_with_sensor_list([_sensor_entry(sensor_type=99, sensor_data=9900)])
     result = client.parse_device_data(device)
     assert len(result["external_sensors"]) == 1
-    assert result["external_sensors"][0]["sensor_type_label"] == "unrecognized (type 99)"
+    assert result["external_sensors"][0]["sensor_type_label"] == "Unrecognized (type 99)"
+    # Unrecognized types have no known unit.
+    assert result["external_sensors"][0]["unit"] == ""
     # precision defaults to 1 → raw passthrough.
     assert result["external_sensors"][0]["value"] == 9900
 
@@ -361,7 +363,8 @@ def test_parse_device_data_recognized_zero_included(client):
     result = client.parse_device_data(device)
     assert len(result["external_sensors"]) == 1
     assert result["external_sensors"][0]["sensor_type"] == 11
-    assert result["external_sensors"][0]["sensor_type_label"] == "co2"
+    assert result["external_sensors"][0]["sensor_type_label"] == "CO2"
+    assert result["external_sensors"][0]["unit"] == "ppm"
 
 
 def test_parse_device_data_sensor_type_none_excluded(client):
@@ -397,11 +400,69 @@ def test_parse_device_data_mixed_sensor_list(client):
     result = client.parse_device_data(device)
     assert len(result["external_sensors"]) == 2
     labels = {s["sensor_type"]: s["sensor_type_label"] for s in result["external_sensors"]}
-    assert labels[11] == "co2"
-    assert labels[21] == "unrecognized (type 21)"
+    assert labels[11] == "CO2"
+    assert labels[21] == "Unrecognized (type 21)"
     values = {s["sensor_type"]: s["value"] for s in result["external_sensors"]}
     assert values[11] == 450  # precision 1 → raw passthrough (450 ppm)
     assert values[21] == pytest.approx(85.5)  # precision 2 → 855 / 10
+
+
+# ============ sensor label + unit table (#255, #264) ============
+
+# (sensor_type, expected label, expected unit). Hardcoded literals on purpose — deriving
+# these (e.g. via .title()) would mangle "CO2" → "Co2" and "pH" → "Ph".
+_SENSOR_TYPE_TABLE = [
+    (10, "Soil Moisture", "%"),
+    (11, "CO2", "ppm"),
+    (12, "Light", "%"),
+    (13, "pH", ""),
+    (14, "EC", "µS/cm"),
+    (15, "EC", "mS/cm"),
+    (16, "TDS", "ppm"),
+    (17, "TDS", "ppt"),
+    (18, "Water Temp", "°F"),
+    (19, "Water Temp", "°C"),
+    (20, "Water Level", ""),
+]
+
+
+@pytest.mark.parametrize("sensor_type,label,unit", _SENSOR_TYPE_TABLE)
+def test_sensor_label_and_unit_table(client, sensor_type, label, unit):
+    """Every known sensor type maps to its grower-readable label and unit."""
+    device = _device_with_sensor_list(
+        [_sensor_entry(sensor_type=sensor_type, sensor_data=100)]
+    )
+    sensor = client.parse_device_data(device)["external_sensors"][0]
+    assert sensor["sensor_type_label"] == label
+    assert sensor["unit"] == unit
+
+
+def test_sensor_water_temp_polarity(client):
+    """Water temp: type 18 = °F, type 19 = °C.
+
+    NOTE: polarity is unverified against live hydro hardware. It follows the HA
+    ``ac_infinity`` const.py convention (even sensorType = °F, odd = °C, across all
+    its temperature types) and the API's own waterTempHighValueF/waterTempHighValue
+    field naming. This corrects the previously-inverted 18=°C/19=°F mapping. A
+    contributor with a hydro probe should re-confirm this one assertion.
+    """
+    for sensor_type, expected_unit in ((18, "°F"), (19, "°C")):
+        device = _device_with_sensor_list(
+            [_sensor_entry(sensor_type=sensor_type, sensor_data=680, precision=2)]
+        )
+        sensor = client.parse_device_data(device)["external_sensors"][0]
+        assert sensor["sensor_type_label"] == "Water Temp"
+        assert sensor["unit"] == expected_unit
+
+
+def test_sensor_unit_unknown_type_is_empty(client):
+    """An included-but-unrecognized sensor type carries no unit."""
+    device = _device_with_sensor_list(
+        [_sensor_entry(sensor_type=77, sensor_data=1234)]
+    )
+    sensor = client.parse_device_data(device)["external_sensors"][0]
+    assert sensor["sensor_type_label"] == "Unrecognized (type 77)"
+    assert sensor["unit"] == ""
 
 
 # devType=22 phantom sensor fixture (real field values from Proxyman capture)
@@ -425,7 +486,7 @@ def test_should_include_sensor_devtype22_phantoms_excluded(client):
 
 
 def test_should_include_sensor_any_lt10_not_in_label_dict_excluded(client):
-    """Any sensorType < 10 not in _SENSOR_TYPE_LABELS → excluded regardless of sensorData."""
+    """Any sensorType < 10 not in _SENSOR_TYPE_INFO → excluded regardless of sensorData."""
     for st in range(1, 10):
         entry = {"sensorType": st, "sensorData": 9999, "sensorPrecision": 1, "accessPort": 1}
         device = _device_with_sensor_list([entry])
@@ -439,7 +500,8 @@ def test_should_include_sensor_recognized_type_zero_still_included(client):
     device = _device_with_sensor_list([entry])
     result = client.parse_device_data(device)
     assert len(result["external_sensors"]) == 1
-    assert result["external_sensors"][0]["sensor_type_label"] == "soil_moisture"
+    assert result["external_sensors"][0]["sensor_type_label"] == "Soil Moisture"
+    assert result["external_sensors"][0]["unit"] == "%"
 
 
 def test_parse_device_data_devtype22_fixture_zero_external_sensors(client):
