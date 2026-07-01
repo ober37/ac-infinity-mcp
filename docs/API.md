@@ -967,7 +967,7 @@ when no physical sensor is connected to a UIS port. These phantom entries have a
 
 | Condition | Action |
 |---|---|
-| `sensorType` matches a recognized type (10–20 per `_SENSOR_TYPE_LABELS`) | **Always include** — even if current value is `0` (sensor may be connected but reading zero) |
+| `sensorType` matches a recognized type (10–20 per `_SENSOR_TYPE_INFO`) | **Always include** — even if current value is `0` (sensor may be connected but reading zero) |
 | `sensorType < 10` (not in label dict) | **Always exclude** — internal/built-in bus readings, not external hardware |
 | `sensorType >= 10` and unrecognized (future/unknown type) | Include **only if** `sensorData != 0` — zero value on an unknown type is treated as phantom |
 | `sensorType` is `null` | **Always exclude** — no type means no sensor slot at all |
@@ -979,7 +979,7 @@ def _should_include_sensor(s: dict) -> bool:
     sensor_type = s.get("sensorType")
     if sensor_type is None:
         return False
-    if sensor_type in _SENSOR_TYPE_LABELS:
+    if sensor_type in _SENSOR_TYPE_INFO:
         return True  # recognized external sensor type (10–20): always include
     try:
         if int(sensor_type) < 10:
@@ -992,13 +992,37 @@ def _should_include_sensor(s: dict) -> bool:
 This means `external_sensors` will be `[]` on a controller with no sensors plugged in,
 regardless of how many phantom slot entries the API returns.
 
+**Recognized sensor types (`_SENSOR_TYPE_INFO` — label + unit):** each `external_sensors`
+entry carries a Title-Case `sensor_type_label` and a `unit` string derived from `sensorType`.
+Unit variants of the same measurement are distinct type numbers (e.g. EC and TDS), so the
+unit is a function of the type — not of the raw `sensorUnit` field (see Quirk 28).
+
+| `sensorType` | `sensor_type_label` | `unit` |
+|---|---|---|
+| 10 | Soil Moisture | `%` |
+| 11 | CO2 | `ppm` |
+| 12 | Light | `%` |
+| 13 | pH | *(none)* |
+| 14 | EC | `µS/cm` |
+| 15 | EC | `mS/cm` |
+| 16 | TDS | `ppm` |
+| 17 | TDS | `ppt` |
+| 18 | Water Temp | `°F` |
+| 19 | Water Temp | `°C` |
+| 20 | Water Level | *(none)* |
+
+The water-temp polarity (`18 = °F`, `19 = °C`) follows the HA `ac_infinity` `const.py`
+`SensorType` map and the API's own `waterTempHighValueF`/`waterTempHighValue` convention;
+it is **unverified against live hydro hardware**. Types 13 and 20 are genuinely unitless
+(empty-string `unit`).
+
 **devType=22 addendum (confirmed via Proxyman capture 2026-05-28):** On devType=22
 (UIS CONTROLLER 69 PRO+), the API returns phantom sensor entries with
 `sensorType` values of 4, 6, and 7 — all with non-zero `sensorData` values and
 `accessPort: 7`. These are internal bus readings, not physically-connected
 sensors. Since all real AC Infinity external sensors (soil probes, CO2, light,
 pH, EC, TDS, water probes) use types 10–20, any entry with `sensorType < 10` that
-is not in `_SENSOR_TYPE_LABELS` is treated as internal and filtered. The
+is not in `_SENSOR_TYPE_INFO` is treated as internal and filtered. The
 zero-value filter alone is insufficient for devType=22.
 
 ---
@@ -1344,8 +1368,15 @@ def _sensor_value(s: dict) -> float | int:
     return data / (10 ** (precision - 1)) if precision > 1 else data
 ```
 
-**Out of scope (tracked separately):** `sensorUnit` is present on every sensor entry but not
-yet read — readings are emitted without unit labels. See issue #255.
+**Unit labels (resolved — issues #255, #264, #265):** external-sensor readings now carry a
+grower-readable `sensor_type_label` and a `unit`, both derived from `sensorType` (see the
+`_SENSOR_TYPE_INFO` table in Quirk 20). Each unit variant of a measurement is a distinct
+`sensorType` (e.g. `14` = EC µS/cm vs `15` = EC mS/cm), so the unit is a function of the
+type. The raw `sensorUnit` field is **not** a unit label — per the HA `ac_infinity`
+integration it is only an F/C flag, and it is intentionally not surfaced. Every
+`external_sensors` entry now includes a `"unit"` field (empty string for the unitless
+types 13 = pH and 20 = Water Level). The water-temp polarity (`18 = °F`, `19 = °C`) follows
+the HA `const.py` `SensorType` map and is unverified against live hydro hardware.
 
 ---
 
@@ -1768,8 +1799,12 @@ Get current sensor readings (temp, humidity, VPD) and port states for one device
   "ports": [
     {"port": 1, "name": "Inline Fan", "speed": 5}
   ],
-  "external_sensors": [],
-  "human_summary": "Towlie Tent: 24.3°C, 58.2% RH, VPD 1.31 kPa. Reading from 2026-05-20T09:32:00-05:00."
+  "external_sensors": [
+    {"sensor_id": "9.11", "sensor_type": 11, "sensor_type_label": "CO2", "value": 793, "unit": "ppm"},
+    {"sensor_id": "9.18", "sensor_type": 18, "sensor_type_label": "Water Temp", "value": 68.5, "unit": "°F"},
+    {"sensor_id": "9.13", "sensor_type": 13, "sensor_type_label": "pH", "value": 6.5, "unit": ""}
+  ],
+  "human_summary": "Towlie Tent: 24.3°C, 58.2% RH, VPD 1.31 kPa. External sensors — CO2: 793 ppm, Water Temp: 68.5°F, pH: 6.5. Reading from 2026-05-20T09:32:00-05:00."
 }
 ```
 
@@ -1799,8 +1834,8 @@ Get current sensor readings (temp, humidity, VPD) and port states for one device
 - `vpd` — decoded from `vpdnums ÷ 100` (Quirk 4, Quirk 10)
 - `ports[].speed` — current port speed 0–10 from `speak` field
 - `ports[].plug_status` *(conditional)* — `"not powered"` when `loadState == 0` AND `speak == 0` AND the port still has its **default name** (`"Port N"`). Custom-named ports are excluded — a user-assigned name implies a device was intentionally connected, and `loadState=0` alone cannot distinguish "nothing plugged in" from "device is off" for on/off devices (see Quirk 26). **Omitted entirely** otherwise. Matches the identical signal in `get_port_status`.
-- `external_sensors` — list of UIS sensor readings when sensors are attached; phantom entries (API-reported but no hardware connected) are filtered out (Quirk 20); empty `[]` for built-in-only devices
-- `human_summary` — one-line natural language summary: `"DeviceName: N°U, N% RH, VPD N kPa. Reading from <timestamp>."` Always present.
+- `external_sensors` — list of UIS sensor readings when sensors are attached; phantom entries (API-reported but no hardware connected) are filtered out (Quirk 20); empty `[]` for built-in-only devices. Each entry: `sensor_id`, `sensor_type` (raw int), `sensor_type_label` (Title Case, e.g. `"CO2"`, `"Water Temp"`), `value`, and `unit` (derived from `sensor_type` per Quirk 20/28; empty string for unitless types pH and Water Level)
+- `human_summary` — one-line natural language summary: `"DeviceName: N°U, N% RH, VPD N kPa.[ External sensors — Label: value unit, …] Reading from <timestamp>."` The `External sensors —` clause is present only when external sensors are attached; `%`/`°C`/`°F` attach to the number, other units (ppm, ppt, µS/cm, mS/cm) take a leading space. Always present.
 
 ---
 
@@ -1833,8 +1868,8 @@ Get current sensor readings for all devices at once.
 - `ports[].plug_status` — present on not-powered, default-named (`"Port N"`) port entries (same `loadState == 0` AND `speak == 0` AND default-name condition as `get_device_reading`); omitted for custom-named ports or running ports
 - Devices that fail to parse individually include `"error"` instead of sensor fields
 - Useful for a dashboard view across multiple tents/controllers
-- `external_sensors` — phantom sensor entries (sensors present in the API response but with no hardware connected) are filtered out; see Quirk 20
-- `human_summary` — one-line prose for 1–2 parseable devices; markdown table (`| Device | Temp | Humidity | VPD |`) for 3+ parseable devices; `"No readings available."` when all fail. Always present at the top level.
+- `external_sensors` — phantom sensor entries (sensors present in the API response but with no hardware connected) are filtered out; see Quirk 20. Each entry carries `sensor_type_label` and `unit` (same shape as `get_device_reading`)
+- `human_summary` — one-line prose for 1–2 parseable devices (each device's prose gains an `External sensors — …` clause when sensors are attached); markdown table (`| Device | Temp | Humidity | VPD |`) for 3+ parseable devices (table is unchanged — no sensor clause); `"No readings available."` when all fail. Always present at the top level.
 
 ---
 

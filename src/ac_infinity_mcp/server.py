@@ -897,14 +897,21 @@ async def get_device_reading(device_id: str) -> str:
                 {"port": 1, "name": "Inline Fan", "speed": 5},
                 {"port": 2, "name": "Port 2", "speed": 0, "plug_status": "not powered"}
               ],
-              "external_sensors": []
+              "external_sensors": [
+                {"sensor_id": "9.11", "sensor_type": 11,
+                 "sensor_type_label": "CO2", "value": 793, "unit": "ppm"}
+              ]
             }
 
         Temperature and timestamp use the device's own unit preference and timezone
         (from ``deviceInfo.unit`` and ``zoneId`` in the API response). Devices
         without a configured timezone fall back to UTC.
         ``external_sensors`` excludes phantom entries (API-reported sensor slots
-        with no physical hardware connected — see API Quirk 20).
+        with no physical hardware connected — see API Quirk 20). Each entry carries a
+        Title-Case ``sensor_type_label`` and a ``unit`` derived from ``sensor_type``
+        (empty string for unitless pH and Water Level). EC readings carry their probe's
+        unit (µS/cm or mS/cm); 1 mS/cm = 1000 µS/cm — do not compare bare numbers across
+        probes.
         ``plug_status`` is only present on a port entry when no current is detected,
         the port is not running (speed 0 and no load), **and the port still has its
         default name** (``"Port N"``). Custom-named ports are assumed to have a device
@@ -1296,7 +1303,11 @@ async def get_all_device_readings() -> str:
         ``loadState == 0`` AND ``speak == 0`` condition as ``get_device_reading``,
         and only on default-named ``"Port N"`` ports); omitted otherwise.
         ``external_sensors`` excludes phantom entries (API-reported sensor slots
-        with no physical hardware connected — see API Quirk 20).
+        with no physical hardware connected — see API Quirk 20). Each entry carries a
+        Title-Case ``sensor_type_label`` and a ``unit`` derived from ``sensor_type``
+        (empty string for unitless pH and Water Level). EC readings carry their probe's
+        unit (µS/cm or mS/cm); 1 mS/cm = 1000 µS/cm — do not compare bare numbers across
+        probes.
         On auth/API failure returns ``{"error": "...", "detail": "..."}``.
     """
     try:
