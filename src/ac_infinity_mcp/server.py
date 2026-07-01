@@ -29,7 +29,6 @@ from ac_infinity_mcp.automation import (
     _RAIL_HUMI_HIGH,
     _RAIL_HUMI_LOW,
     _RAIL_TARGET_HUMI,
-    _RAIL_TARGET_TEMP_F,
     _RAIL_TEMP_HIGH_F,
     _RAIL_TEMP_LOW_F,
     _RAIL_VPD_HIGH,
@@ -536,13 +535,8 @@ def _validate_auto(
     is_trigger_param = any(
         v is not None for v in (temp_high_f, temp_low_f, humidity_high, humidity_low)
     )
-    is_target_param = temp_target_f is not None or humidity_target is not None
-    # Mutual exclusion per sensor: temperature.
-    if temp_target_f is not None and (temp_high_f is not None or temp_low_f is not None):
-        return _err(
-            "For temperature you asked me to both hold a target and trigger on a"
-            " threshold — pick one."
-        )
+    is_target_param = humidity_target is not None
+    # Mutual exclusion per sensor: humidity. (Temperature targets are rejected above, #291.)
     if humidity_target is not None and (humidity_high is not None or humidity_low is not None):
         return _err(
             "For humidity you asked me to both hold a target and trigger on a"
@@ -557,8 +551,7 @@ def _validate_auto(
     if require_full and control_style == "target" and not is_target_param:
         return _err("a target rule needs a temperature or humidity target")
 
-    for label, val in (("temp_high_f", temp_high_f), ("temp_low_f", temp_low_f),
-                       ("temp_target_f", temp_target_f)):
+    for label, val in (("temp_high_f", temp_high_f), ("temp_low_f", temp_low_f)):
         if val is not None and not _TEMP_F_MIN <= val <= _TEMP_F_MAX:
             return _err(f"{label} must be {_TEMP_F_MIN}–{_TEMP_F_MAX} °F")
     if temp_low_f is not None and temp_high_f is not None and temp_low_f >= temp_high_f:
@@ -582,9 +575,8 @@ def _validate_auto(
     if humidity_low is not None and humidity_low <= _RAIL_HUMI_LOW:
         return _err(f"humidity_low must be above {_RAIL_HUMI_LOW}% to trigger")
     # A target sitting on its inactive rail decodes back as "no rule set" too (same lossy
-    # round-trip as the triggers above). VPD targets have no rail, so only temp/humidity here.
-    if temp_target_f is not None and temp_target_f <= _RAIL_TARGET_TEMP_F:
-        return _err(f"temp_target_f must be above {_RAIL_TARGET_TEMP_F}°F to hold")
+    # round-trip as the triggers above). VPD targets have no rail; temp targets are rejected
+    # outright (#291), so only the humidity target is checked here.
     if humidity_target is not None and humidity_target <= _RAIL_TARGET_HUMI:
         return _err(f"humidity_target must be above {_RAIL_TARGET_HUMI}% to hold")
 
@@ -605,7 +597,7 @@ def _validate_auto(
     for name, val in (
         ("temp_high_f", temp_high_f), ("temp_low_f", temp_low_f),
         ("humidity_high", humidity_high), ("humidity_low", humidity_low),
-        ("temp_target_f", temp_target_f), ("humidity_target", humidity_target),
+        ("humidity_target", humidity_target),
         ("temp_buffer", temp_buffer), ("temp_transition", temp_transition),
         ("humidity_buffer", humidity_buffer), ("humidity_transition", humidity_transition),
     ):
@@ -4434,8 +4426,8 @@ async def add_automation_rule(
     - ``on``: run the port(s) between ``min_level`` and ``max_level``.
     - ``cycle``: alternate on/off using ``cycle_on_minutes`` / ``cycle_off_minutes``.
     - ``auto``: respond to temperature and/or humidity. Needs ``control_style``:
-      - ``target`` — hold a setpoint (``humidity_target``, or ``temp_target_f`` where the
-        device supports it).
+      - ``target`` — hold a setpoint (``humidity_target``). Holding a temperature
+        setpoint is not supported — use temperature thresholds or a VPD target.
       - ``trigger`` — turn on at thresholds (``temp_high_f``/``temp_low_f`` and/or
         ``humidity_high``/``humidity_low``).
     - ``vpd``: respond to VPD. Needs ``control_style``: ``target`` (``vpd_target``) or
@@ -4682,7 +4674,6 @@ def _overlay_same_mode(
     temp_low_f: int | None,
     humidity_high: int | None,
     humidity_low: int | None,
-    temp_target_f: int | None,
     humidity_target: int | None,
     vpd_target: float | None,
     vpd_high: float | None,
@@ -4726,8 +4717,6 @@ def _overlay_same_mode(
         if humidity_low is not None:
             body["autoLowHumi"] = humidity_low
             body["autoLowHumiSwitch"] = 1
-        if temp_target_f is not None:
-            body["targetTempF"] = temp_target_f
         if humidity_target is not None:
             body["targetHumi"] = humidity_target
         if temp_buffer is not None:
@@ -5007,7 +4996,7 @@ async def update_automation_rule(
                 body, effective_mode,
                 temp_high_f=temp_high_f, temp_low_f=temp_low_f,
                 humidity_high=humidity_high, humidity_low=humidity_low,
-                temp_target_f=temp_target_f, humidity_target=humidity_target,
+                humidity_target=humidity_target,
                 vpd_target=vpd_target, vpd_high=vpd_high, vpd_low=vpd_low,
                 temp_buffer=temp_buffer, temp_transition=temp_transition,
                 humidity_buffer=humidity_buffer, humidity_transition=humidity_transition,
