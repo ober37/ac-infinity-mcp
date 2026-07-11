@@ -4369,9 +4369,13 @@ async def delete_advance_automation(
         # #302: one whole-program delete removes the entire slot (all rules) in a single
         # isflag=1 call. Do NOT loop over adv_ids — after the first call the program is gone,
         # so a second delByid returns a non-200 code and surfaces a false "API error" even
-        # though the delete succeeded.
+        # though the delete succeeded. Pass whole_program=True explicitly to make the isflag=1
+        # intent self-documenting at the call site.
         await asyncio.to_thread(
-            _client().delete_advance_automation, str(dev_id), found["adv_ids"][0]
+            _client().delete_advance_automation,
+            str(dev_id),
+            found["adv_ids"][0],
+            whole_program=True,
         )
 
         return json.dumps({

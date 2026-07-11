@@ -6916,6 +6916,19 @@ async def test_delete_advance_automation_live_disables_first(mock_client):
     assert mock_client.delete_advance_automation.call_args.args[1] == 1342758  # adv_ids[0]
 
 
+async def test_delete_single_rule_disabled_automation(mock_client):
+    """A disabled single-rule automation deletes in one call with no disable-first toggle.
+    'Pollenation Airflow' (999001) is a single-entry, isOn=0 automation."""
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    result = await delete_advance_automation("C58ZA", "999001", dry_run=False)
+    data = json.loads(result)
+    assert "error" not in data
+    assert data["sent"] is True
+    assert data["was_enabled"] is False
+    assert mock_client.disable_advance_automation.call_count == 0  # already disabled
+    assert mock_client.delete_advance_automation.call_count == 1
+
+
 async def test_get_advance_automation_no_schedule_sentinel(mock_client):
     """beginTime=255 (v2.0 no-schedule) → begin_time is None in response."""
     mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
