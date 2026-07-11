@@ -4277,11 +4277,14 @@ async def create_advance_automation(
         # be verified, so the rule may have been created with a default type. Tell the grower to
         # check it — this fires only on failure, so it adds no noise on the normal path.
         if port_type_degraded:
+            port_display = (
+                f"{port_name} (Port {port})" if port_name != f"Port {port}" else port_name
+            )
             response["note"] = (
-                f"I created '{clean_name}', but couldn't fully verify {port_name}'s device type"
-                " just now. Please open the AC Infinity app and check this rule — if it shows an"
-                " unexpected speed range on an on/off device (like a heater or humidifier),"
-                " re-create that rule in the app."
+                f"I created '{clean_name}', but couldn't fully verify {port_display}'s device"
+                " type just now. Please open the AC Infinity app and check this rule — if it"
+                " shows an unexpected speed range on an on/off device (like a heater or"
+                " humidifier), re-create that rule in the app."
             )
         return json.dumps(response)
 

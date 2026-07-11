@@ -165,8 +165,9 @@ def test_resolve_port_type_covering_rule_explicit_zero():
 
 
 def test_resolve_port_type_multi_port_matches_any():
-    # Rule bitmask 48 covers Ports 5 and 6; resolving [5, 6] matches it.
-    assert resolve_port_type([_rule(48, 0)], [5, 6]) == 0
+    # Rule bitmask 48 covers Ports 5 and 6; resolving [5, 6] matches it (non-zero portType so
+    # the assertion fails if the bitmask match didn't actually fire).
+    assert resolve_port_type([_rule(48, 1)], [5, 6]) == 1
     # First port has no rule, second does → still resolves via the second port.
     assert resolve_port_type([_rule(2, 1)], [3, 2]) == 1
 

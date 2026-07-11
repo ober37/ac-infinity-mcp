@@ -163,8 +163,8 @@ def resolve_port_type(raw_entries: list[dict[str, Any]], ports: list[int]) -> in
     ANY of ``ports`` (rules group same-device-type ports, so the value is consistent). Returns
     ``0`` when no existing rule governs any target port — the value is then undiscoverable via
     the read APIs (accepted limitation: the very first automation on a fresh outlet port may
-    still need an in-app fix). All fields are coerced defensively so a malformed entry can
-    never raise.
+    still need an in-app fix). Missing/None ``grouptDevType``/``portType`` coerce to 0 (the
+    entry is skipped or read as a fan), so a malformed entry degrades gracefully.
     """
     for port in ports:
         bit = 1 << (port - 1)
