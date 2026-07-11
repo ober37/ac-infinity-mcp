@@ -1679,7 +1679,7 @@ round-trip described above:
 > `minLevel`) are `0`/`None` on all legacy entries — purpose unknown, likely AI+/newer-firmware
 > only. `currentMode=2` (Off) and a CO2 target field were not located on this device.
 
-### Quirk 34 — `portType` is a per-port device-identity field exposed by NO read endpoint; resolve it from existing rules, never hardcode
+### Quirk 33 — `portType` is a per-port device-identity field exposed by NO read endpoint; resolve it from existing rules, never hardcode
 
 Each Advance Automation rule carries a `portType` field that encodes the **device identity** of
 the governed port, independent of the rule's behavior:
