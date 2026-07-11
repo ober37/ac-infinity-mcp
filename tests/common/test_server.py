@@ -6899,15 +6899,21 @@ async def test_enable_advance_automation_live_calls_once(mock_client):
 
 
 async def test_delete_advance_automation_live_disables_first(mock_client):
-    """Enabled automation: disable first (once), then delete each adv_id."""
+    """Enabled multi-rule automation: disable once, then delete the whole program in a single
+    isflag=1 call. #302 — the old code looped one delete per adv_id; the second delByid on the
+    already-deleted program surfaced a false 'API error' even though the delete succeeded.
+    'Moderate Airflow' (id 1342758) has two adv_ids (1342758, 2179295)."""
     mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
     result = await delete_advance_automation("C58ZA", "1342758", dry_run=False)
     data = json.loads(result)
+    assert "error" not in data
     assert data.get("sent") is True
     assert data.get("was_enabled") is True
+    assert data.get("automation_name") == "Moderate Airflow"
     assert mock_client.disable_advance_automation.call_count == 1
-    # one delete call per adv_id in "Moderate Airflow" (2 entries)
-    assert mock_client.delete_advance_automation.call_count == 2
+    # #302: exactly ONE whole-program delete — not one per adv_id.
+    assert mock_client.delete_advance_automation.call_count == 1
+    assert mock_client.delete_advance_automation.call_args.args[1] == 1342758  # adv_ids[0]
 
 
 async def test_get_advance_automation_no_schedule_sentinel(mock_client):

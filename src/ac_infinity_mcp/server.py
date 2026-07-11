@@ -4361,16 +4361,18 @@ async def delete_advance_automation(
 
         # If enabled, disable first with a single toggle call (Fix 1: the API
         # toggles all same-name entries on one call — N calls cause N toggles).
-        # Then delete each adv_id individually (each entry must be explicitly deleted).
         if was_enabled:
             await asyncio.to_thread(
                 _client().disable_advance_automation, str(dev_id), found["adv_ids"][0]
             )
 
-        for adv_id in found["adv_ids"]:
-            await asyncio.to_thread(
-                _client().delete_advance_automation, str(dev_id), adv_id
-            )
+        # #302: one whole-program delete removes the entire slot (all rules) in a single
+        # isflag=1 call. Do NOT loop over adv_ids — after the first call the program is gone,
+        # so a second delByid returns a non-200 code and surfaces a false "API error" even
+        # though the delete succeeded.
+        await asyncio.to_thread(
+            _client().delete_advance_automation, str(dev_id), found["adv_ids"][0]
+        )
 
         return json.dumps({
             "action": "delete",
