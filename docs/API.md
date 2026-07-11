@@ -1679,6 +1679,47 @@ round-trip described above:
 > `minLevel`) are `0`/`None` on all legacy entries — purpose unknown, likely AI+/newer-firmware
 > only. `currentMode=2` (Off) and a CO2 target field were not located on this device.
 
+### Quirk 33 — `portType` is a per-port device-identity field exposed by NO read endpoint; resolve it from existing rules, never hardcode
+
+Each Advance Automation rule carries a `portType` field that encodes the **device identity** of
+the governed port, independent of the rule's behavior:
+
+| `portType` | Device class |
+|---|---|
+| `0` | Variable-speed fan (the app shows a MIN/MAX speed range) |
+| `1` | On/off outlet / power-adaptor (heater, humidifier, lights on a smart plug — no speed range) |
+
+**`portType` is not exposed by any read endpoint.** `devInfoListAll` omits it entirely and
+`getdevModeSettingList` does not carry it; both report `loadType == 0` even for an outlet port,
+so `loadType` cannot substitute (the on/off-hardware `loadType 4`/`128` signal used elsewhere —
+see the `data_quality`/toggle-hardware note in `get_port_activity_report` and Rule A above — is
+absent on these controllers). The value lives **only inside existing `getGroups` automation
+rules**. A rule-write path that reconstructs the payload from friendly parameters therefore has
+no source for it and, before Issue #300, hardcoded `portType: 0` for every rule.
+
+**Symptom of the wrong value (#300, an AI-escape introduced in #284):** writing `portType=0` to a
+`portType=1` (outlet/power-adaptor) port makes the AC Infinity app render the rule as a
+variable-speed fan rule with a **phantom MIN/MAX speed range**; the rule misbehaves until it is
+re-created in the app. `onSpeed` is unaffected — a correct outlet rule keeps its `onSpeed` and
+relies on `portType=1` to suppress the speed UI, so the fix is `portType` only.
+
+**How the tools resolve it now.** `create_advance_automation` and `add_automation_rule` no longer
+hardcode `portType`; they call `resolve_port_type(raw_entries, ports)` (`client.py`), which
+returns the `portType` of the first existing `getGroups` rule whose `grouptDevType` bitmask covers
+any target port (rules group same-device-type ports, so the value is consistent) and `0` when no
+existing rule governs the port. `build_groups_payload` takes a `port_type` parameter (default `0`,
+preserving byte-identity for the golden-payload tests). `create` issues one extra `getGroups` read
+to resolve the value on the live path only; that read is best-effort — on failure it falls back to
+`portType=0`, adds a grower-readable `note` to the response, and never blocks the write.
+`add_automation_rule` resolves from the `getGroups` data it already fetches (no extra read). The
+in-place edit/rebuild path (`updateGroupsById`, Quirk 32) already preserved `portType` because it
+deep-copies the live rule body and `portType` is in no per-mode signature-key set.
+
+**Documented limitations:** (1) the **first** automation on a fresh outlet port that carries no
+prior rules still defaults to `portType=0` — the value is undiscoverable via the read APIs, so
+that rule may still need an in-app fix. (2) **Mixed-device-type port grouping is unsupported** —
+the resolver assumes all ports in one rule share a device type and returns a single `portType`.
+
 ---
 
 ### Quirk 33 — v2 endpoints reject the `version`/`requestId` headers with a misleading `403 "Login Expired"` body
