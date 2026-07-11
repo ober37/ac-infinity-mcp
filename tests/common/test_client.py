@@ -13,6 +13,7 @@ from ac_infinity_mcp.schema import (
     ACInfinityAuthError,
     ACInfinityDeviceError,
 )
+from tests.fixtures.advance_automation_fixtures import MOCK_ADVANCE_AUTOMATIONS_LIST
 from tests.fixtures.mock_api_responses import (
     AUTH_FAILURE,
     AUTH_SUCCESS,
@@ -30,6 +31,7 @@ DEVICES_URL = "https://www.acinfinityserver.com/api/user/devInfoListAll"
 HISTORY_URL = "https://www.acinfinityserver.com/api/log/dataPage"
 MODE_SETTINGS_URL = "https://www.acinfinityserver.com/api/dev/getdevModeSettingList"
 ADD_DEV_MODE_URL = "https://www.acinfinityserver.com/api/dev/addDevMode"
+GET_GROUPS_URL = "https://www.acinfinityserver.com/api/version=2.0/dev/getGroups"
 
 
 @pytest.fixture
@@ -1036,23 +1038,32 @@ def test_get_historical_data_refreshes_token_on_401(authed_client):
 
 
 @pytest.mark.parametrize(
-    "code,session_refreshable,expected",
+    "code,msg,session_refreshable,expected",
     [
-        (401, True, ACInfinityAuthError),  # 401 is always auth (read path)
-        (401, False, ACInfinityAuthError),  # 401 is always auth (write path too)
-        (10003, True, ACInfinityAuthError),  # session-expiry on a READ → refreshable auth error
-        (10003, False, ACInfinityAPIError),  # session-expiry on a WRITE → API error (no replay)
-        (500, True, ACInfinityAPIError),  # unrelated codes stay API errors
-        (500, False, ACInfinityAPIError),
+        (401, "msg", True, ACInfinityAuthError),  # 401 is always auth (read path)
+        (401, "msg", False, ACInfinityAuthError),  # 401 is always auth (write path too)
+        (10003, "session expired", True, ACInfinityAuthError),  # session-expiry READ → refreshable
+        (10003, "session expired", False, ACInfinityAPIError),  # session-expiry WRITE → no replay
+        (500, "msg", True, ACInfinityAPIError),  # unrelated codes stay API errors
+        (500, "msg", False, ACInfinityAPIError),
+        # #298 — 403 + "login expired" message is a session-expiry on the READ path only.
+        (403, "Login Expired Please login again!", True, ACInfinityAuthError),  # read → refreshable
+        (403, "Login Expired Please login again!", False, ACInfinityAPIError),  # write → API error
+        (403, "Data saving failed. Please try again later.", True, ACInfinityAPIError),  # no marker
+        (403, "modeSetid is not allowed in payload.", True, ACInfinityAPIError),  # no marker
+        (403, None, True, ACInfinityAPIError),  # null msg → no crash, no match
+        (403, "", True, ACInfinityAPIError),  # empty msg → no match
+        (500, "login expired", True, ACInfinityAPIError),  # marker under non-403 → NOT refreshed
     ],
 )
-def test_raise_for_api_code_session_mapping(client, code, session_refreshable, expected):
+def test_raise_for_api_code_session_mapping(client, code, msg, session_refreshable, expected):
     """Per-direction code mapping: 10003 is an auth error only on reads (so the token
     refresh fires); on writes it stays an API error so the write is never replayed. 401
-    remains an auth error on every path. Covers the mapping for all call sites, which all
-    delegate here."""
+    remains an auth error on every path. A 403 is a session-expiry ONLY on a read AND only
+    when the message carries a login-expired marker (#298) — gated on the 403 code, null-safe.
+    Covers the mapping for all call sites, which all delegate here."""
     with pytest.raises(expected):
-        client._raise_for_api_code(code, "msg", "Ctx", session_refreshable=session_refreshable)
+        client._raise_for_api_code(code, msg, "Ctx", session_refreshable=session_refreshable)
 
 
 @responses_lib.activate
@@ -1093,6 +1104,61 @@ def test_get_devices_10003_refresh_failure_caches_and_short_circuits(authed_clie
         authed_client.get_devices()
     login_calls = [c for c in responses_lib.calls if "appUserLogin" in c.request.url]
     assert len(login_calls) == 1  # only the first refresh attempted a login
+
+
+# ============ #298 — v2 header omission + 403 "Login Expired" read refresh ============
+
+
+def test_v2_headers_omit_version_and_request_id(authed_client):
+    """#298 — the server rejects any v2 request carrying `version` or `requestId`.
+    Both must be absent from _v2_headers(); token/Host/User-Agent stay present."""
+    headers = authed_client._v2_headers()
+    assert "version" not in headers
+    assert "requestId" not in headers
+    assert headers["token"] == authed_client.token
+    assert headers["Host"] == "www.acinfinityserver.com"
+    assert headers["User-Agent"] == "okhttp/3.10.0"
+
+
+@responses_lib.activate
+def test_get_advance_automations_request_omits_version_and_request_id(authed_client):
+    """Wire-level guard: the outgoing getGroups request must not carry version/requestId."""
+    responses_lib.add(
+        responses_lib.POST, GET_GROUPS_URL,
+        json={"code": 200, "msg": "success.", "data": MOCK_ADVANCE_AUTOMATIONS_LIST},
+        status=200,
+    )
+    authed_client.get_advance_automations("12345")
+    sent = next(c for c in responses_lib.calls if "getGroups" in c.request.url)
+    assert "version" not in sent.request.headers
+    assert "requestId" not in sent.request.headers
+
+
+@responses_lib.activate
+def test_get_advance_automations_refreshes_token_on_403_login_expired(authed_client):
+    """#298 — a v2 READ that returns HTTP-200 body {code:403, "Login Expired..."} transparently
+    re-auths and retries. The fixture uses HTTP status=200 (the real vendor shape): getGroups
+    calls raise_for_status() before inspecting the body code, so a status=403 fixture would
+    raise HTTPError and never reach the marker classification."""
+    responses_lib.add(
+        responses_lib.POST, GET_GROUPS_URL,
+        json={"code": 403, "msg": "Login Expired Please login again!"}, status=200,
+    )
+    responses_lib.add(
+        responses_lib.POST, LOGIN_URL,
+        json={"code": 200, "data": {"appId": "fresh_token_403"}}, status=200,
+    )
+    responses_lib.add(
+        responses_lib.POST, GET_GROUPS_URL,
+        json={"code": 200, "msg": "success.", "data": MOCK_ADVANCE_AUTOMATIONS_LIST},
+        status=200,
+    )
+
+    result = authed_client.get_advance_automations("12345")
+    assert len(result) == len(MOCK_ADVANCE_AUTOMATIONS_LIST)
+    assert authed_client.token == "fresh_token_403"
+    login_calls = [c for c in responses_lib.calls if "appUserLogin" in c.request.url]
+    assert len(login_calls) == 1  # exactly one refresh
 
 
 def test_refresh_network_failure_is_not_cached(authed_client, monkeypatch):

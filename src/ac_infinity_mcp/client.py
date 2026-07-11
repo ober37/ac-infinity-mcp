@@ -119,6 +119,13 @@ _SCHEDULE_ALWAYS_ACTIVE: int = 255
 # defensively (the refresh-failure cache bounds re-login to one attempt regardless).
 _SESSION_EXPIRED_API_CODES: frozenset[int] = frozenset({10003})
 
+# Some v2 endpoints signal a genuine session expiry as HTTP-200 body code 403 with a
+# "Login Expired Please login again!" message rather than code 10003 (Issue #298). Because
+# 403 is overloaded on writes (rate-limit "Data saving failed", field-validation errors),
+# we treat a 403 as session-expiry ONLY on the read path (session_refreshable=True) AND only
+# when the message carries one of these markers — never on the bare 403 code.
+_SESSION_EXPIRED_MSG_MARKERS: tuple[str, ...] = ("login expired", "login again")
+
 
 # ============ Rail sentinels (Issue #284) ============
 # A trigger/target parked at its rail means "inactive" — the app stores the rail value
@@ -596,8 +603,23 @@ class ACInfinityClient:
         session-expiry code surfaces as a plain ACInfinityAPIError instead.
 
         ``401`` is always treated as an auth failure (unchanged on every path).
+
+        A ``403`` carrying a "login expired" message (Issue #298) is treated as a
+        refreshable session-expiry on reads only — gated on the message marker, not the
+        bare 403 code, so write-path 403s (rate-limit / field-validation) are never
+        misclassified. ``(error_msg or "")`` guards against a null ``msg`` in the body.
         """
-        if code == 401 or (session_refreshable and code in _SESSION_EXPIRED_API_CODES):
+        msg_lower = (error_msg or "").lower()
+        session_expired_403 = (
+            code == 403
+            and session_refreshable
+            and any(marker in msg_lower for marker in _SESSION_EXPIRED_MSG_MARKERS)
+        )
+        if (
+            code == 401
+            or (session_refreshable and code in _SESSION_EXPIRED_API_CODES)
+            or session_expired_403
+        ):
             raise ACInfinityAuthError(f"Token rejected by API (code {code}): {error_msg}")
         raise ACInfinityAPIError(f"{context} API error {code}: {error_msg}")
 
@@ -1171,20 +1193,24 @@ class ACInfinityClient:
     def _v2_headers(self) -> dict[str, str]:
         """Build the additional headers required for v2.0 API endpoints.
 
-        The v2.0 API validates several app-identity headers that the legacy API
-        does not require. The `sign` header is omitted — the server accepts requests
-        without it (confirmed in Phase 17 network capture).
+        The `version` and `requestId` headers are intentionally omitted (Issue #298):
+        the server now rejects any v2 request that carries either one — absent a valid
+        `sign` request signature — with a misleading HTTP-200 body
+        ``{"code": 403, "msg": "Login Expired Please login again!"}``, breaking the
+        entire Advance-Automation surface (reads and writes). Both were sent in the
+        Phase-17 network capture and accepted at the time; the server contract has since
+        tightened. We do not compute `sign`, so the request authenticates on the `token`
+        header alone (the same posture the legacy v1 endpoints rely on). The remaining
+        app-identity headers are accepted by the server and left in place.
         """
         return {
             "token": self.token or "",
             "Host": "www.acinfinityserver.com",
             "User-Agent": "okhttp/3.10.0",
             "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
-            "version": "555",
             "phoneType": "1",
             "devType": "18",
             "appVersion": "2.0.4",
-            "requestId": str(int(time.time() * 1000)),
             "languageType": "en-US",
             "languageVersion": "idongle_pro_3",
         }
