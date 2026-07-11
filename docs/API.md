@@ -1681,11 +1681,52 @@ round-trip described above:
 
 ---
 
+### Quirk 33 — v2 endpoints reject the `version`/`requestId` headers with a misleading `403 "Login Expired"` body
+
+The v2.0 endpoints (path prefix `/api/version=2.0/dev/` — the entire Advance-Automation
+surface: `getGroups`, `addGroups`, `updateGroupsIsOn`, `updateGroupsById`, `delByid`) must be
+called **without** the `version` and `requestId` HTTP headers. AC Infinity's server now
+rejects any v2 request carrying **either** header (each one alone trips it) with an otherwise
+HTTP-200 envelope whose body is:
+
+```json
+{"code": 403, "msg": "Login Expired Please login again!"}
+```
+
+The message is **misleading** — the session is valid and a fresh re-login does not fix it. The
+root cause is a **vendor server-side contract change**: the server now requires a valid `sign`
+request signature alongside `version`/`requestId`, and this client does not compute `sign`.
+Both headers shipped in `_v2_headers()` from Phase 17 (#49) and were accepted at capture time;
+the contract tightened underneath us, silently breaking every v2 read and write. The fix
+removes both headers so the request authenticates on the `token` header alone — the same
+posture the legacy v1 endpoints already rely on. The remaining app-identity headers
+(`phoneType`, `devType`, `appVersion`, `languageType`, `languageVersion`) are individually
+proven harmless and left in place. See `_v2_headers` in `client.py`. (Issue #298.)
+
+Because this contract is enforced only by the live vendor server, it is **invisible to the
+mocked test suite** — a regression re-adding either header would pass CI while breaking the
+live Advance-Automation surface. A unit test now asserts `_v2_headers()` omits both, but the
+authoritative check is a live smoke test of the v2 surface after any vendor app update.
+
+**Read-path defense (companion to Quirk 31):** a genuine future v2 session expiry may also
+arrive shaped as `403` + a "login expired" / "login again" message rather than code `10003`.
+`_raise_for_api_code` now treats that shape as a refreshable session expiry **on the read path
+only** — gated on `code == 403` **and** `session_refreshable=True` **and** the message carrying
+one of the `_SESSION_EXPIRED_MSG_MARKERS` (`"login expired"`, `"login again"`), matched
+null-safely via `(error_msg or "").lower()`. It is keyed on the message, never the bare `403`
+code, so write-path 403s (rate-limit `"Data saving failed"`, field-validation errors) are never
+misclassified — writes pass `session_refreshable=False` and are unaffected. A real expiry thus
+self-heals through the existing one-shot transparent re-auth (Quirk 31); the misleading Bug-1
+403 does not, which is why removing the headers is the actual fix and this is defense only.
+
+---
+
 ## v2.0 API Endpoints Reference
 
 All endpoints below use the base URL `https://www.acinfinityserver.com/api` and require
 `Content-Type: application/x-www-form-urlencoded; charset=utf-8` plus `token: <appId>` header.
-All use HTTPS (TLSv1.3 — see Quirk 8).
+They must **not** carry the `version`/`requestId` headers — the server rejects those with a
+misleading `403 "Login Expired"` body (see Quirk 33). All use HTTPS (TLSv1.3 — see Quirk 8).
 
 ### Automation Management
 
