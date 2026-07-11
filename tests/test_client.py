@@ -3,7 +3,11 @@
 import pytest
 
 from ac_infinity_mcp.automation import _decode_rule
-from ac_infinity_mcp.client import build_add_groups_payload, build_groups_payload
+from ac_infinity_mcp.client import (
+    build_add_groups_payload,
+    build_groups_payload,
+    resolve_port_type,
+)
 
 _REPRESENTATIVE_KWARGS = dict(
     dev_id="ABC123",
@@ -104,6 +108,77 @@ def test_build_groups_payload_no_caller_param_spread():
     )
     assert "max_level" not in payload
     assert "mode" not in payload
+
+
+# ============ #300 — portType device-identity ============
+
+
+def test_build_groups_payload_port_type_default_zero():
+    """Default port_type keeps portType=0 (byte-identity for fans / golden payloads)."""
+    payload = build_groups_payload(
+        dev_id="X", ports=[1], clean_name="T", begin_time=0, end_time=1439, mode="on", on_speed=1,
+    )
+    assert payload["portType"] == 0
+
+
+def test_build_groups_payload_port_type_passed_through():
+    """port_type=1 (outlet/power-adaptor) reaches the payload."""
+    payload = build_groups_payload(
+        dev_id="X", ports=[2], clean_name="T", begin_time=0, end_time=1439, mode="on",
+        on_speed=1, port_type=1,
+    )
+    assert payload["portType"] == 1
+
+
+def _rule(grp: int, port_type: int) -> dict:
+    return {"grouptDevType": grp, "portType": port_type}
+
+
+def test_resolve_port_type_covering_rule():
+    # Port 2 → bit 0b10; a rule with bitmask 2 and portType 1 covers it.
+    assert resolve_port_type([_rule(2, 1)], [2]) == 1
+
+
+def test_resolve_port_type_no_covering_rule_returns_zero():
+    # Only a Port-1 rule (bitmask 1) exists; resolving Port 2 finds nothing → 0.
+    assert resolve_port_type([_rule(1, 1)], [2]) == 0
+
+
+def test_resolve_port_type_empty_entries_returns_zero():
+    assert resolve_port_type([], [2]) == 0
+
+
+def test_resolve_port_type_covering_rule_is_not_first():
+    """The bitmask must select the COVERING rule, not entries[0]. An earlier non-covering
+    rule carries a DIFFERENT portType; the resolver must skip it and return the covering one."""
+    entries = [
+        _rule(1, 0),   # Port 1 only — does NOT cover Port 2; different portType
+        _rule(8, 0),   # Port 4 only — does NOT cover Port 2
+        _rule(2, 1),   # Port 2 — the covering rule
+    ]
+    assert resolve_port_type(entries, [2]) == 1
+
+
+def test_resolve_port_type_covering_rule_explicit_zero():
+    """A covering rule whose portType is explicitly 0 returns 0 — distinct from no-covering."""
+    assert resolve_port_type([_rule(2, 0)], [2]) == 0
+
+
+def test_resolve_port_type_multi_port_matches_any():
+    # Rule bitmask 48 covers Ports 5 and 6; resolving [5, 6] matches it.
+    assert resolve_port_type([_rule(48, 0)], [5, 6]) == 0
+    # First port has no rule, second does → still resolves via the second port.
+    assert resolve_port_type([_rule(2, 1)], [3, 2]) == 1
+
+
+def test_resolve_port_type_defensive_coercion():
+    """Missing/None grouptDevType or portType must not raise; treated as 0."""
+    entries = [
+        {"grouptDevType": None, "portType": None},   # skipped (covers nothing)
+        {"portType": 1},                             # no grouptDevType → skipped
+        {"grouptDevType": 2},                        # covers Port 2, portType missing → 0
+    ]
+    assert resolve_port_type(entries, [2]) == 0
 
 
 # ============ Golden signatures per mode/sub-mode (capture program "0624") ============

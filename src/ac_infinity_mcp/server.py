@@ -44,6 +44,7 @@ from ac_infinity_mcp.automation import (
 from ac_infinity_mcp.client import (
     ACInfinityClient,
     build_groups_payload,
+    resolve_port_type,
 )
 from ac_infinity_mcp.formatting import (
     _effective_tz,
@@ -4204,6 +4205,28 @@ async def create_advance_automation(
                 ),
             })
 
+        # #300: resolve the port's device-identity portType from existing getGroups rules so an
+        # outlet/power-adaptor rule (portType=1) isn't written as a fan rule (portType=0, phantom
+        # MIN/MAX speed). Only the fetch is guarded — a getGroups read failure must never block
+        # creation (best-effort, fall back to 0), while a resolver bug stays visible. Resolved
+        # on the live path only: the dry-run preview does not surface portType, so it needs no
+        # read (and gains no new failure surface).
+        port_type = 0
+        port_type_degraded = False
+        try:
+            existing_rules = await asyncio.to_thread(
+                _client().get_advance_automations, str(dev_id)
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not resolve portType for create (device=%s): %s",
+                device_id,
+                type(exc).__name__,
+            )
+            port_type_degraded = True
+        else:
+            port_type = resolve_port_type(existing_rules, [port])
+
         # Live path: build full addGroups payload via client helper. mode="on" reproduces
         # the original single-port On-mode payload byte-for-byte (on_speed passed directly).
         # #287: continuous → switch_time 255 (the 24/7 toggle), else the default day schedule.
@@ -4218,6 +4241,7 @@ async def create_advance_automation(
             end_time=end_time,
             on_speed=on_speed,
             min_level=off_speed,
+            port_type=port_type,
             **build_extra,
         )
 
@@ -4234,7 +4258,7 @@ async def create_advance_automation(
                 "detail": "see server logs",
             })
 
-        return json.dumps({
+        response = {
             "action": "create",
             "automation_id": str(adv_id),
             "automation_id_note": "internal — reference this automation by name to users",
@@ -4248,7 +4272,18 @@ async def create_advance_automation(
             "schedule_summary": schedule_summary,
             "dry_run": False,
             "sent": True,
-        })
+        }
+        # #300: on the rare fallback branch (getGroups read failed), the device type could not
+        # be verified, so the rule may have been created with a default type. Tell the grower to
+        # check it — this fires only on failure, so it adds no noise on the normal path.
+        if port_type_degraded:
+            response["note"] = (
+                f"I created '{clean_name}', but couldn't fully verify {port_name}'s device type"
+                " just now. Please open the AC Infinity app and check this rule — if it shows an"
+                " unexpected speed range on an on/off device (like a heater or humidifier),"
+                " re-create that rule in the app."
+            )
+        return json.dumps(response)
 
     except ACInfinityAuthError as e:
         logger.warning("Auth error in create_advance_automation: %s", e)
@@ -4613,10 +4648,15 @@ async def add_automation_rule(
             })
         group_nums, sort_type = next(iter(slots))
         next_sub = max((e.get("subNumber") or 0) for e in program_entries) + 1
+        # #300: resolve the ports' device-identity portType from the getGroups data already
+        # fetched above (no extra API call) so an outlet/power-adaptor rule isn't written as a
+        # fan rule. Falls back to 0 when no existing rule governs the port (undiscoverable).
+        port_type = resolve_port_type(raw, ports)
         payload = build_groups_payload(
             dev_id=str(dev_id), ports=ports, clean_name=clean_program,
             begin_time=begin_time, end_time=end_time,
             is_flag=0, group_nums=group_nums, sort_type=sort_type, sub_number=next_sub,
+            port_type=port_type,
             **kwargs,
         )
         decoded = _decode_rule(payload)

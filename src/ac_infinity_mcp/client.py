@@ -151,6 +151,29 @@ _MODE_AUTO = 4
 _MODE_VPD = 6
 
 
+def resolve_port_type(raw_entries: list[dict[str, Any]], ports: list[int]) -> int:
+    """Resolve the device-identity ``portType`` for ``ports`` from existing getGroups rules.
+
+    ``portType`` (0 = variable-speed fan, 1 = on/off outlet/power-adaptor) is a per-port
+    attribute the AC Infinity app persists ONLY inside automation rules — it is absent from
+    ``devInfoListAll`` and ``getdevModeSettingList`` (Issue #300). Sending the wrong value makes
+    the app render an outlet rule as a fan rule (phantom MIN/MAX speed range).
+
+    Returns the ``portType`` of the first existing rule whose ``grouptDevType`` bitmask covers
+    ANY of ``ports`` (rules group same-device-type ports, so the value is consistent). Returns
+    ``0`` when no existing rule governs any target port — the value is then undiscoverable via
+    the read APIs (accepted limitation: the very first automation on a fresh outlet port may
+    still need an in-app fix). All fields are coerced defensively so a malformed entry can
+    never raise.
+    """
+    for port in ports:
+        bit = 1 << (port - 1)
+        for entry in raw_entries:
+            if int(entry.get("grouptDevType") or 0) & bit:
+                return int(entry.get("portType") or 0)
+    return 0
+
+
 def build_groups_payload(
     dev_id: str,
     ports: list[int],
@@ -186,6 +209,7 @@ def build_groups_payload(
     group_nums: int | None = None,
     sort_type: int | None = None,
     adv_id: int | None = None,
+    port_type: int = 0,
 ) -> dict[str, Any]:
     """Build the addGroups / updateGroupsById payload for one Advance Automation rule.
 
@@ -251,7 +275,11 @@ def build_groups_payload(
         "returnData": 1,
         "templateType": 0,
         "grouptDevType": grp_dev_type,
-        "portType": 0,
+        # Issue #300: portType is a per-port device-identity attribute (0 = variable-speed
+        # fan, 1 = on/off outlet/power-adaptor). It is exposed by NO read endpoint — only by
+        # existing getGroups rules — so callers resolve it via resolve_port_type() and pass it
+        # here. Default 0 preserves byte-identity for the golden-payload tests / On-mode shim.
+        "portType": port_type,
         "portState": 0,
         "portSetHex": "",
         "portStateHex": "",

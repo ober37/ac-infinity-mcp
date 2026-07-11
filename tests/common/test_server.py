@@ -6168,6 +6168,99 @@ async def test_create_explicit_window_is_scheduled_live(mock_client):
     assert payload["beginTime"] == 360
 
 
+# ============ #300 — portType device-identity resolution ============
+# Isolated inline programs (never mutate the shared MOCK_ADVANCE_AUTOMATIONS_LIST) so the
+# portType assertions can't be coupled to other tests' fixtures.
+
+
+async def test_create_resolves_port_type_from_existing_rule(mock_client):
+    """create resolves portType from an existing getGroups rule covering the target port."""
+    mock_client.get_advance_automations.return_value = [
+        {"advName": "Other", "grouptDevType": 1, "portType": 1, "advId": 7001},  # Port 1, outlet
+    ]
+    mock_client.create_advance_automation.return_value = {"advId": 9101}
+    await create_advance_automation("C58ZA", "Heat", on_speed=10, port=1, dry_run=False)
+    _, payload = mock_client.create_advance_automation.call_args[0]
+    assert payload["portType"] == 1
+
+
+async def test_create_defaults_port_type_zero_when_no_covering_rule(mock_client):
+    """No existing rule covers the target port → portType defaults to 0."""
+    mock_client.get_advance_automations.return_value = [
+        {"advName": "Other", "grouptDevType": 2, "portType": 1, "advId": 7002},  # Port 2 only
+    ]
+    mock_client.create_advance_automation.return_value = {"advId": 9102}
+    await create_advance_automation("C58ZA", "Fan", on_speed=5, port=1, dry_run=False)
+    _, payload = mock_client.create_advance_automation.call_args[0]
+    assert payload["portType"] == 0
+
+
+async def test_create_port_type_fetch_failure_falls_back_and_notes(mock_client, caplog):
+    """A getGroups read failure must NOT block create: portType falls back to 0, the write
+    still fires (sent=True), a warning is logged, and the response carries a grower note."""
+    import logging
+    mock_client.get_advance_automations.side_effect = ACInfinityAPIError("503 fail")
+    mock_client.create_advance_automation.return_value = {"advId": 9103}
+    with caplog.at_level(logging.WARNING, logger="ac_infinity_mcp"):
+        result = await create_advance_automation(
+            "C58ZA", "Heat", on_speed=10, port=1, dry_run=False
+        )
+    data = json.loads(result)
+    assert data["sent"] is True
+    assert "note" in data
+    _, payload = mock_client.create_advance_automation.call_args[0]
+    assert payload["portType"] == 0
+    assert any("portType" in r.message for r in caplog.records)
+
+
+async def test_create_dry_run_does_not_read_getgroups(mock_client):
+    """create's dry-run does not surface portType, so it performs no getGroups read — a
+    getGroups failure can never affect the preview."""
+    await create_advance_automation("C58ZA", "Heat", on_speed=10, port=1, dry_run=True)
+    mock_client.get_advance_automations.assert_not_called()
+
+
+def _isolated_program(grp: int, port_type: int) -> list[dict]:
+    return [{
+        "advName": "Prog", "grouptDevType": grp, "portType": port_type, "advId": 8001,
+        "groupNums": 3, "sortType": 3, "subNumber": 0, "subNumberSort": 0, "runState": 1,
+    }]
+
+
+async def test_add_rule_resolves_port_type_from_existing_rule(mock_client):
+    """add resolves portType from the getGroups data it already fetched (no extra read)."""
+    mock_client.get_advance_automations.return_value = _isolated_program(2, 1)  # Port 2, outlet
+    mock_client.create_advance_automation.return_value = {"advId": 9201}
+    await add_automation_rule("C58ZA", "Prog", [2], "on", max_level=5, dry_run=False)
+    _, payload = mock_client.create_advance_automation.call_args[0]
+    assert payload["portType"] == 1
+
+
+async def test_add_rule_port_type_zero_when_port_uncovered(mock_client):
+    """add on a port not covered by any existing rule → portType 0."""
+    mock_client.get_advance_automations.return_value = _isolated_program(2, 1)  # covers Port 2
+    mock_client.create_advance_automation.return_value = {"advId": 9202}
+    await add_automation_rule("C58ZA", "Prog", [1], "on", max_level=5, dry_run=False)  # Port 1
+    _, payload = mock_client.create_advance_automation.call_args[0]
+    assert payload["portType"] == 0
+
+
+async def test_update_mode_change_preserves_port_type(mock_client):
+    """#300 regression: a mode-change rebuild preserves the live rule's portType (it's in no
+    signature-key set, and body is a deepcopy of the live entry). Fails if portType is ever
+    added to a signature-key set."""
+    rule = {
+        **copy.deepcopy(MOCK_RULE_TEMPERATURE_TRIGGER), "advName": "Prog",
+        "grouptDevType": 2, "portType": 1, "advId": 8100,
+        "groupNums": 3, "sortType": 3, "subNumber": 0, "subNumberSort": 0, "runState": 1,
+    }
+    mock_client.get_advance_automations.return_value = [rule]
+    mock_client.update_advance_automation.return_value = {"code": 200}
+    await update_automation_rule("C58ZA", "Prog", [2], mode="on", max_level=4, dry_run=False)
+    sent = mock_client.update_advance_automation.call_args.args[1]
+    assert sent["portType"] == 1
+
+
 async def test_add_rule_no_schedule_defaults_continuous(mock_client):
     mock_client.get_advance_automations.return_value = _seedling_program()
     result = await add_automation_rule("C58ZA", "Seedling", [1], "on", max_level=5, dry_run=True)
