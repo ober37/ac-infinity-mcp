@@ -126,23 +126,19 @@ a vulnerability.
 
 ---
 
-## PYSEC-2026-161 — `starlette`
+## starlette CVEs — RESOLVED (Issue #303, 2026-07-11)
 
-- **Package:** `starlette` (transitive via `mcp` SDK)
-- **First observed:** 2026-05-26 (Issue #162 Gate 4 audit)
-- **Why this server is not exploitable:** `starlette` is pulled in transitively by
-  the `mcp` SDK's HTTP/SSE transport path. This server runs **stdio transport only**
-  (see `server.py:main()`) — the affected starlette request-handling code paths are
-  never reached at runtime.
-- **Mitigation:** monitor upstream `mcp` releases. When a release pins `starlette ≥ 1.0.1`,
-  bump the `mcp` version in `pyproject.toml` and remove the ignore from
-  `.github/workflows/ci.yml`.
-- **Re-evaluation due:** 2026-08-26 — check upstream advisories quarterly until resolved.
-- **Additional starlette CVEs (CVE-2026-54282, CVE-2026-54283; fix: 1.3.0 / 1.3.1):** observed
-  in `pip-audit` (Issue #284 Gate 4, 2026-06-24). Same exposure profile as above — transitive
-  via the `mcp` SDK's HTTP/SSE transport, which this stdio-only server never reaches. **Not
-  introduced by Issue #284** — that PR adds no dependencies. Tracked here for visibility, not
-  added to the `--ignore-vuln` list; resolves when the `mcp` pin pulls `starlette ≥ 1.3.1`.
+- **Package:** `starlette` (transitive via the `mcp` SDK's HTTP/SSE transport). This server
+  runs **stdio transport only** (see `server.py:main()`), so the affected request-handling
+  code paths were never reached at runtime — the exposure was theoretical.
+- **History:** PYSEC-2026-161 (first observed 2026-05-26, Issue #162 Gate 4); and
+  CVE-2026-54282 / CVE-2026-54283 = PYSEC-2026-248 / PYSEC-2026-249 (fix: 1.3.0 / 1.3.1;
+  observed Issue #284 Gate 4, 2026-06-24). The earlier mitigation plan was to wait for the
+  upstream `mcp` pin to raise the `starlette` floor.
+- **Resolution (Issue #303):** `pyproject.toml` now pins `starlette>=1.3.1` **directly**
+  rather than waiting on `mcp`. `mcp` requires only `starlette>=0.27`, so the stricter floor
+  is compatible. `pip-audit` reports **no** starlette advisories at 1.3.1. Nothing is added
+  to `--ignore-vuln` for starlette.
 
 ---
 
