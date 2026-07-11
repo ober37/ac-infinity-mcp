@@ -587,7 +587,7 @@ class ACInfinityClient:
     def _raise_for_api_code(
         self,
         code: int | None,
-        error_msg: str,
+        error_msg: str | None,
         context: str,
         *,
         session_refreshable: bool = True,
