@@ -29,6 +29,28 @@ def _unit_label(unit: str) -> str:
     return "°F" if unit == "F" else "°C"
 
 
+def _format_probes(probes: list[dict], unit: str) -> list[dict]:
+    """Render extra temp/RH probes in the device's preferred unit.
+
+    ``parse_device_data`` returns probe temperatures as raw Fahrenheit
+    (``temperature_f``), because the underlying ``sensors`` entries track the
+    device's ``temperatureF`` field regardless of its display-unit preference.
+    Every sibling reading in a tool response is unit-converted, so convert here
+    too rather than emitting a stray Fahrenheit value to a Celsius user.
+    """
+    formatted = []
+    for probe in probes:
+        temp_c = (probe["temperature_f"] - 32) * 5 / 9
+        formatted.append({
+            "access_port": probe["access_port"],
+            "temperature": _to_preferred_temp(temp_c, unit),
+            "unit": _unit_label(unit),
+            "humidity": probe["humidity_pct"],
+            "vpd": probe["vpd_kpa"],
+        })
+    return formatted
+
+
 def _utc_iso_to_local(utc_iso: str | None, tz: ZoneInfo) -> str | None:
     """Convert a UTC ISO 8601 string to a local timezone string, or None if input is None."""
     if not utc_iso:

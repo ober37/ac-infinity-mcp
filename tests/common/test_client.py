@@ -2263,3 +2263,126 @@ def test_set_port_mode_write_code_999999_raises_advance_conflict(authed_client):
         with pytest.raises(ACInfinityAdvanceConflictError) as exc_info:
             authed_client.set_port_mode(LEGACY_DEVICE_DATA, port=1, updates={}, dry_run=False)
     assert "999999" in str(exc_info.value)
+
+
+# ============ parse_device_data — additional temp/RH probes (`probes`) ============
+
+# Real capture from a live devType=20 (89 AI+) controller. Two sensorType<10
+# triplet groups: accessPort 7 = {4,6,7} equals the top-level reading (the
+# primary onboard probe), accessPort 2 = {0,2,3} is a genuine second physical
+# probe. CO2/light on accessPort 1 are ordinary external sensors.
+MOCK_AI_PLUS_DUAL_PROBE_SENSORS = [
+    {"sensorType": 11, "sensorPrecision": 1, "accessPort": 1, "sensorData": 585},
+    {"sensorType": 12, "sensorPrecision": 2, "accessPort": 1, "sensorData": 997},
+    {"sensorType": 0, "sensorPrecision": 3, "accessPort": 2, "sensorData": 6630},
+    {"sensorType": 2, "sensorPrecision": 3, "accessPort": 2, "sensorData": 8160},
+    {"sensorType": 3, "sensorPrecision": 3, "accessPort": 2, "sensorData": 39},
+    {"sensorType": 4, "sensorPrecision": 3, "accessPort": 7, "sensorData": 7950},
+    {"sensorType": 6, "sensorPrecision": 3, "accessPort": 7, "sensorData": 5890},
+    {"sensorType": 7, "sensorPrecision": 3, "accessPort": 7, "sensorData": 84},
+]
+
+MOCK_DUAL_PROBE_DEVICE = {
+    "devCode": "D89XA",
+    "devName": "AI+ Dual Probe",
+    "deviceInfo": {
+        "temperature": 2639,
+        "temperatureF": 7950,
+        "humidity": 5890,
+        "vpdnums": 84,
+        "ports": [],
+        "sensors": MOCK_AI_PLUS_DUAL_PROBE_SENSORS,
+    },
+}
+
+
+def test_parse_device_data_second_probe_surfaced(client):
+    """accessPort 2 {0,2,3} triplet is a real second probe → reported in `probes`."""
+    result = client.parse_device_data(MOCK_DUAL_PROBE_DEVICE)
+    assert len(result["probes"]) == 1
+    probe = result["probes"][0]
+    assert probe["access_port"] == 2
+    assert probe["temperature_f"] == pytest.approx(66.3)
+    assert probe["humidity_pct"] == pytest.approx(81.6)
+    assert probe["vpd_kpa"] == pytest.approx(0.39)
+
+
+def test_parse_device_data_primary_probe_group_excluded(client):
+    """accessPort 7 equals the top-level reading → suppressed, not double-reported."""
+    result = client.parse_device_data(MOCK_DUAL_PROBE_DEVICE)
+    assert all(p["access_port"] != 7 for p in result["probes"])
+
+
+def test_parse_device_data_probes_do_not_pollute_external_sensors(client):
+    """sensorType<10 probe entries stay out of external_sensors (Quirk 20 unchanged)."""
+    result = client.parse_device_data(MOCK_DUAL_PROBE_DEVICE)
+    types = {s["sensor_type"] for s in result["external_sensors"]}
+    assert types == {11, 12}
+
+
+def test_parse_device_data_no_probes_when_no_sensors(client):
+    result = client.parse_device_data(MOCK_DEVICE)
+    assert result["probes"] == []
+
+
+def test_parse_device_data_lone_primary_group_yields_no_probes(client):
+    """A single sensorType<10 group is the primary probe even if its values do not
+    exactly track the top-level fields — it must not be reported as a second probe.
+
+    Regression guard: MOCK_PHANTOM_SENSORS_DEVTYPE22 is a real capture whose
+    {4,6,7} values differ from this helper's synthetic top-level reading. A
+    tolerance-based "skip groups matching the top-level" rule reports it as a
+    physical second probe; suppressing exactly one (the closest) group does not.
+    """
+    device = _device_with_sensor_list(MOCK_PHANTOM_SENSORS_DEVTYPE22)
+    result = client.parse_device_data(device)
+    assert result["probes"] == []
+
+
+def test_parse_device_data_identical_probes_both_survive(client):
+    """Two probes reading identically → exactly one is suppressed, not both.
+
+    A lung room and tent at equilibrium legitimately read alike; the second
+    probe must not vanish just because it matches the primary.
+    """
+    sensors = [
+        {"sensorType": 4, "sensorPrecision": 3, "accessPort": 7, "sensorData": 7950},
+        {"sensorType": 6, "sensorPrecision": 3, "accessPort": 7, "sensorData": 5890},
+        {"sensorType": 7, "sensorPrecision": 3, "accessPort": 7, "sensorData": 84},
+        {"sensorType": 0, "sensorPrecision": 3, "accessPort": 2, "sensorData": 7950},
+        {"sensorType": 2, "sensorPrecision": 3, "accessPort": 2, "sensorData": 5890},
+        {"sensorType": 3, "sensorPrecision": 3, "accessPort": 2, "sensorData": 84},
+    ]
+    device = {
+        "devCode": "D89XA",
+        "devName": "Equilibrium",
+        "deviceInfo": {
+            "temperature": 2639, "temperatureF": 7950, "humidity": 5890,
+            "vpdnums": 84, "ports": [], "sensors": sensors,
+        },
+    }
+    result = client.parse_device_data(device)
+    assert len(result["probes"]) == 1
+
+
+def test_parse_device_data_incomplete_triplet_ignored(client):
+    """A partial group (temp+humidity, no vpd) is not the known triplet shape."""
+    sensors = [
+        {"sensorType": 0, "sensorPrecision": 3, "accessPort": 2, "sensorData": 6630},
+        {"sensorType": 2, "sensorPrecision": 3, "accessPort": 2, "sensorData": 8160},
+    ]
+    device = _device_with_sensor_list(sensors)
+    result = client.parse_device_data(device)
+    assert result["probes"] == []
+
+
+def test_parse_device_data_probe_sensor_data_none_treated_as_zero(client):
+    """sensorData=None must not raise inside the probe extractor."""
+    sensors = [
+        {"sensorType": 0, "sensorPrecision": 3, "accessPort": 2, "sensorData": None},
+        {"sensorType": 2, "sensorPrecision": 3, "accessPort": 2, "sensorData": 8160},
+        {"sensorType": 3, "sensorPrecision": 3, "accessPort": 2, "sensorData": 39},
+    ]
+    device = _device_with_sensor_list(sensors)
+    result = client.parse_device_data(device)
+    assert isinstance(result["probes"], list)

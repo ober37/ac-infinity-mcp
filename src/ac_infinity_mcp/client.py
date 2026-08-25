@@ -110,6 +110,77 @@ def _sensor_value(s: dict) -> float | int:
     return data / (10 ** (precision - 1)) if precision > 1 else data
 
 
+def _extract_probes(
+    sensors: list[dict] | None,
+    temp_f: float,
+    humidity: float,
+    vpd: float,
+) -> list[dict]:
+    """Extract additional physical temp/RH probes beyond the primary onboard one.
+
+    AI+ controllers support a second probe (an "inside" and an "outside"/lung-room
+    sensor, assignable in the app). Both report through ``sensors`` with
+    ``sensorType < 10``, grouped by ``accessPort`` into a
+    ``{base, base+2, base+3}`` = ``{temp_f, humidity_pct, vpd_kpa}`` triplet. The
+    triplet base varies per probe (0 and 4 observed on one devType=20 controller),
+    so groups are identified structurally rather than by fixed type numbers.
+
+    ``_should_include_sensor`` deliberately keeps these out of
+    ``external_sensors`` — surfacing them there would double-report the onboard
+    reading as a phantom extra sensor (Quirk 20) — which left a real second probe
+    with nowhere to go. This is that missing path, not a change to that rule.
+
+    Exactly one group is the primary probe already reported as the top-level
+    temperature/humidity/vpd, so precisely one group is dropped: the single
+    closest match to those values. Dropping "every group within a tolerance"
+    instead fails in both directions — two probes that momentarily read alike (a
+    lung room and tent at equilibrium) would both vanish, and a lone primary
+    group whose values do not exactly track the top-level fields would be
+    misreported as a second physical probe.
+    """
+    if not sensors:
+        return []
+
+    core_by_port: dict[int, dict[int, float]] = {}
+    for s in sensors:
+        s_type = s.get("sensorType")
+        port = s.get("accessPort")
+        if s_type is None or port is None:
+            continue
+        try:
+            if int(s_type) >= 10:
+                continue
+        except (ValueError, TypeError):
+            continue
+        core_by_port.setdefault(port, {})[s_type] = _sensor_value(s)
+
+    candidates: list[dict] = []
+    for port, by_type in sorted(core_by_port.items()):
+        base = min(by_type)
+        if set(by_type) != {base, base + 2, base + 3}:
+            continue  # not the known temp/humidity/vpd triplet shape
+        candidates.append({
+            "access_port": port,
+            "temperature_f": round(by_type[base], 1),
+            "humidity_pct": round(by_type[base + 2], 1),
+            "vpd_kpa": round(by_type[base + 3], 2),
+        })
+
+    if not candidates:
+        return []
+
+    def _distance_from_primary(c: dict) -> float:
+        # vpd is a much smaller number than temp/RH; scale so it is not drowned out.
+        return (
+            abs(c["temperature_f"] - temp_f)
+            + abs(c["humidity_pct"] - humidity)
+            + abs(c["vpd_kpa"] - vpd) * 10
+        )
+
+    primary = min(candidates, key=_distance_from_primary)
+    return [c for c in candidates if c is not primary]
+
+
 _SCHEDULE_ALWAYS_ACTIVE: int = 255
 
 # API response codes that mean "session expired — re-authenticate" (HTTP body code,
@@ -1641,6 +1712,7 @@ class ACInfinityClient:
                 "vpd": vpd,
                 "ports": ports,
                 "external_sensors": external,
+                "probes": _extract_probes(sensors, temp_f, humidity, vpd),
                 "zone_id": device_data.get("zoneId"),            # IANA string or None
                 "temp_unit_raw": info.get("unit"),               # 0=°F, 1=°C, or None
             }

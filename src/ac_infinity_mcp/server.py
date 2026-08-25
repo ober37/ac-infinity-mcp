@@ -49,6 +49,7 @@ from ac_infinity_mcp.client import (
 from ac_infinity_mcp.formatting import (
     _effective_tz,
     _effective_unit,
+    _format_probes,
     _format_window_dt,
     _short_date,
     _to_preferred_temp,
@@ -913,6 +914,12 @@ async def get_device_reading(device_id: str) -> str:
         (empty string for unitless pH and Water Level). EC readings carry their probe's
         unit (µS/cm or mS/cm); 1 mS/cm = 1000 µS/cm — do not compare bare numbers across
         probes.
+        ``probes`` lists any additional physical temp/RH probes beyond the primary
+        one already reflected in ``temperature``/``humidity``/``vpd`` above — e.g.
+        the AI+ line's second "outside"/lung-room probe. Each entry carries
+        ``access_port``, ``temperature``, ``unit``, ``humidity`` and ``vpd``, in the
+        same unit as the top-level reading. Empty when only the primary probe is
+        connected.
         ``plug_status`` is only present on a port entry when no current is detected,
         the port is not running (speed 0 and no load), **and the port still has its
         default name** (``"Port N"``). Custom-named ports are assumed to have a device
@@ -948,6 +955,7 @@ async def get_device_reading(device_id: str) -> str:
             "timestamp": _ts,
             "ports": parsed.get("ports", []),
             "external_sensors": parsed.get("external_sensors", []),
+            "probes": _format_probes(parsed.get("probes", []), unit),
             "human_summary": (
                 f"{_safe_name}: {_temp_val}{_unit_lbl}, {_humid}% RH, VPD {_vpd} kPa. "
                 + (f"{_sensor_clause}. " if _sensor_clause else "")
@@ -1331,6 +1339,7 @@ async def get_all_device_readings() -> str:
                     "timestamp": _utc_iso_to_local(parsed.get("timestamp"), tz),
                     "ports": parsed.get("ports", []),
                     "external_sensors": parsed.get("external_sensors", []),
+                    "probes": _format_probes(parsed.get("probes", []), unit),
                 })
             except Exception as e:
                 readings.append({
