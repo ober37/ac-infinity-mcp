@@ -7,7 +7,12 @@ from typing import Any
 import requests
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from ac_infinity_mcp.controller import ControllerType, build_write_payload, detect_controller_type
+from ac_infinity_mcp.controller import (
+    ControllerType,
+    build_ai_plus_manual_write_payload,
+    build_write_payload,
+    detect_controller_type,
+)
 from ac_infinity_mcp.schema import (
     ACInfinityAdvanceConflictError,
     ACInfinityAPIError,
@@ -1101,11 +1106,12 @@ class ACInfinityClient:
         updates: dict,
         dry_run: bool = True,
         require_variable_speed: bool = False,
+        manual_control: bool = False,
     ) -> dict:
         """Write port mode settings (with transparent 401 token refresh)."""
         return self._call_with_token_refresh(
             self._set_port_mode_inner,
-            device_data, port, updates, dry_run, require_variable_speed,
+            device_data, port, updates, dry_run, require_variable_speed, manual_control,
         )
 
     @retry(
@@ -1125,6 +1131,7 @@ class ACInfinityClient:
         updates: dict,
         dry_run: bool = True,
         require_variable_speed: bool = False,
+        manual_control: bool = False,
     ) -> dict:
         """Write port mode settings using read-before-write.
 
@@ -1141,6 +1148,11 @@ class ACInfinityClient:
             require_variable_speed: If True, raise ACInfinityDeviceError when the port's
                 loadType indicates on/off hardware (loadType=4 or 128). Pass True from
                 set_port_speed; leave False for set_port_on/set_port_off.
+            manual_control: If True on an AI+ controller, use the static manual-write
+                payload plus the iOS app headers so the write actually lands. Only
+                valid for direct on/off/speed calls — never for automation targets,
+                since the static template zeroes every threshold field. When False
+                (the default) AI+ live writes still return ai_plus_write_unsupported.
 
         Returns:
             Dict with keys:
@@ -1193,14 +1205,22 @@ class ACInfinityClient:
 
         # Guard: on/off hardware (loadType=4 or 128) rejects speed writes with 999999.
         # Only enforced when require_variable_speed=True (i.e. called from set_port_speed).
+        # 132 (=128|4) is the same toggle signal with both bits set, seen on AI+ toggle
+        # hardware. It was unreachable while every AI+ live write was refused below;
+        # enabling manual AI+ writes makes it reachable, so it is handled here.
         load_type = current_settings.get("loadType", 0)
-        if require_variable_speed and load_type in (4, 128):
+        if require_variable_speed and load_type in (4, 128, 132):
             raise ACInfinityDeviceError(
                 f"Port {port} is an on/off device (loadType={load_type}) — "
                 "use set_port_on or set_port_off instead of set_port_speed."
             )
 
-        payload = build_write_payload(current_settings, updates, controller_type)
+        if controller_type == ControllerType.NEW_FRAMEWORK and manual_control:
+            # AI+ rejects the merged read-before-write payload for manual control
+            # (addDevMode returns 100001). Use the static shape its firmware accepts.
+            payload = build_ai_plus_manual_write_payload(dev_id, port, updates)
+        else:
+            payload = build_write_payload(current_settings, updates, controller_type)
 
         result: dict = {
             "payload": payload,
@@ -1217,9 +1237,10 @@ class ACInfinityClient:
             )
             return result
 
-        # AI+ live write path is not yet implemented — addDevMode returns 100001 for devType=22
-        # and no alternative endpoint has been identified. dry_run=True is fully supported.
-        if controller_type == ControllerType.NEW_FRAMEWORK:
+        # AI+ live writes are implemented for manual control only (see manual_control).
+        # Automation-target writes still have no known working payload — the static
+        # template zeroes every threshold field — so they continue to be refused.
+        if controller_type == ControllerType.NEW_FRAMEWORK and not manual_control:
             logger.warning(
                 "AI+ live write attempted for devId=%s port=%s — not yet supported", dev_id, port
             )
@@ -1232,6 +1253,19 @@ class ACInfinityClient:
             "User-Agent": "okhttp/3.10.0",
             "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
         }
+        if controller_type == ControllerType.NEW_FRAMEWORK and manual_control:
+            # The default header set above is proven for legacy writes, but AI+
+            # rejects it with 100001 even given a correct payload — the backend
+            # appears to gate devType 20 field validation on the declared app
+            # version. Verified by A/B test on live hardware: static payload with
+            # these headers returns 200, and without them returns 100001.
+            headers["User-Agent"] = (
+                "ACController/1.9.7 (com.acinfinity.humiture; build:533; iOS 18.5.0) "
+                "Alamofire/5.10.2"
+            )
+            headers["phoneType"] = "1"
+            headers["appVersion"] = "1.9.7"
+            headers["minversion"] = "3.5"
 
         # Retry loop: 403 "Data saving failed" = rate limit; back off and retry.
         # Other error codes fail immediately (auth, field validation, etc.).
