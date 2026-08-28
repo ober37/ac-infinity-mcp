@@ -32,11 +32,13 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Upgrade pip
-        # The runner toolcache can ship a pip with known CVEs (PYSEC-2026-196 in
-        # 26.1.1 broke the pip-audit gate). Always audit against latest pip so
-        # fixable pip CVEs self-heal instead of failing every CI run. Issue #270.
-        run: python -m pip install --upgrade pip
+      - name: Upgrade pip and setuptools
+        # The runner toolcache can ship pip/setuptools with known CVEs and break
+        # the pip-audit gate through no fault of this project: PYSEC-2026-196 in
+        # pip 26.1.1 (Issue #270), then PYSEC-2026-3447 in setuptools 79.0.1 on
+        # the 3.11 image (Issue #312). Always audit against the latest of both so
+        # fixable CVEs self-heal instead of failing every CI run.
+        run: python -m pip install --upgrade pip setuptools
 
       - name: Install project and dev dependencies
         run: pip install -e ".[dev]"
@@ -55,10 +57,11 @@ jobs:
 
       - name: Security audit — pip-audit
         # PYSEC-2025-183: upstream `mcp` CVE, stdio-only transport unaffected.
-        # PYSEC-2026-161: starlette CVE (transitive via mcp), stdio-only transport
-        #   means affected request-handling paths are never reached.
         # Rationale + re-evaluation dates in docs/SECURITY-RISKS.md.
-        run: pip-audit --ignore-vuln PYSEC-2025-183 --ignore-vuln PYSEC-2026-161
+        # The PYSEC-2026-161 starlette ignore was dropped in #311: Issue #303
+        # raised the starlette floor to >=1.3.1 and SECURITY-RISKS.md already
+        # records that starlette needs no ignore — ci.yml had been left behind.
+        run: pip-audit --ignore-vuln PYSEC-2025-183
 
   docker:
     name: "Docker build"
