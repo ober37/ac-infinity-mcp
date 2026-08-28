@@ -120,7 +120,7 @@ Worker agent implements against the approved plan:
    - `python3 -m ruff check src/ tests/` → `All checks passed.`
    - `python3 -m mypy src/ac_infinity_mcp/` → `Success: no issues found`
    - `python3 -m pytest tests/common/ tests/devices/ tests/integration/test_mcp_protocol.py -v` → all pass
-   - `python3 -m pip_audit --ignore-vuln PYSEC-2025-183` → no new CVEs
+   - `python3 -m pip_audit` → no new CVEs
 4. Any gate failure → fix → re-run from step 3. Do not raise PR until gate is clean.
 
 ---
@@ -253,11 +253,11 @@ Run each command and confirm the expected output before checking the box:
       minus the live-API skip path). Running the narrower `tests/common/ tests/devices/`
       set locally misses the MCP wire-protocol integration tests; CI catches regressions
       there but local gate-4 wouldn't (P2-F022).
-- [ ] `pip-audit --ignore-vuln PYSEC-2025-183`
-      → Expected: no known vulnerabilities. PYSEC-2025-183 is an accepted-risk upstream
-        `mcp` CVE — see `docs/SECURITY-RISKS.md` (or the "Accepted Dependency CVEs"
-        section in `docs/API.md`) for the rationale. Document any **new** CVEs as they
-        appear; do not blanket-ignore.
+- [ ] `pip-audit`
+      → Expected: no known vulnerabilities. The project carries **no** `--ignore-vuln`
+        flags — the last one (PYSEC-2025-183, upstream `mcp`) was retired in #313 once
+        the `mcp<2` pin resolved it. Document any **new** CVEs as they appear; do not
+        blanket-ignore. The procedure for accepting one is in `docs/SECURITY-RISKS.md`.
 
 **Gate 5 — Manual Smoke Test Proposal + Execution**
 - **Restart Claude Desktop before executing.** The MCP server process caches imported modules

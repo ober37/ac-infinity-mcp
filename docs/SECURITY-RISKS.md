@@ -7,9 +7,10 @@ This file documents two categories of accepted risk:
    documented as accepted-risk. Each entry explains why the CVE does not affect this
    codebase in practice, and includes a re-evaluation date so the ignore is not permanent.
 
-`pip-audit` is invoked with `--ignore-vuln <ID>` for each CVE entry below. If a
-new CVE appears in a `pip-audit` run, **do not** blanket-add it here — file
-an issue, evaluate the exposure, and only ignore after a documented finding.
+**Current posture: `pip-audit` runs with no `--ignore-vuln` flags at all.** Every CVE
+below is RESOLVED — each was fixed by a version pin rather than permanently suppressed.
+If a new CVE appears in a `pip-audit` run, **do not** blanket-add it here — file an
+issue, evaluate the exposure, and only ignore after a documented finding.
 
 ---
 
@@ -104,25 +105,29 @@ a vulnerability.
 
 ---
 
-## PYSEC-2025-183 — `mcp` package
+## PYSEC-2025-183 — `mcp` package — RESOLVED (Issue #313, 2026-08-28)
 
 - **Package:** `mcp` (Model Context Protocol Python SDK; a direct dependency)
-- **First observed:** 2026-05-22 (Phase 16 triple-persona quality cycle)
-- **Why this server is not exploitable:** the vulnerability is in the
-  `mcp` SDK's transport handling for code paths this server does not use.
-  Our server runs stdio transport only (see `server.py:main()`); the
-  affected paths require HTTP/SSE transport.
-- **Mitigation:** monitor upstream `mcp` releases. When a patched release
-  is available, bump the version pin in `pyproject.toml` and remove the
-  ignore from `.github/workflows/ci.yml` and `CLAUDE.md`.
-- **Re-evaluation due:** 2026-08-22 (3 months from acceptance) — check
-  upstream advisories quarterly until resolved or scope changes.
-- **Verifying the ignore is still required:** run `pip-audit` *without*
-  the `--ignore-vuln` flag in a clean venv with current pins. If
-  PYSEC-2025-183 does not appear, the patched version is already pulled
-  in and the ignore can be removed. P3-C2-F006 raised this concern after
-  observing that a fresh install showed no findings under current pins;
-  remove the ignore as soon as the next CI run confirms the CVE is gone.
+- **Why this server was never exploitable:** the vulnerability is in the `mcp` SDK's
+  transport handling for code paths this server does not use. Our server runs stdio
+  transport only (see `server.py:main()`); the affected paths require HTTP/SSE
+  transport. The exposure was theoretical throughout.
+- **History:** first observed 2026-05-22 (Phase 16 triple-persona quality cycle) and
+  accepted with a `--ignore-vuln` flag plus a 2026-08-22 re-evaluation date. P3-C2-F006
+  later noted that a fresh install showed no findings under current pins, and set the
+  retirement test: run `pip-audit` *without* the flag in a clean venv: if the CVE does
+  not appear, the patched version is already pulled in and the ignore can be removed.
+- **Resolution (Issue #313):** that test now passes. Issue #309 pinned
+  `mcp>=1.14.1,<2` (the unbounded floor was resolving to 2.x, which renamed `FastMCP`
+  and broke CI), which resolves `mcp` to **1.29.1**. Verified in a throwaway venv built
+  from scratch with the current pins: `pip-audit` with **zero** ignore flags reports
+  `No known vulnerabilities found`, exit 0. Corroborated by CI, where the audit step
+  passed on Python 3.11 and 3.12 while the flag it still carried matched nothing.
+- **Ignore removed from** `.github/workflows/ci.yml` and the Gate 4 checklist in
+  `CLAUDE.md`. This was the project's last `--ignore-vuln` flag.
+- **Note:** this CVE is resolved by the `<2` *ceiling* holding `mcp` on a patched 1.x.
+  The eventual `mcp` 2.x migration (#310) must re-run `pip-audit` and confirm 2.x is
+  also unaffected before that ceiling is lifted.
 
 ---
 
