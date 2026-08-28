@@ -1,12 +1,10 @@
 """Tests for AI+ controller behavior (devType 20+, newFrameworkDevice=True)."""
 
+from unittest.mock import patch
+
+import ac_infinity_mcp.client as client_mod
 from ac_infinity_mcp.client import ACInfinityClient
-from ac_infinity_mcp.controller import (
-    ControllerType,
-    build_ai_plus_manual_write_payload,
-    build_write_payload,
-    detect_controller_type,
-)
+from ac_infinity_mcp.controller import ControllerType, build_write_payload, detect_controller_type
 from tests.fixtures.ai_plus_device_fixtures import AI_PLUS_HISTORY_RECORD
 from tests.fixtures.mock_mode_settings_ai_plus import (
     MOCK_MODE_SETTINGS_AI_PLUS_PORT1,
@@ -100,85 +98,88 @@ def test_parse_ai_plus_history_record_decodes_ports():
     assert result["temperature_c"] == 23.5
 
 
-# ============ build_ai_plus_manual_write_payload — AI+ manual writes ============
+# ============ AI+ write path — iOS app headers ============
 #
-# AI+ rejects the legacy merged read-before-write payload. Two things are needed
-# together: the static zeroed payload below, AND the iOS app headers set in
-# client._set_port_mode_inner. Confirmed on live devType=20 hardware:
-#   static payload + default okhttp headers -> 100001
-#   merged payload + iOS headers            -> 999999
-#   static payload + iOS headers            -> 200
+# The ENTIRE AI+ write fix is the request headers. With the default
+# okhttp/3.10.0 header set the API returns 100001 even given a correct payload;
+# with the iOS app headers the ordinary merged read-before-write payload
+# succeeds for manual control AND automation targets alike.
+#
+# Verified on live devType=20 hardware (connected port):
+#   merged payload + okhttp headers -> 100001
+#   merged payload + iOS headers    -> 200 (manual on/off/speed)
+#   merged payload + iOS headers    -> 200 (humidity trigger changed)
+#   merged payload + iOS headers    -> 200 (VPD target changed)
+
+AI_PLUS_HEADER_KEYS = ("phoneType", "appVersion", "minversion")
 
 
-def test_ai_plus_manual_payload_field_count():
-    """75 fields, matching the community Charles Proxy capture of the iOS app."""
-    result = build_ai_plus_manual_write_payload("20001", 1, {"atType": 2, "onSpead": 10})
-    assert len(result) == 75
+def _capture_write_headers(client, device, updates):
+    """Run a live-write and return the headers the client would send."""
+    captured = {}
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"code": 200, "msg": "success."}
+
+    def _fake_post(url, data=None, headers=None, timeout=None):
+        captured.update(headers or {})
+        return _Resp()
+
+    settings = dict(MOCK_MODE_SETTINGS_AI_PLUS_PORT1)
+    with patch.object(client.session, "post", _fake_post), \
+         patch.object(client, "_enforce_write_rate_limit"), \
+         patch.object(client, "get_mode_settings", return_value=settings):
+        client.set_port_mode(device, port=1, updates=updates, dry_run=False)
+    return captured
 
 
-def test_ai_plus_manual_payload_carries_dev_id_and_port():
-    result = build_ai_plus_manual_write_payload("20001", 6, {"onSpead": 5})
-    assert result["devId"] == "20001"
-    assert result["externalPort"] == 6
+def test_ai_plus_write_adds_ios_headers(ai_plus_device):
+    """AI+ writes must carry the iOS app headers, or the API returns 100001."""
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    headers = _capture_write_headers(c, ai_plus_device, {"onSpead": 5})
+    for key in AI_PLUS_HEADER_KEYS:
+        assert key in headers, f"AI+ write missing required header {key}"
+    assert "Alamofire" in headers["User-Agent"]
+    assert "okhttp" not in headers["User-Agent"]
 
 
-def test_ai_plus_manual_payload_speed_only_sets_on_mode():
-    """Regression: a bare speed update must not leave atType at the template's OFF default.
-
-    set_port_speed sends {"onSpead": speed} with no atType. Seeding atType from
-    the static template (1 = OFF) produced atType=1 alongside modeType=2 (ON) —
-    a self-contradictory payload that puts the port in OFF mode while the tool
-    reports success, silently stopping a running fan.
-    """
-    result = build_ai_plus_manual_write_payload("20001", 2, {"onSpead": 8})
-    assert result["onSpead"] == 8
-    assert result["atType"] == 2, "speed>0 must select ON mode, not the template default"
-    assert result["modeType"] == 2
+def test_legacy_write_keeps_okhttp_headers(legacy_11_device):
+    """Legacy controllers must be untouched — no iOS headers, okhttp preserved."""
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    headers = _capture_write_headers(c, legacy_11_device, {"onSpead": 5})
+    for key in AI_PLUS_HEADER_KEYS:
+        assert key not in headers, f"legacy write should not carry {key}"
+    assert headers["User-Agent"] == "okhttp/3.10.0"
 
 
-def test_ai_plus_manual_payload_on():
-    result = build_ai_plus_manual_write_payload("20001", 1, {"atType": 2, "onSpead": 10})
-    assert (result["atType"], result["modeType"], result["onSpead"]) == (2, 2, 10)
+def test_ai_plus_automation_write_is_not_refused(ai_plus_device):
+    """Automation-target writes on AI+ must send, not return ai_plus_write_unsupported."""
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
 
+    class _Resp:
+        def raise_for_status(self):
+            pass
 
-def test_ai_plus_manual_payload_off():
-    result = build_ai_plus_manual_write_payload("20001", 1, {"onSpead": 0, "atType": 1})
-    assert (result["atType"], result["modeType"], result["onSpead"]) == (1, 0, 0)
+        def json(self):
+            return {"code": 200, "msg": "success."}
 
-
-def test_ai_plus_manual_payload_at_type_and_mode_type_never_contradict():
-    """atType and modeType must always agree about ON vs OFF, for every speed."""
-    for speed in range(0, 11):
-        result = build_ai_plus_manual_write_payload("20001", 1, {"onSpead": speed})
-        assert (result["atType"] == 2) == (result["modeType"] == 2), (
-            f"contradiction at onSpead={speed}"
+    with patch.object(client_mod.ACInfinityClient, "get_mode_settings",
+                      return_value=dict(MOCK_MODE_SETTINGS_AI_PLUS_PORT1)), \
+         patch.object(c.session, "post", lambda *a, **k: _Resp()), \
+         patch.object(c, "_enforce_write_rate_limit"):
+        result = c.set_port_mode(
+            ai_plus_device, port=1,
+            updates={"atType": 8, "targetVpd": 12, "targetVpdSwitch": 1},
+            dry_run=False,
         )
-
-
-def test_ai_plus_manual_payload_mirrors_on_self_spead_by_default():
-    result = build_ai_plus_manual_write_payload("20001", 1, {"onSpead": 7})
-    assert result["onSelfSpead"] == 7
-
-
-def test_ai_plus_manual_payload_respects_explicit_on_self_spead():
-    """An explicitly supplied onSelfSpead must not be silently overwritten."""
-    result = build_ai_plus_manual_write_payload("20001", 1, {"onSpead": 10, "onSelfSpead": 6})
-    assert result["onSelfSpead"] == 6
-
-
-def test_ai_plus_manual_payload_omits_mode_set_id():
-    """Quirk 11: modeSetid must never be sent."""
-    result = build_ai_plus_manual_write_payload("20001", 1, {"onSpead": 5})
-    assert "modeSetid" not in result
-
-
-def test_ai_plus_manual_payload_zeroes_automation_fields():
-    """The static template deliberately carries no real automation/threshold state.
-
-    This is why automation writes stay refused on AI+ — sending this payload for
-    a VPD/temp/humidity target would zero the port's other automation settings.
-    """
-    result = build_ai_plus_manual_write_payload("20001", 1, {"onSpead": 5})
-    for field in ("targetVpd", "targetTemp", "targetHumi", "activeHt", "activeLh"):
-        assert result[field] == 0
-    assert result["isOpenAutomation"] == 0
+    assert result["sent"] is True
+    assert "ai_plus_write_unsupported" not in result

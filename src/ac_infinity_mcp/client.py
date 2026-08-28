@@ -7,12 +7,7 @@ from typing import Any
 import requests
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from ac_infinity_mcp.controller import (
-    ControllerType,
-    build_ai_plus_manual_write_payload,
-    build_write_payload,
-    detect_controller_type,
-)
+from ac_infinity_mcp.controller import ControllerType, build_write_payload, detect_controller_type
 from ac_infinity_mcp.schema import (
     ACInfinityAdvanceConflictError,
     ACInfinityAPIError,
@@ -1106,12 +1101,11 @@ class ACInfinityClient:
         updates: dict,
         dry_run: bool = True,
         require_variable_speed: bool = False,
-        manual_control: bool = False,
     ) -> dict:
         """Write port mode settings (with transparent 401 token refresh)."""
         return self._call_with_token_refresh(
             self._set_port_mode_inner,
-            device_data, port, updates, dry_run, require_variable_speed, manual_control,
+            device_data, port, updates, dry_run, require_variable_speed,
         )
 
     @retry(
@@ -1131,7 +1125,6 @@ class ACInfinityClient:
         updates: dict,
         dry_run: bool = True,
         require_variable_speed: bool = False,
-        manual_control: bool = False,
     ) -> dict:
         """Write port mode settings using read-before-write.
 
@@ -1148,11 +1141,6 @@ class ACInfinityClient:
             require_variable_speed: If True, raise ACInfinityDeviceError when the port's
                 loadType indicates on/off hardware (loadType=4 or 128). Pass True from
                 set_port_speed; leave False for set_port_on/set_port_off.
-            manual_control: If True on an AI+ controller, use the static manual-write
-                payload plus the iOS app headers so the write actually lands. Only
-                valid for direct on/off/speed calls — never for automation targets,
-                since the static template zeroes every threshold field. When False
-                (the default) AI+ live writes still return ai_plus_write_unsupported.
 
         Returns:
             Dict with keys:
@@ -1160,7 +1148,6 @@ class ACInfinityClient:
                 "dry_run": bool
                 "controller_type": "legacy" or "new_framework"
                 "sent": bool (True only when dry_run=False and HTTP succeeded)
-                "ai_plus_write_unsupported": bool (True when AI+ live write attempted)
 
         Raises:
             ACInfinityAuthError: If not authenticated.
@@ -1215,12 +1202,7 @@ class ACInfinityClient:
                 "use set_port_on or set_port_off instead of set_port_speed."
             )
 
-        if controller_type == ControllerType.NEW_FRAMEWORK and manual_control:
-            # AI+ rejects the merged read-before-write payload for manual control
-            # (addDevMode returns 100001). Use the static shape its firmware accepts.
-            payload = build_ai_plus_manual_write_payload(dev_id, port, updates)
-        else:
-            payload = build_write_payload(current_settings, updates, controller_type)
+        payload = build_write_payload(current_settings, updates, controller_type)
 
         result: dict = {
             "payload": payload,
@@ -1237,28 +1219,32 @@ class ACInfinityClient:
             )
             return result
 
-        # AI+ live writes are implemented for manual control only (see manual_control).
-        # Automation-target writes still have no known working payload — the static
-        # template zeroes every threshold field — so they continue to be refused.
-        if controller_type == ControllerType.NEW_FRAMEWORK and not manual_control:
-            logger.warning(
-                "AI+ live write attempted for devId=%s port=%s — not yet supported", dev_id, port
-            )
-            result["ai_plus_write_unsupported"] = True
-            return result
-
         headers = {
             "token": self.token,
             "Host": "www.acinfinityserver.com",
             "User-Agent": "okhttp/3.10.0",
             "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
         }
-        if controller_type == ControllerType.NEW_FRAMEWORK and manual_control:
-            # The default header set above is proven for legacy writes, but AI+
-            # rejects it with 100001 even given a correct payload — the backend
-            # appears to gate devType 20 field validation on the declared app
-            # version. Verified by A/B test on live hardware: static payload with
-            # these headers returns 200, and without them returns 100001.
+        if controller_type == ControllerType.NEW_FRAMEWORK:
+            # AI+ rejects the default okhttp header set with 100001 even given a
+            # correct payload — the backend gates devType>=20 field validation on
+            # the declared app version. Adding the iOS app headers is the ENTIRE
+            # fix: with them, the ordinary merged read-before-write payload
+            # succeeds for manual control AND automation targets alike.
+            #
+            # Verified on live devType=20 hardware (port 4, connected):
+            #   merged payload + okhttp headers -> 100001
+            #   merged payload + iOS headers    -> 200, manual on/off/speed
+            #   merged payload + iOS headers    -> 200, humidity trigger changed
+            #   merged payload + iOS headers    -> 200, VPD target changed
+            #
+            # An earlier revision of this patch used a static zeroed payload and
+            # gated writes to manual control only, on the basis that the merged
+            # payload returned 999999. That test was run on an EMPTY port that
+            # was blocked by a disabled-but-unreleased Advance Automation; the
+            # 999999 was the automation block, not the payload shape. On a clean
+            # port the merged payload works, so the static template has been
+            # removed and automation writes are no longer refused.
             headers["User-Agent"] = (
                 "ACController/1.9.7 (com.acinfinity.humiture; build:533; iOS 18.5.0) "
                 "Alamofire/5.10.2"
