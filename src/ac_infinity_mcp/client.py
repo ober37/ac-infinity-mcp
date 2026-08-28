@@ -110,75 +110,85 @@ def _sensor_value(s: dict) -> float | int:
     return data / (10 ** (precision - 1)) if precision > 1 else data
 
 
-def _extract_probes(
-    sensors: list[dict] | None,
-    temp_f: float,
-    humidity: float,
-    vpd: float,
-) -> list[dict]:
-    """Extract additional physical temp/RH probes beyond the primary onboard one.
+# The controller's own onboard sensor and the AC-SPC24 plug-in probe report through
+# the same `sensors` array, distinguished by a published sensorType enum rather than
+# by any arithmetic pattern. Confirmed against the HA `ac_infinity` integration
+# (dalinicus/homeassistant-acinfinity, const.py):
+#   0 PROBE_TEMPERATURE_F   1 PROBE_TEMPERATURE_C   2 PROBE_HUMIDITY   3 PROBE_VPD
+#   4 CONTROLLER_TEMP_F     5 CONTROLLER_TEMP_C     6 CONTROLLER_HUM   7 CONTROLLER_VPD
+# HA attaches 0-3 to a child device it names "UIS Controller Sensor Probe (AC-SPC24)"
+# and 4-7 to the controller itself.
+_ONBOARD_SENSOR_TYPES = frozenset({4, 5, 6, 7})  # already surfaced as the top-level reading
+_PROBE_TEMP_TYPES = (0, 1)                        # 0 = raw °F, 1 = raw °C
+_PROBE_HUMIDITY_TYPE = 2
+_PROBE_VPD_TYPE = 3
 
-    AI+ controllers support a second probe (an "inside" and an "outside"/lung-room
-    sensor, assignable in the app). Both report through ``sensors`` with
-    ``sensorType < 10``, grouped by ``accessPort`` into a
-    ``{base, base+2, base+3}`` = ``{temp_f, humidity_pct, vpd_kpa}`` triplet. The
-    triplet base varies per probe (0 and 4 observed on one devType=20 controller),
-    so groups are identified structurally rather than by fixed type numbers.
 
-    ``_should_include_sensor`` deliberately keeps these out of
-    ``external_sensors`` — surfacing them there would double-report the onboard
-    reading as a phantom extra sensor (Quirk 20) — which left a real second probe
+def _extract_probes(sensors: list[dict] | None) -> list[dict]:
+    """Extract readings from plug-in AC-SPC24 probes (sensorType 0-3).
+
+    The controller's own sensor (types 4-7) is excluded by type: it is already
+    reported as the top-level temperature/humidity/vpd, so surfacing it here
+    would double-report it. Identifying it by type rather than by comparing
+    values means a genuine probe reading identically to the onboard sensor still
+    appears, and a probe present without any onboard group still appears.
+
+    ``_should_include_sensor`` deliberately keeps all ``sensorType < 10`` entries
+    out of ``external_sensors`` (Quirk 20) — correct, but it left real probe data
     with nowhere to go. This is that missing path, not a change to that rule.
 
-    Exactly one group is the primary probe already reported as the top-level
-    temperature/humidity/vpd, so precisely one group is dropped: the single
-    closest match to those values. Dropping "every group within a tolerance"
-    instead fails in both directions — two probes that momentarily read alike (a
-    lung room and tent at equilibrium) would both vanish, and a lone primary
-    group whose values do not exactly track the top-level fields would be
-    misreported as a second physical probe.
+    Temperature is normalised to Celsius here so the conversion happens once, in
+    one direction, matching every other temperature in this module. The per-entry
+    ``sensorUnit`` flag decides the raw scale (>0 means already Celsius); when it
+    is absent the sensorType itself disambiguates (0 = °F, 1 = °C).
     """
-    if not sensors:
-        return []
-
-    core_by_port: dict[int, dict[int, float]] = {}
-    for s in sensors:
-        s_type = s.get("sensorType")
-        port = s.get("accessPort")
-        if s_type is None or port is None:
+    by_port: dict[int, dict[int, dict]] = {}
+    for s in sensors or []:
+        raw_type = s.get("sensorType")
+        raw_port = s.get("accessPort")
+        if raw_type is None or raw_port is None:
             continue
         try:
-            if int(s_type) >= 10:
-                continue
-        except (ValueError, TypeError):
+            s_type = int(raw_type)
+            port = int(raw_port)
+        except (TypeError, ValueError):
+            # Malformed entry — skip it rather than letting an uncoerced key
+            # propagate into the grouping and take out the whole device reading.
             continue
-        core_by_port.setdefault(port, {})[s_type] = _sensor_value(s)
+        if s_type >= 10 or s_type in _ONBOARD_SENSOR_TYPES:
+            continue
+        if s.get("sensorData") is None:
+            continue  # absent, not zero — let the completeness check drop the group
+        by_port.setdefault(port, {})[s_type] = s
 
-    candidates: list[dict] = []
-    for port, by_type in sorted(core_by_port.items()):
-        base = min(by_type)
-        if set(by_type) != {base, base + 2, base + 3}:
-            continue  # not the known temp/humidity/vpd triplet shape
-        candidates.append({
-            "access_port": port,
-            "temperature_f": round(by_type[base], 1),
-            "humidity_pct": round(by_type[base + 2], 1),
-            "vpd_kpa": round(by_type[base + 3], 2),
-        })
+    probes: list[dict] = []
+    for port, entries in sorted(by_port.items()):
+        temp = next((entries[t] for t in _PROBE_TEMP_TYPES if t in entries), None)
+        if temp is None or _PROBE_HUMIDITY_TYPE not in entries or _PROBE_VPD_TYPE not in entries:
+            logger.info(
+                "Unrecognized sensorType<10 group on accessPort %s: %s — skipped",
+                port, sorted(entries),
+            )
+            continue
 
-    if not candidates:
-        return []
+        humidity_entry = entries[_PROBE_HUMIDITY_TYPE]
+        vpd_entry = entries[_PROBE_VPD_TYPE]
+        if not any(e.get("sensorData") for e in (temp, humidity_entry, vpd_entry)):
+            continue  # unpopulated slot — the Quirk 20 phantom class
 
-    def _distance_from_primary(c: dict) -> float:
-        # vpd is a much smaller number than temp/RH; scale so it is not drowned out.
-        return (
-            abs(c["temperature_f"] - temp_f)
-            + abs(c["humidity_pct"] - humidity)
-            + abs(c["vpd_kpa"] - vpd) * 10
+        raw = _sensor_value(temp)
+        unit_flag = temp.get("sensorUnit")
+        is_celsius = (
+            unit_flag > 0 if isinstance(unit_flag, int)
+            else temp.get("sensorType") in (1, "1")
         )
-
-    primary = min(candidates, key=_distance_from_primary)
-    return [c for c in candidates if c is not primary]
+        probes.append({
+            "sensor_port": port,
+            "temperature_c": round(raw if is_celsius else (raw - 32) * 5 / 9, 1),
+            "humidity_pct": round(_sensor_value(humidity_entry), 1),
+            "vpd_kpa": round(_sensor_value(vpd_entry), 2),
+        })
+    return probes
 
 
 _SCHEDULE_ALWAYS_ACTIVE: int = 255
@@ -1712,7 +1722,7 @@ class ACInfinityClient:
                 "vpd": vpd,
                 "ports": ports,
                 "external_sensors": external,
-                "probes": _extract_probes(sensors, temp_f, humidity, vpd),
+                "probes": _extract_probes(sensors),
                 "zone_id": device_data.get("zoneId"),            # IANA string or None
                 "temp_unit_raw": info.get("unit"),               # 0=°F, 1=°C, or None
             }

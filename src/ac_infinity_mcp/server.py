@@ -365,6 +365,26 @@ def _format_sensor_clause(external_sensors: list[dict]) -> str:
     return _sanitize_api_string(clause, 512)
 
 
+def _format_probe_clause(probes: list[dict]) -> str:
+    """Grower-readable prose clause for plug-in probe readings, e.g.
+    "Probe Sensor (Sensor Port 2): 66.3°F, 81.6% RH, VPD 0.39 kPa" (no leading space
+    or trailing period — the call site owns sentence punctuation). Returns "" when
+    there are no probes so the summary stays byte-identical to the pre-probe output.
+
+    Without this a grower asking "how's it looking in there?" hears only the onboard
+    reading, which is the failure mode #305 opens with — the probe is structurally
+    present but conversationally invisible."""
+    if not probes:
+        return ""
+    parts = [
+        f"Probe Sensor (Sensor Port {p.get('sensor_port')}): "
+        f"{p.get('temperature')}{p.get('unit')}, {p.get('humidity')}% RH, "
+        f"VPD {p.get('vpd')} kPa"
+        for p in probes
+    ]
+    return _sanitize_api_string(", ".join(parts), 512)
+
+
 # switchTime bit 7 (128) = continuous flag; mirrors automation._SWITCHTIME_CONTINUOUS_BIT.
 _SWITCHTIME_CONTINUOUS_BIT = 0x80
 
@@ -914,12 +934,11 @@ async def get_device_reading(device_id: str) -> str:
         (empty string for unitless pH and Water Level). EC readings carry their probe's
         unit (µS/cm or mS/cm); 1 mS/cm = 1000 µS/cm — do not compare bare numbers across
         probes.
-        ``probes`` lists any additional physical temp/RH probes beyond the primary
-        one already reflected in ``temperature``/``humidity``/``vpd`` above — e.g.
-        the AI+ line's second "outside"/lung-room probe. Each entry carries
-        ``access_port``, ``temperature``, ``unit``, ``humidity`` and ``vpd``, in the
-        same unit as the top-level reading. Empty when only the primary probe is
-        connected.
+        ``probes`` lists readings from plug-in AC-SPC24 sensor probes (sensorType
+        0-3). The controller's own onboard sensor (types 4-7) is excluded by type —
+        it is already the top-level ``temperature``/``humidity``/``vpd``. Each entry
+        carries ``sensor_port``, ``temperature``, ``unit``, ``humidity`` and ``vpd``,
+        in the same unit as the top-level reading. Empty when no probe is attached.
         ``plug_status`` is only present on a port entry when no current is detected,
         the port is not running (speed 0 and no load), **and the port still has its
         default name** (``"Port N"``). Custom-named ports are assumed to have a device
@@ -945,6 +964,8 @@ async def get_device_reading(device_id: str) -> str:
         _ts = _utc_iso_to_local(parsed.get("timestamp"), tz)
         _safe_name = _sanitize_api_string(parsed.get("device_name"), 64) or "Device"
         _sensor_clause = _format_sensor_clause(parsed.get("external_sensors", []))
+        _probes = _format_probes(parsed.get("probes", []), unit)
+        _probe_clause = _format_probe_clause(_probes)
         output = {
             "device_id": device_id,
             "device_name": parsed.get("device_name"),
@@ -955,9 +976,10 @@ async def get_device_reading(device_id: str) -> str:
             "timestamp": _ts,
             "ports": parsed.get("ports", []),
             "external_sensors": parsed.get("external_sensors", []),
-            "probes": _format_probes(parsed.get("probes", []), unit),
+            "probes": _probes,
             "human_summary": (
                 f"{_safe_name}: {_temp_val}{_unit_lbl}, {_humid}% RH, VPD {_vpd} kPa. "
+                + (f"{_probe_clause}. " if _probe_clause else "")
                 + (f"{_sensor_clause}. " if _sensor_clause else "")
                 + f"Reading from {_ts}."
             ),
@@ -1317,6 +1339,11 @@ async def get_all_device_readings() -> str:
         (empty string for unitless pH and Water Level). EC readings carry their probe's
         unit (µS/cm or mS/cm); 1 mS/cm = 1000 µS/cm — do not compare bare numbers across
         probes.
+        ``probes`` lists readings from plug-in AC-SPC24 sensor probes (sensorType
+        0-3). The controller's own onboard sensor (types 4-7) is excluded by type —
+        it is already the top-level ``temperature``/``humidity``/``vpd``. Each entry
+        carries ``sensor_port``, ``temperature``, ``unit``, ``humidity`` and ``vpd``,
+        in the same unit as the top-level reading. Empty when no probe is attached.
         On auth/API failure returns ``{"error": "...", "detail": "..."}``.
     """
     try:
@@ -1367,7 +1394,9 @@ async def get_all_device_readings() -> str:
                     f"VPD {r.get('vpd')} kPa"
                 )
                 _sc = _format_sensor_clause(r.get("external_sensors", []))
-                _all_parts.append(f"{_base}. {_sc}" if _sc else _base)
+                _pc = _format_probe_clause(r.get("probes", []))
+                _extra = ". ".join(x for x in (_pc, _sc) if x)
+                _all_parts.append(f"{_base}. {_extra}" if _extra else _base)
             _all_summary = ". ".join(_all_parts) + "."
         else:
             _all_summary = "No readings available."

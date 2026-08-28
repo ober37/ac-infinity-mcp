@@ -2264,13 +2264,17 @@ def test_set_port_mode_write_code_999999_raises_advance_conflict(authed_client):
             authed_client.set_port_mode(LEGACY_DEVICE_DATA, port=1, updates={}, dry_run=False)
     assert "999999" in str(exc_info.value)
 
+# ============ parse_device_data — plug-in probe readings (`probes`) ============
+#
+# sensorType is a published enum, not an arithmetic pattern (HA ac_infinity,
+# const.py): 0=PROBE_TEMP_F 1=PROBE_TEMP_C 2=PROBE_HUMIDITY 3=PROBE_VPD, and
+# 4/5/6/7 are the CONTROLLER_* equivalents. Types 0-3 belong to the plug-in
+# AC-SPC24 probe; 4-7 are the controller's own sensor and are already the
+# top-level reading.
 
-# ============ parse_device_data — additional temp/RH probes (`probes`) ============
-
-# Real capture from a live devType=20 (89 AI+) controller. Two sensorType<10
-# triplet groups: accessPort 7 = {4,6,7} equals the top-level reading (the
-# primary onboard probe), accessPort 2 = {0,2,3} is a genuine second physical
-# probe. CO2/light on accessPort 1 are ordinary external sensors.
+# LIVE devType=20 capture (grower hardware, 2026-08). This is the only real
+# probe payload anchoring this feature — every other probe fixture in the repo
+# is hand-written, so keep this one faithful to the wire format.
 MOCK_AI_PLUS_DUAL_PROBE_SENSORS = [
     {"sensorType": 11, "sensorPrecision": 1, "accessPort": 1, "sensorData": 585},
     {"sensorType": 12, "sensorPrecision": 2, "accessPort": 1, "sensorData": 997},
@@ -2286,103 +2290,214 @@ MOCK_DUAL_PROBE_DEVICE = {
     "devCode": "D89XA",
     "devName": "AI+ Dual Probe",
     "deviceInfo": {
-        "temperature": 2639,
-        "temperatureF": 7950,
-        "humidity": 5890,
-        "vpdnums": 84,
-        "ports": [],
-        "sensors": MOCK_AI_PLUS_DUAL_PROBE_SENSORS,
+        "temperature": 2639, "temperatureF": 7950, "humidity": 5890,
+        "vpdnums": 84, "ports": [], "sensors": MOCK_AI_PLUS_DUAL_PROBE_SENSORS,
+    },
+}
+
+# devType=22 (Q0KT4) capture supplied by the maintainer: onboard group ONLY, and
+# its values equal the top-level exactly. The realistic single-group anchor.
+MOCK_DEVTYPE22_ONBOARD_ONLY = {
+    "devCode": "Q0KT4",
+    "devName": "69 Pro+",
+    "deviceInfo": {
+        "temperatureF": 7050, "humidity": 5020, "vpdnums": 124,
+        "temperature": 2139, "ports": [],
+        "sensors": [
+            {"sensorType": 4, "sensorPrecision": 3, "accessPort": 7,
+             "sensorData": 7050, "sensorUnit": 0},
+            {"sensorType": 6, "sensorPrecision": 3, "accessPort": 7,
+             "sensorData": 5020, "sensorUnit": 0},
+            {"sensorType": 7, "sensorPrecision": 3, "accessPort": 7,
+             "sensorData": 124, "sensorUnit": 0},
+        ],
     },
 }
 
 
-def test_parse_device_data_second_probe_surfaced(client):
-    """accessPort 2 {0,2,3} triplet is a real second probe → reported in `probes`."""
+def _probe_device(sensors, **top):
+    base = {"temperatureF": 7950, "humidity": 5890, "vpdnums": 84, "temperature": 2639}
+    base.update(top)
+    return {"devCode": "D89XA", "devName": "Probe Test",
+            "deviceInfo": {**base, "ports": [], "sensors": sensors}}
+
+
+def _probe_group(port, temp_type=0, temp=6630, hum=8160, vpd=39, **extra):
+    return [
+        {"sensorType": temp_type, "sensorPrecision": 3, "accessPort": port,
+         "sensorData": temp, **extra},
+        {"sensorType": 2, "sensorPrecision": 3, "accessPort": port, "sensorData": hum},
+        {"sensorType": 3, "sensorPrecision": 3, "accessPort": port, "sensorData": vpd},
+    ]
+
+
+def _onboard_group(port=7, temp_type=4, temp=7950, hum=5890, vpd=84):
+    return [
+        {"sensorType": temp_type, "sensorPrecision": 3, "accessPort": port, "sensorData": temp},
+        {"sensorType": 6, "sensorPrecision": 3, "accessPort": port, "sensorData": hum},
+        {"sensorType": 7, "sensorPrecision": 3, "accessPort": port, "sensorData": vpd},
+    ]
+
+
+def test_parse_device_data_probe_surfaced(client):
+    """The 0/2/3 group is the plug-in probe and is reported; 4/6/7 is not."""
     result = client.parse_device_data(MOCK_DUAL_PROBE_DEVICE)
     assert len(result["probes"]) == 1
     probe = result["probes"][0]
-    assert probe["access_port"] == 2
-    assert probe["temperature_f"] == pytest.approx(66.3)
+    assert probe["sensor_port"] == 2
+    assert probe["temperature_c"] == pytest.approx(19.1, abs=0.05)  # 66.30 F
     assert probe["humidity_pct"] == pytest.approx(81.6)
     assert probe["vpd_kpa"] == pytest.approx(0.39)
 
 
-def test_parse_device_data_primary_probe_group_excluded(client):
-    """accessPort 7 equals the top-level reading → suppressed, not double-reported."""
-    result = client.parse_device_data(MOCK_DUAL_PROBE_DEVICE)
-    assert all(p["access_port"] != 7 for p in result["probes"])
-
-
 def test_parse_device_data_probes_do_not_pollute_external_sensors(client):
-    """sensorType<10 probe entries stay out of external_sensors (Quirk 20 unchanged)."""
+    """sensorType<10 entries stay out of external_sensors (Quirk 20 unchanged)."""
     result = client.parse_device_data(MOCK_DUAL_PROBE_DEVICE)
-    types = {s["sensor_type"] for s in result["external_sensors"]}
-    assert types == {11, 12}
+    assert {s["sensor_type"] for s in result["external_sensors"]} == {11, 12}
 
 
 def test_parse_device_data_no_probes_when_no_sensors(client):
-    result = client.parse_device_data(MOCK_DEVICE)
-    assert result["probes"] == []
+    assert client.parse_device_data(MOCK_DEVICE)["probes"] == []
 
 
-def test_parse_device_data_lone_primary_group_yields_no_probes(client):
-    """A single sensorType<10 group is the primary probe even if its values do not
-    exactly track the top-level fields — it must not be reported as a second probe.
+def test_parse_device_data_onboard_only_group_is_not_a_probe(client):
+    """A single onboard (4/6/7) group is never reported as a probe.
 
-    Regression guard: MOCK_PHANTOM_SENSORS_DEVTYPE22 is a real capture whose
-    {4,6,7} values differ from this helper's synthetic top-level reading. A
-    tolerance-based "skip groups matching the top-level" rule reports it as a
-    physical second probe; suppressing exactly one (the closest) group does not.
+    Anchored on the real devType=22 capture, where the onboard group equals the
+    top-level reading exactly — so this holds by type, not by value comparison.
     """
-    device = _device_with_sensor_list(MOCK_PHANTOM_SENSORS_DEVTYPE22)
-    result = client.parse_device_data(device)
-    assert result["probes"] == []
+    assert client.parse_device_data(MOCK_DEVTYPE22_ONBOARD_ONLY)["probes"] == []
 
 
-def test_parse_device_data_identical_probes_both_survive(client):
-    """Two probes reading identically → exactly one is suppressed, not both.
+def test_parse_device_data_identical_probe_and_onboard_both_kept(client):
+    """A probe reading identically to the onboard sensor must still surface, and
+    must be labelled with ITS port, not the onboard one."""
+    device = _probe_device(
+        _onboard_group(port=7) + _probe_group(port=2, temp=7950, hum=5890, vpd=84)
+    )
+    probes = client.parse_device_data(device)["probes"]
+    assert len(probes) == 1
+    assert probes[0]["sensor_port"] == 2
 
-    A lung room and tent at equilibrium legitimately read alike; the second
-    probe must not vanish just because it matches the primary.
+
+def test_parse_device_data_celsius_twin_on_onboard_group(client):
+    """An onboard group carrying its Celsius twin (4,5,6,7) must not hide the probe.
+
+    This is the case the arithmetic base/base+2/base+3 model silently broke.
     """
-    sensors = [
-        {"sensorType": 4, "sensorPrecision": 3, "accessPort": 7, "sensorData": 7950},
-        {"sensorType": 6, "sensorPrecision": 3, "accessPort": 7, "sensorData": 5890},
-        {"sensorType": 7, "sensorPrecision": 3, "accessPort": 7, "sensorData": 84},
-        {"sensorType": 0, "sensorPrecision": 3, "accessPort": 2, "sensorData": 7950},
-        {"sensorType": 2, "sensorPrecision": 3, "accessPort": 2, "sensorData": 5890},
-        {"sensorType": 3, "sensorPrecision": 3, "accessPort": 2, "sensorData": 84},
+    onboard = _onboard_group(port=7) + [
+        {"sensorType": 5, "sensorPrecision": 3, "accessPort": 7, "sensorData": 2639}
     ]
-    device = {
-        "devCode": "D89XA",
-        "devName": "Equilibrium",
-        "deviceInfo": {
-            "temperature": 2639, "temperatureF": 7950, "humidity": 5890,
-            "vpdnums": 84, "ports": [], "sensors": sensors,
-        },
-    }
-    result = client.parse_device_data(device)
+    probes = client.parse_device_data(_probe_device(onboard + _probe_group(port=2)))["probes"]
+    assert len(probes) == 1
+    assert probes[0]["sensor_port"] == 2
+
+
+def test_parse_device_data_celsius_only_groups(client):
+    """Celsius-only layouts (probe 1/2/3 + onboard 5/6/7) still resolve."""
+    onboard = _onboard_group(port=7, temp_type=5, temp=2639)
+    probe = _probe_group(port=2, temp_type=1, temp=1910)
+    probes = client.parse_device_data(_probe_device(onboard + probe))["probes"]
+    assert len(probes) == 1
+    assert probes[0]["sensor_port"] == 2
+    assert probes[0]["temperature_c"] == pytest.approx(19.1, abs=0.05)
+
+
+def test_parse_device_data_probe_sensor_unit_flag_celsius(client):
+    """sensorUnit > 0 means the raw value is ALREADY Celsius — do not convert."""
+    probe = _probe_group(port=2, temp=1906, sensorUnit=1)
+    probes = client.parse_device_data(_probe_device(_onboard_group() + probe))["probes"]
+    assert probes[0]["temperature_c"] == pytest.approx(19.1, abs=0.05)
+
+
+def test_parse_device_data_probe_sensor_unit_flag_fahrenheit(client):
+    """sensorUnit == 0 means Fahrenheit — convert."""
+    probe = _probe_group(port=2, temp=6630, sensorUnit=0)
+    probes = client.parse_device_data(_probe_device(_onboard_group() + probe))["probes"]
+    assert probes[0]["temperature_c"] == pytest.approx(19.1, abs=0.05)
+
+
+def test_parse_device_data_all_zero_triplet_is_phantom(client):
+    """An unpopulated 0/0/0 slot is a Quirk 20 phantom, not a probe at -17.8 C."""
+    phantom = _probe_group(port=3, temp=0, hum=0, vpd=0)
+    device = _probe_device(_onboard_group() + phantom)
+    assert client.parse_device_data(device)["probes"] == []
+
+
+def test_parse_device_data_partial_none_triplet_is_dropped(client):
+    """A None member makes the group incomplete — it must not become 0 F at 81.6% RH."""
+    partial = [
+        {"sensorType": 0, "sensorPrecision": 3, "accessPort": 3, "sensorData": None},
+        {"sensorType": 2, "sensorPrecision": 3, "accessPort": 3, "sensorData": 8160},
+        {"sensorType": 3, "sensorPrecision": 3, "accessPort": 3, "sensorData": 39},
+    ]
+    device = _probe_device(_onboard_group() + partial)
+    assert client.parse_device_data(device)["probes"] == []
+
+
+def test_parse_device_data_unattested_type_shape_is_rejected(client):
+    """Types 2/4/5 accidentally satisfied the old base+2/base+3 rule and minted a
+    21.39 kPa VPD probe. Under the enum model it is simply not a probe group."""
+    junk = [
+        {"sensorType": 2, "sensorPrecision": 3, "accessPort": 3, "sensorData": 8160},
+        {"sensorType": 4, "sensorPrecision": 3, "accessPort": 3, "sensorData": 7050},
+        {"sensorType": 5, "sensorPrecision": 3, "accessPort": 3, "sensorData": 2139},
+    ]
+    assert client.parse_device_data(_probe_device(_onboard_group() + junk))["probes"] == []
+
+
+def test_parse_device_data_lone_probe_without_onboard_group(client):
+    """A probe present with NO onboard group must still be reported.
+
+    The old drop-one rule swallowed this entirely.
+    """
+    probes = client.parse_device_data(_probe_device(_probe_group(port=2)))["probes"]
+    assert len(probes) == 1
+    assert probes[0]["sensor_port"] == 2
+
+
+def test_parse_device_data_multiple_probes_ordered_by_port(client):
+    """Three probe groups produce three probes, ordered by sensor_port."""
+    sensors = (_onboard_group()
+               + _probe_group(port=2, temp=6630)
+               + _probe_group(port=4, temp=7000)
+               + _probe_group(port=3, temp=6800))
+    probes = client.parse_device_data(_probe_device(sensors))["probes"]
+    assert [p["sensor_port"] for p in probes] == [2, 3, 4]
+
+
+def test_parse_device_data_probe_and_onboard_on_same_port(client):
+    """Types 0-3 and 4-7 sharing an accessPort: the onboard half is filtered by
+    type, so the probe half still resolves rather than both being lost."""
+    sensors = _onboard_group(port=7) + _probe_group(port=7, temp=6630)
+    probes = client.parse_device_data(_probe_device(sensors))["probes"]
+    assert len(probes) == 1
+    assert probes[0]["sensor_port"] == 7
+
+
+@pytest.mark.parametrize("bad_entry", [
+    {"sensorType": "1", "sensorPrecision": 3, "accessPort": 9, "sensorData": 100},
+    {"sensorType": None, "sensorPrecision": 3, "accessPort": 9, "sensorData": 100},
+    {"sensorType": 0, "sensorPrecision": 3, "accessPort": None, "sensorData": 100},
+    {"sensorType": "abc", "sensorPrecision": 3, "accessPort": 9, "sensorData": 100},
+])
+def test_parse_device_data_malformed_sensor_entry_does_not_break_reading(client, bad_entry):
+    """One unparseable entry must not cost the grower temperature, humidity, VPD,
+    ports and external_sensors via ACInfinityAPIError."""
+    sensors = MOCK_AI_PLUS_DUAL_PROBE_SENSORS + [bad_entry]
+    result = client.parse_device_data(_probe_device(sensors))
+    assert result["temperature_f"] == pytest.approx(79.5)
     assert len(result["probes"]) == 1
 
 
-def test_parse_device_data_incomplete_triplet_ignored(client):
-    """A partial group (temp+humidity, no vpd) is not the known triplet shape."""
-    sensors = [
-        {"sensorType": 0, "sensorPrecision": 3, "accessPort": 2, "sensorData": 6630},
-        {"sensorType": 2, "sensorPrecision": 3, "accessPort": 2, "sensorData": 8160},
+def test_parse_device_data_all_string_typed_probe_group(client):
+    """String-typed sensorType/accessPort are coerced, not crashed on."""
+    sensors = _onboard_group() + [
+        {"sensorType": "0", "sensorPrecision": 3, "accessPort": "2", "sensorData": 6630},
+        {"sensorType": "2", "sensorPrecision": 3, "accessPort": "2", "sensorData": 8160},
+        {"sensorType": "3", "sensorPrecision": 3, "accessPort": "2", "sensorData": 39},
     ]
-    device = _device_with_sensor_list(sensors)
-    result = client.parse_device_data(device)
-    assert result["probes"] == []
-
-
-def test_parse_device_data_probe_sensor_data_none_treated_as_zero(client):
-    """sensorData=None must not raise inside the probe extractor."""
-    sensors = [
-        {"sensorType": 0, "sensorPrecision": 3, "accessPort": 2, "sensorData": None},
-        {"sensorType": 2, "sensorPrecision": 3, "accessPort": 2, "sensorData": 8160},
-        {"sensorType": 3, "sensorPrecision": 3, "accessPort": 2, "sensorData": 39},
-    ]
-    device = _device_with_sensor_list(sensors)
-    result = client.parse_device_data(device)
-    assert isinstance(result["probes"], list)
+    result = client.parse_device_data(_probe_device(sensors))
+    assert result["temperature_f"] == pytest.approx(79.5)
+    assert len(result["probes"]) == 1
+    assert result["probes"][0]["sensor_port"] == 2

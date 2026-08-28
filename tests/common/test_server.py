@@ -26,6 +26,8 @@ from ac_infinity_mcp.server import (
     _filter_readings_by_time,
     _find_governing_automation,
     _find_governing_port_group,
+    _format_probe_clause,
+    _format_probes,
     _format_schedule_time,
     _format_sensor_clause,
     _format_window_dt,
@@ -11152,3 +11154,106 @@ async def test_create_advance_automation_dry_run_no_write(mock_client):
     )
     assert json.loads(result)["dry_run"] is True
     mock_client.create_advance_automation.assert_not_called()
+
+
+# ============ _format_probes / _format_probe_clause ============
+#
+# These were previously executed zero times across the whole suite — only ever
+# called with [] — so the F/C rendering they exist for was entirely unverified.
+
+_PROBE_C = {"sensor_port": 2, "temperature_c": 19.1, "humidity_pct": 81.6, "vpd_kpa": 0.39}
+
+
+def test_format_probes_empty():
+    assert _format_probes([], "F") == []
+    assert _format_probes([], "C") == []
+
+
+def test_format_probes_fahrenheit_device():
+    """19.1 C renders as 66.4 F on a Fahrenheit device."""
+    out = _format_probes([_PROBE_C], "F")
+    assert out == [{
+        "sensor_port": 2, "temperature": 66.4, "unit": "°F",
+        "humidity": 81.6, "vpd": 0.39,
+    }]
+
+
+def test_format_probes_celsius_device():
+    """The stored Celsius value passes through unconverted on a Celsius device."""
+    out = _format_probes([_PROBE_C], "C")
+    assert out == [{
+        "sensor_port": 2, "temperature": 19.1, "unit": "°C",
+        "humidity": 81.6, "vpd": 0.39,
+    }]
+
+
+def test_format_probes_multiple_preserves_order():
+    probes = [
+        {"sensor_port": 2, "temperature_c": 19.1, "humidity_pct": 81.6, "vpd_kpa": 0.39},
+        {"sensor_port": 4, "temperature_c": 21.0, "humidity_pct": 55.0, "vpd_kpa": 1.10},
+    ]
+    out = _format_probes(probes, "C")
+    assert [p["sensor_port"] for p in out] == [2, 4]
+    assert out[1]["temperature"] == 21.0
+
+
+def test_format_probe_clause_empty_is_blank():
+    """No probes must leave the summary byte-identical to the pre-probe output."""
+    assert _format_probe_clause([]) == ""
+
+
+def test_format_probe_clause_single():
+    clause = _format_probe_clause(_format_probes([_PROBE_C], "F"))
+    assert clause == "Probe Sensor (Sensor Port 2): 66.4°F, 81.6% RH, VPD 0.39 kPa"
+
+
+def test_format_probe_clause_multiple():
+    probes = _format_probes([
+        {"sensor_port": 2, "temperature_c": 19.1, "humidity_pct": 81.6, "vpd_kpa": 0.39},
+        {"sensor_port": 4, "temperature_c": 21.0, "humidity_pct": 55.0, "vpd_kpa": 1.10},
+    ], "C")
+    clause = _format_probe_clause(probes)
+    assert "Sensor Port 2" in clause and "Sensor Port 4" in clause
+    assert clause.count("Probe Sensor") == 2
+
+
+# ============ probes surfaced through the tool layer ============
+
+_SERVER_PROBE = {"sensor_port": 2, "temperature_c": 19.1, "humidity_pct": 81.6, "vpd_kpa": 0.39}
+
+
+async def test_get_device_reading_includes_probes(mock_client):
+    """probes reaches the tool JSON, unit-converted like every sibling reading."""
+    mock_client.parse_device_data.return_value["probes"] = [dict(_SERVER_PROBE)]
+    data = json.loads(await get_device_reading("C58ZA"))
+    assert data["probes"] == [{
+        "sensor_port": 2, "temperature": 19.1, "unit": "°C",
+        "humidity": 81.6, "vpd": 0.39,
+    }]
+
+
+async def test_get_device_reading_probe_in_human_summary(mock_client):
+    """A grower asking how it looks should HEAR the probe, not just find it in JSON."""
+    mock_client.parse_device_data.return_value["probes"] = [dict(_SERVER_PROBE)]
+    data = json.loads(await get_device_reading("C58ZA"))
+    assert "Probe Sensor (Sensor Port 2): 19.1°C, 81.6% RH, VPD 0.39 kPa" in data["human_summary"]
+
+
+async def test_get_device_reading_summary_unchanged_without_probes(mock_client):
+    """No probe attached must leave the summary byte-identical to before."""
+    data = json.loads(await get_device_reading("C58ZA"))
+    assert data["probes"] == []
+    assert "Probe Sensor" not in data["human_summary"]
+
+
+async def test_get_all_device_readings_includes_probes(mock_client):
+    mock_client.parse_device_data.return_value["probes"] = [dict(_SERVER_PROBE)]
+    data = json.loads(await get_all_device_readings())
+    assert data["readings"][0]["probes"][0]["sensor_port"] == 2
+    assert "Probe Sensor (Sensor Port 2)" in data["human_summary"]
+
+
+async def test_get_all_device_readings_summary_unchanged_without_probes(mock_client):
+    data = json.loads(await get_all_device_readings())
+    assert data["readings"][0]["probes"] == []
+    assert "Probe Sensor" not in data["human_summary"]
