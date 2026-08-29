@@ -15,13 +15,28 @@ permissions:
 
 jobs:
   test:
-    name: "Python ${{ matrix.python-version }}"
-    runs-on: ubuntu-latest
+    # The name expression keeps the existing Linux checks named exactly
+    # "Python 3.11" / "Python 3.12", so any required-status-check config on
+    # main keeps matching. The Windows job adds a new name rather than
+    # renaming an existing one.
+    name: "Python ${{ matrix.python-version }}${{ matrix.os == 'windows-latest' && ' — Windows' || '' }}"
+    runs-on: ${{ matrix.os }}
 
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.11", "3.12"]
+        include:
+          # One Windows job, deliberately not a full OS × version matrix.
+          # Its purpose is narrow: catch platform-encoding bugs (#317), where
+          # the default locale is cp1252 rather than UTF-8 and an unqualified
+          # open()/read_text() silently changes behaviour. That class of bug is
+          # invisible on ubuntu-latest, which is why #317 reached main at all.
+          # The project has no other Windows-specific code paths, so a second
+          # Python version here would spend CI minutes covering nothing new.
+          - os: windows-latest
+            python-version: "3.12"
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -50,12 +65,32 @@ jobs:
         run: mypy src/ac_infinity_mcp/
 
       - name: Tests — pytest
+        if: runner.os != 'Windows'
         run: pytest tests/ -v
         env:
           AC_INFINITY_EMAIL: ""
           AC_INFINITY_PASSWORD: ""
 
+      - name: Tests — pytest (UTF-8 mode off, locale encoding)
+        # PYTHONUTF8=0 is the point of the Windows job, not a detail of it.
+        # The bug in #317 only appears when Python falls back to the platform
+        # locale (cp1252) instead of UTF-8. Pinning the flag off means this job
+        # exercises that path deterministically, rather than depending on the
+        # runner image's default — which, if it ever flipped to UTF-8 mode,
+        # would leave a green check guarding nothing.
+        if: runner.os == 'Windows'
+        run: pytest tests/ -v
+        env:
+          AC_INFINITY_EMAIL: ""
+          AC_INFINITY_PASSWORD: ""
+          PYTHONUTF8: "0"
+
       - name: Security audit — pip-audit
+        # Linux only. The dependency set is platform-independent, so running it
+        # again on Windows audits the same packages while adding a second
+        # runner toolcache that can ship its own CVEs — the failure mode that
+        # already needed working around in #270 and #312.
+        if: runner.os == 'Linux'
         # No --ignore-vuln flags: the project carries zero accepted-CVE ignores.
         # PYSEC-2025-183 (mcp) was retired in #313 after the mcp<2 pin (#309)
         # resolved it; the starlette ignore was dropped in #311. If a new CVE
