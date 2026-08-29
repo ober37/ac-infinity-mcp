@@ -14,7 +14,7 @@ PATTERN = re.compile(
 
 
 def migrate(path: str) -> None:
-    lines = open(path).readlines()
+    lines = open(path, encoding="utf-8").readlines()
     out = []
     i = 0
     removed = 0
@@ -56,7 +56,7 @@ def migrate(path: str) -> None:
         else:
             out.append(line)
             i += 1
-    open(path, "w").writelines(out)
+    open(path, "w", encoding="utf-8").writelines(out)
     print(f"Removed {removed} patch wrappers from {path}")
 
 
