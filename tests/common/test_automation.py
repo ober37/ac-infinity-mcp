@@ -475,3 +475,24 @@ def test_decode_rule_string_valued_buffer_transition_no_raise():
     assert "VPD buffer 0.3 kPa" in decoded["control"]
     assert "temperature buffer 2°F" in decoded["control"]
     assert "humidity transition 4%" in decoded["control"]
+
+
+def test_is_port_not_powered_false_on_ai_plus() -> None:
+    """devType 20 has no load signal, so it must not claim a running port is unpowered.
+
+    portsLoad is None on every AI+ port (Quirk 24). Before devType 20 joined
+    _ZERO_LOAD_DEV_TYPES, `(portsLoad or 0) == 0` was true for all of them, so an
+    ADVANCE-conflict response would append "is not currently drawing power" to a
+    light that was visibly running at speed 2 with a 400-ohm load.
+    """
+    running_light = {
+        "port": 1, "portName": "Light", "speak": 2,
+        "portsLoad": None, "portResistance": 400,
+    }
+    assert _is_port_not_powered(running_light, {"devType": 20}) is False
+
+
+def test_is_port_not_powered_still_true_on_legacy_zero_load() -> None:
+    """devType 11 reports portsLoad honestly, so the signal stays meaningful there."""
+    idle = {"port": 1, "portName": "Ventilation", "speak": 0, "portsLoad": 0}
+    assert _is_port_not_powered(idle, {"devType": 11}) is True
