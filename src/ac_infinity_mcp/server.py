@@ -2499,21 +2499,46 @@ async def get_port_settings(device_id: str, port: int) -> str:
         _port_name_str = (
             port_data.get("portName", f"Port {port}") if port_data else f"Port {port}"
         )
-        if temp_range:
-            _t_min = temp_range["min"]
-            _t_max = temp_range["max"]
-            human_summary = (
-                f"Temperature automation: {_t_min}–{_t_max}{_unit_lbl}. "
-                f"Fan speeds up above {_t_max}{_unit_lbl} and slows below {_t_min}{_unit_lbl}."
-            )
-        elif vpd_target is not None:
-            human_summary = f"VPD automation: target {vpd_target} kPa."
-        elif humi_range:
-            human_summary = (
-                f"Humidity automation: {humi_range['min_pct']}–{humi_range['max_pct']}%."
-            )
+        # The summary must describe what the port is DOING, which is decided by
+        # atType — not by whichever stored threshold happens to be populated.
+        # Thresholds persist across mode changes, so a port sitting in OFF can
+        # still carry an active-looking temperature range from a previous
+        # configuration. Reporting that as behaviour ("Fan speeds up above
+        # 82.0°F") states something the controller is not doing.
+        #
+        # Only AUTO and VPD are trigger-driven. Within AUTO both the temperature
+        # and humidity families can be live at once, so they are joined rather
+        # than ranked — the previous first-match chain silently dropped whichever
+        # came second.
+        _clauses: list[str] = []
+        if mode_str == "AUTO":
+            if temp_range:
+                _t_min, _t_max = temp_range["min"], temp_range["max"]
+                _clauses.append(
+                    f"Temperature automation: {_t_min}–{_t_max}{_unit_lbl}. "
+                    f"Fan speeds up above {_t_max}{_unit_lbl} and slows below "
+                    f"{_t_min}{_unit_lbl}."
+                )
+            if humi_range:
+                _clauses.append(
+                    f"Humidity automation: {humi_range['min_pct']}–"
+                    f"{humi_range['max_pct']}%."
+                )
+        elif mode_str == "VPD" and vpd_target is not None:
+            _clauses.append(f"VPD automation: target {vpd_target} kPa.")
+
+        if _clauses:
+            human_summary = " ".join(_clauses)
         else:
             human_summary = f"Port is in {mode_str} mode."
+            # Stored thresholds a mode change left behind are still worth
+            # surfacing — they are what the port would use if switched back —
+            # but as stored config, not as current behaviour.
+            if temp_range or humi_range or vpd_target is not None:
+                human_summary += (
+                    " It has stored automation settings, but they are not active "
+                    f"in {mode_str} mode."
+                )
 
         _cycle_on = settings.get("activeCycleOn") or 0
         _cycle_off = settings.get("activeCycleOff") or 0

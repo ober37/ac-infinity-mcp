@@ -11300,3 +11300,94 @@ def test_resolve_temp_trigger_unparseable_pair_falls_back():
     """A garbage °F pair must not take precedence over a usable °C pair."""
     settings = {"devLt": 10, "devHt": 27, "devLtf": "n/a", "devHtf": None}
     assert _resolve_temp_trigger(settings, "F") == (50.0, 80.6)
+
+
+# ============ human_summary must describe the active mode ============
+#
+# The summary used to be a first-match chain over stored thresholds
+# (temp -> vpd -> humidity) that never consulted atType. Thresholds persist
+# across mode changes, so this reported settings a port was not using, and
+# dropped whichever family came second. Three failures observed live on a
+# devType-20 controller:
+#
+#   port 3  OFF  + stale 82°F range   -> "Fan speeds up above 82.0°F"  (port is off)
+#   port 2  AUTO + temp AND humidity  -> temperature only, humidity dropped
+#   port 4  AUTO + humidity + stale
+#           VPD target                -> "VPD automation", but humidity governs
+
+_F_DEVICE = {"deviceInfo": {"unit": 0}}          # °F display
+
+
+def _settings(**over):
+    base = {
+        **MOCK_MODE_SETTINGS_BASIC,
+        "devLt": 0, "devHt": 0, "devLtf": 32, "devHtf": 32,
+        "activeLt": 0, "activeHt": 0,
+        "devLh": 0, "devHh": 100, "activeLh": 0, "activeHh": 0,
+        "targetVpd": 0, "targetVpdSwitch": 0,
+    }
+    base.update(over)
+    return base
+
+
+async def _summary(mock_client, settings):
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device.setdefault("deviceInfo", {})["unit"] = 0
+    mock_client.get_devices.return_value = [device]
+    mock_client.get_mode_settings.return_value = settings
+    return json.loads(await get_port_settings("C58ZA", 1))["human_summary"]
+
+
+async def test_summary_off_port_does_not_claim_temperature_automation(mock_client):
+    """The live port-3 case: OFF, but carrying an active 82°F trigger."""
+    s = await _summary(mock_client, _settings(
+        atType=1, devLtf=82, devHtf=82, activeLt=1))
+    assert "Fan speeds up" not in s
+    assert "Temperature automation" not in s
+    assert "OFF mode" in s
+    assert "not active" in s
+
+
+async def test_summary_auto_reports_both_temperature_and_humidity(mock_client):
+    """The live port-2 case: both families active; neither may be dropped."""
+    s = await _summary(mock_client, _settings(
+        atType=3, devHtf=80, activeHt=1, devLh=55, devHh=55, activeLh=1))
+    assert "Temperature automation" in s
+    assert "80.0" in s
+    assert "Humidity automation" in s
+    assert "55" in s
+
+
+async def test_summary_auto_with_stale_vpd_reports_the_governing_family(mock_client):
+    """The live port-4 case: AUTO + humidity floor, with a leftover VPD target.
+
+    atType=3 means the humidity trigger governs. The stored targetVpd is from a
+    previous VPD-mode configuration and must not be described as running.
+    """
+    s = await _summary(mock_client, _settings(
+        atType=3, devLh=48, devHh=100, activeLh=1,
+        targetVpd=12, targetVpdSwitch=1, vpdSettingMode=1))
+    assert "Humidity automation: 48–100%." in s
+    assert "VPD" not in s
+
+
+async def test_summary_vpd_mode_reports_the_vpd_target(mock_client):
+    """atType=8 is the mode where a VPD target actually governs."""
+    s = await _summary(mock_client, _settings(
+        atType=8, targetVpd=12, targetVpdSwitch=1, vpdSettingMode=1))
+    assert s == "VPD automation: target 1.2 kPa."
+
+
+async def test_summary_schedule_mode_flags_stored_settings_as_inactive(mock_client):
+    """Stored thresholds are still worth surfacing — but as stored, not as live."""
+    s = await _summary(mock_client, _settings(
+        atType=7, devHtf=80, activeHt=1))
+    assert "SCHEDULE mode" in s
+    assert "not active" in s
+    assert "Fan speeds up" not in s
+
+
+async def test_summary_clean_off_port_says_only_the_mode(mock_client):
+    """No stored config: no dangling caveat about settings that do not exist."""
+    s = await _summary(mock_client, _settings(atType=1))
+    assert s == "Port is in OFF mode."
