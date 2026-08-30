@@ -7,9 +7,13 @@ from ac_infinity_mcp.analytics import STAGE_TARGETS
 from ac_infinity_mcp.server import mcp_server
 
 REPO_ROOT = Path(__file__).parents[2]
-GUIDE = (REPO_ROOT / "docs/GUIDE.md").read_text()
-README = (REPO_ROOT / "README.md").read_text()
-API_MD = (REPO_ROOT / "docs/API.md").read_text()
+# encoding="utf-8" is required, not stylistic: read_text() otherwise uses
+# locale.getpreferredencoding(), which is cp1252 on a default Windows install.
+# These are module-level, so a decode error aborts collection and takes the
+# whole suite down, not just this file (#317).
+GUIDE = (REPO_ROOT / "docs/GUIDE.md").read_text(encoding="utf-8")
+README = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+API_MD = (REPO_ROOT / "docs/API.md").read_text(encoding="utf-8")
 
 
 def _registered_tool_names() -> list[str]:

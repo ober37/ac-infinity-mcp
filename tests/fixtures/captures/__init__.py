@@ -24,4 +24,4 @@ CAPTURE_DATES = ("2026-05-04", "2026-05-29")
 def load_89_aiplus_capture(date: str = "2026-05-29") -> dict:
     """Load a pinned Controller 89 AI+ capture by date (see CAPTURE_DATES)."""
     path = _CAPTURE_DIR / f"controller-89-aiplus-{date}.json"
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(encoding="utf-8"))
