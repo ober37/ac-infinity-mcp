@@ -29,6 +29,25 @@ def _unit_label(unit: str) -> str:
     return "°F" if unit == "F" else "°C"
 
 
+def _format_probes(probes: list[dict], unit: str) -> list[dict]:
+    """Render plug-in probe readings in the device's preferred unit.
+
+    ``_extract_probes`` normalises probe temperature to Celsius, so this is a
+    straight unit conversion with no arithmetic of its own — the same treatment
+    every other temperature in a tool response gets.
+    """
+    return [
+        {
+            "sensor_port": probe["sensor_port"],
+            "temperature": _to_preferred_temp(probe["temperature_c"], unit),
+            "unit": _unit_label(unit),
+            "humidity": probe["humidity_pct"],
+            "vpd": probe["vpd_kpa"],
+        }
+        for probe in probes
+    ]
+
+
 def _utc_iso_to_local(utc_iso: str | None, tz: ZoneInfo) -> str | None:
     """Convert a UTC ISO 8601 string to a local timezone string, or None if input is None."""
     if not utc_iso:
