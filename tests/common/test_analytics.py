@@ -1277,9 +1277,15 @@ def test_rule_d_handles_toggle_speed_before_rule_e_is_reached() -> None:
 # ============ Issue #120: devType=18 zero-load quirk ============
 
 
-def test_zero_load_dev_types_contains_18_and_22() -> None:
-    """_ZERO_LOAD_DEV_TYPES must contain exactly {18, 22} — regression guard."""
-    assert _ZERO_LOAD_DEV_TYPES == frozenset({18, 22})
+def test_zero_load_dev_types_membership() -> None:
+    """_ZERO_LOAD_DEV_TYPES must contain exactly {18, 20, 22} — regression guard.
+
+    20 was added on live evidence: an 89 AI+ reports portsLoad=None on all 8
+    ports, including a light and an exhaust fan that were both running at the
+    time. Treating that absence as "no current draw" made Rule D drop a
+    humidifier that had cycled 74 times for 7.3h over two days.
+    """
+    assert _ZERO_LOAD_DEV_TYPES == frozenset({18, 20, 22})
 
 
 @pytest.mark.parametrize("dev_type,expected_kept", [
@@ -1900,3 +1906,35 @@ def test_sampling_shim_still_works_from_server() -> None:
     """Re-export shim keeps legacy imports green during transition."""
     from ac_infinity_mcp.server import apply_sampling
     assert callable(apply_sampling)
+
+
+# ============ Rule D must not fire where the load signal is absent ============
+#
+# Live devType-20 capture: a humidifier on port 4 cycled 74 times for 7.35h over
+# two days on a 48% RH floor, and was excluded from the activity report as
+# "no power detected". Three quirks stack to cause it:
+#
+#   Quirk 24/34  portsLoad is None and loadType is 0 on every AI+ port, so
+#                "zero load" is vacuously true and is_toggle can never be true
+#   Quirk 22     toggle hardware reports speed 1 while running
+#
+# leaving avg_speed <= 1.0 as Rule D's only real criterion.
+
+
+def test_rule_d_keeps_cycling_toggle_port_on_zero_load_device() -> None:
+    """A humidifier that genuinely cycled must survive Rule D on devType 20."""
+    readings = _filter_port_readings(4, "Humidity", speed=1, on_count=12, total=24, days=1)
+    kept = build_activity_report(
+        readings, days=1, port_loads={4: 0}, port_load_types={4: 0}, dev_type=20
+    )
+    assert len(kept) == 1, "cycling port was ghost-filtered on a zero-load device"
+    assert kept[0].port == 4
+
+
+def test_rule_d_still_fires_on_devices_with_a_real_load_signal() -> None:
+    """devType 11 reports portsLoad honestly, so zero load remains real evidence."""
+    readings = _filter_port_readings(4, "Humidity", speed=1, on_count=12, total=24, days=1)
+    kept = build_activity_report(
+        readings, days=1, port_loads={4: 0}, port_load_types={4: 0}, dev_type=11
+    )
+    assert kept == [], "Rule D must still filter ghosts where load data is trustworthy"

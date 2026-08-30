@@ -20,8 +20,11 @@ _DURATION_UNITS = {"m": 60, "h": 3600, "d": 86400}
 # h/day: zero-load ports below this are treated as ghost candidates
 _GHOST_LOAD_ZERO_THRESHOLD: float = 1.0
 
-# devType values where portsLoad is always 0 regardless of actual current draw (Quirk 24)
-_ZERO_LOAD_DEV_TYPES: frozenset[int] = frozenset({18, 22})
+# devType values where portsLoad is always 0/None regardless of actual current draw
+# (Quirk 24). devType 20 belongs here on live evidence: an 89 AI+ reports
+# portsLoad=None on all 8 ports, including a light (400 ohm) and an exhaust fan
+# (5100 ohm) that were both running at the time of capture.
+_ZERO_LOAD_DEV_TYPES: frozenset[int] = frozenset({18, 20, 22})
 
 STAGE_TARGETS: dict[str, dict[str, tuple[float, float]]] = {
     "clones":       {"temp_c": (22.0, 26.0), "humidity": (70.0, 80.0), "vpd": (0.8, 1.2)},
@@ -473,8 +476,20 @@ def build_activity_report(
             port_load_types is not None
             and port_load_types.get(rep.port) in _TOGGLE_LOAD_TYPES
         )
+        # Rule D reads "zero load" as evidence the port drew no current. That is
+        # sound where portsLoad works, and meaningless on _ZERO_LOAD_DEV_TYPES,
+        # where the field is absent for every port whether it ran or not — so the
+        # condition is vacuously true and the rule collapses to "exclude any port
+        # whose speed never exceeded 1". Toggle hardware always reports speed 1
+        # while running (Quirk 22), and loadType is 0 on devType 20 (Quirk 34) so
+        # is_toggle cannot rescue it. A humidifier that cycled 74 times for 7.3h
+        # over two days was being dropped as a ghost.
+        #
+        # Rule G still removes the genuine low-activity ghosts on these devices,
+        # using runtime rather than a load signal that does not exist.
         if (
             not is_toggle
+            and dev_type not in _ZERO_LOAD_DEV_TYPES
             and port_loads is not None
             and port_loads.get(rep.port, 0) == 0
             and rep.avg_speed_when_running <= 1.0
