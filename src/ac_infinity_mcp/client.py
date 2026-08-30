@@ -18,6 +18,25 @@ from ac_infinity_mcp.schema import (
 
 logger = logging.getLogger(__name__)
 
+# portResistance == 65535 is the hardware open-circuit sentinel (Quirk 27):
+# nothing is connected to the port. Duplicated from ports.py rather than imported
+# to keep client.py free of a dependency on the server-side helpers.
+_PORT_EMPTY_RESISTANCE = 65535
+
+
+def _port_resistance(device_data: dict, port: int) -> int | None:
+    """Return a port's portResistance from a devInfoListAll device dict, or None."""
+    for p in (device_data.get("deviceInfo") or {}).get("ports", []):
+        if p.get("port") == port:
+            raw = p.get("portResistance")
+            if raw is None:
+                return None
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return None
+    return None
+
 # ---------------------------------------------------------------------------
 # App-identity headers
 #
@@ -1337,6 +1356,26 @@ class ACInfinityClient:
             # exception handler routes to _build_advance_conflict_response instead of the
             # generic ACInfinityAPIError path.
             if code == 999999:
+                # Most 999999s are neither an automation conflict nor toggle
+                # hardware: the port simply has nothing plugged into it.
+                # Verified by no-op writes across 12 ports on two controllers —
+                # every port with portResistance == 65535 (the Quirk 27
+                # open-circuit sentinel) returned 999999, every connected port
+                # returned 200. That held on a devType-11 controller with zero
+                # Advance Automations configured, which rules the automation
+                # reading out entirely, and connected ports covered by disabled
+                # automations wrote fine.
+                if _port_resistance(device_data, port) == _PORT_EMPTY_RESISTANCE:
+                    logger.warning(
+                        "Write returned 999999 for devId=%s port=%s — port reports "
+                        "open circuit (nothing connected)", dev_id, port,
+                    )
+                    raise ACInfinityDeviceError(
+                        f"Port {port} on device {dev_id} rejected the write "
+                        "(code 999999) because nothing is connected to it — the "
+                        "controller reports an open circuit. Plug a device in, or "
+                        "pick the port your device is actually on."
+                    )
                 # 999999 is overloaded: it is also what toggle hardware returns when it
                 # rejects a speed write. On a speed write we know which reading is right,
                 # because the pre-write _TOGGLE_LOAD_TYPES guard already cleared this port

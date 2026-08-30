@@ -407,3 +407,84 @@ def test_legacy_advance_guard_still_requires_mode_type_15(legacy_11_device):
         settings={**MOCK_MODE_SETTINGS_LEGACY_PORT1, "modeType": 0, "isOpenAutomation": 1},
     )
     assert cap["result"]["sent"] is True
+
+
+# ============ 999999 usually means "nothing is plugged in" ============
+#
+# No-op writes across 12 ports on two live controllers:
+#
+#   portResistance == 65535 (open circuit)  -> 999999, every time
+#   any real resistance value               -> 200, every time
+#
+# That held on a devType-11 controller with ZERO Advance Automations
+# configured, which rules out the automation reading, and connected ports
+# covered by disabled automations wrote fine. The empty-port check therefore
+# runs before both the toggle-hardware and ADVANCE branches.
+
+
+def _dev_with_resistance(base: dict, port: int, resistance: int) -> dict:
+    dev = {**base, "deviceInfo": {**base.get("deviceInfo", {}),
+                                  "ports": [{"port": port, "portResistance": resistance}]}}
+    return dev
+
+
+def test_999999_on_empty_port_reports_nothing_connected(ai_plus_device):
+    """The common case: the grower picked a port with nothing plugged into it."""
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    dev = _dev_with_resistance(ai_plus_device, 1, 65535)
+
+    with patch.object(c.session, "post", _post_returning(999999, "Operation failed")), \
+         patch.object(c, "_enforce_write_rate_limit"), \
+         patch.object(c, "get_mode_settings", autospec=True,
+                      return_value=dict(AI_PLUS_SETTINGS)):
+        with pytest.raises(ACInfinityDeviceError) as exc:
+            c.set_port_mode(dev, port=1, updates={"atType": 2}, dry_run=False)
+
+    assert "nothing is connected" in str(exc.value)
+    assert "Advance Automation" not in str(exc.value)
+
+
+def test_999999_on_connected_port_still_reports_advance_conflict(ai_plus_device):
+    """A real resistance value means the open-circuit explanation does not apply."""
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    dev = _dev_with_resistance(ai_plus_device, 1, 400)
+
+    with patch.object(c.session, "post", _post_returning(999999, "Operation failed")), \
+         patch.object(c, "_enforce_write_rate_limit"), \
+         patch.object(c, "get_mode_settings", autospec=True,
+                      return_value=dict(AI_PLUS_SETTINGS)):
+        with pytest.raises(ACInfinityAdvanceConflictError):
+            c.set_port_mode(dev, port=1, updates={"atType": 2}, dry_run=False)
+
+
+def test_999999_empty_port_takes_precedence_over_the_speed_write_branch(ai_plus_device):
+    """An empty port is an empty port, whether or not a speed was requested."""
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    dev = _dev_with_resistance(ai_plus_device, 1, 65535)
+
+    with patch.object(c.session, "post", _post_returning(999999, "Operation failed")), \
+         patch.object(c, "_enforce_write_rate_limit"), \
+         patch.object(c, "get_mode_settings", autospec=True,
+                      return_value={**AI_PLUS_SETTINGS, "loadType": 0}):
+        with pytest.raises(ACInfinityDeviceError) as exc:
+            c.set_port_mode(dev, port=1, updates={"onSpead": 5},
+                            dry_run=False, require_variable_speed=True)
+
+    assert "nothing is connected" in str(exc.value)
+
+
+def test_999999_falls_through_when_resistance_is_absent(ai_plus_device):
+    """Firmware that omits portResistance must keep the prior behaviour."""
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    dev = {**ai_plus_device, "deviceInfo": {"ports": [{"port": 1}]}}
+
+    with patch.object(c.session, "post", _post_returning(999999, "Operation failed")), \
+         patch.object(c, "_enforce_write_rate_limit"), \
+         patch.object(c, "get_mode_settings", autospec=True,
+                      return_value=dict(AI_PLUS_SETTINGS)):
+        with pytest.raises(ACInfinityAdvanceConflictError):
+            c.set_port_mode(dev, port=1, updates={"atType": 2}, dry_run=False)

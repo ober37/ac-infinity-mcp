@@ -510,7 +510,7 @@ devId=REDACTED_DEV_ID&externalPort=1&onSpead=5&modeType=2&offSpead=0&...
 
 ---
 
-## All 36 Known API Quirks
+## All 37 Known API Quirks
 
 ### Quirk 1 — Auth typo: `appPasswordl`
 
@@ -761,13 +761,17 @@ User-Agent, no `appVersion`, no `phoneType`. Every header we declare is surface
 for the kind of server-side tightening that broke the v2 endpoints in #298
 (Quirk 33), and three of the four were proven unnecessary.
 
-**Retraction — the static payload was based on a bad experiment.** An earlier
-revision of this work used a static zeroed 75-field payload and refused all
-automation writes on AI+, on the basis that the ordinary merged payload returned
-`999999`. That test ran on an **empty port blocked by a disabled-but-unreleased
-Advance Automation**; the `999999` was the automation block, not the payload
-shape. On a connected port the merged payload works. The static template has been
-removed — do not re-derive it.
+**Retraction — the static payload was based on a bad experiment, twice over.**
+An earlier revision of this work used a static zeroed 75-field payload and
+refused all automation writes on AI+, on the basis that the ordinary merged
+payload returned `999999`. That test ran on an **empty port**. On a connected
+port the merged payload works. The static template has been removed — do not
+re-derive it.
+
+The first correction to that claim attributed the `999999` to a
+disabled-but-unreleased Advance Automation on the port. That was also wrong.
+`999999` on `addDevMode` means **nothing is connected to the port** — see
+Quirk 37.
 
 **`addDevMode` on AI+ is a live-mode override, not a whole-record replace.** A
 port switched to OFF retained its stored VPD target, humidity range and schedule
@@ -845,6 +849,52 @@ and humidity thresholds "for later"), which is why that tool is held on AI+ (see
 A practical consequence when restoring a port: to put a trigger value back you
 must first return the port to the mode that makes it relevant, change it, then
 switch the mode back.
+
+---
+
+### Quirk 37 — `addDevMode` returns `999999` when nothing is plugged into the port
+
+`999999` is not primarily an Advance Automation conflict. It is what the
+controller returns when the target port reports an **open circuit** —
+`portResistance == 65535`, the Quirk 27 sentinel.
+
+No-op writes (each port's own current values written straight back) across every
+port of two live controllers:
+
+| Device | devType | Port | `portResistance` | Result |
+|---|---|---|---|---|
+| AI+ | 20 | 1 Light | `400` | `200` |
+| AI+ | 20 | 2 Exhaust | `5100` | `200` |
+| AI+ | 20 | 3 SupLights | `15800` | `200` |
+| AI+ | 20 | 4 Humidity | `12000` | `200` |
+| AI+ | 20 | 5 Fan | **`65535`** | **`999999`** |
+| AI+ | 20 | 6 UV | `15800` | `200` |
+| AI+ | 20 | 7 | **`65535`** | **`999999`** |
+| AI+ | 20 | 8 | **`65535`** | **`999999`** |
+| 69 Pro | 11 | 1 | **`65535`** | **`999999`** |
+| 69 Pro | 11 | 2 | `3300` | `200` |
+| 69 Pro | 11 | 3 | **`65535`** | **`999999`** |
+| 69 Pro | 11 | 4 | **`65535`** | **`999999`** |
+
+Twelve for twelve, on both controller generations.
+
+**The automation reading is ruled out.** The devType-11 controller has *zero*
+Advance Automations configured and still rejects all three of its empty ports.
+Meanwhile AI+ ports 3 and 4 *are* covered by Advance Automations (both disabled)
+and wrote successfully. Automation coverage predicts nothing; `portResistance`
+predicts everything.
+
+Two consequences:
+
+- `client.py` checks `portResistance` before blaming an automation, so an empty
+  port produces "nothing is connected to it" rather than an instruction to
+  release an automation that may not exist.
+- The `999999` seen while first exploring the AI+ write path came from testing
+  on an empty port, not from a payload defect and not from an automation. See
+  the retraction in Quirk 14.
+
+`999999` retains its documented ADVANCE-conflict meaning for ports that report a
+real resistance value; that path is unchanged and still reachable.
 
 ---
 
