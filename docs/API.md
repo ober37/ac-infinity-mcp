@@ -777,6 +777,45 @@ Quirk 37.
 port switched to OFF retained its stored VPD target, humidity range and schedule
 window. See Quirk 36 for the important limit on that.
 
+**The gate covers the v2 surface too, and fails differently there.** On
+`/api/version=2.0/dev/addGroups` a missing `minversion` does not produce
+`100001` — the server never responds at all, and the client dies on its 10s read
+timeout. That is what #290 recorded as "AI controllers may not support the
+Groups/Advance-Automation API at all". They do.
+
+Measured on live devType-20 hardware, identical payload, one header differing:
+
+| v2 `addGroups` | Result |
+|---|---|
+| current headers, no `minversion` | **read timeout at 10.0s**, nothing created |
+| + `minversion: 3.5` | **`200` success in 0.2s**, automation created |
+| `devType` header 18 → 20, no `minversion` | still times out |
+| `devType` header omitted, no `minversion` | still times out |
+
+So the hardcoded `devType: "18"` in `_v2_headers()` is not the cause and is
+harmless; `minversion` alone decides it.
+
+The hang is specific to a payload the server is willing to act on. The same
+endpoint answers instantly without `minversion` when it intends to reject:
+
+| v2 request on AI+, no `minversion` | Result |
+|---|---|
+| `addGroups`, malformed body (`devId` only) | `999999` in 0.1s |
+| `addGroups`, valid shape but `grouptDevType=0` (no ports) | `500` in 0.1s |
+| `addGroups`, valid with a real port mask | **timeout** |
+| `updateGroupsById`, full valid body | `200` in 0.1s |
+| `getGroups` | `200` |
+
+Only the create-with-real-ports path hangs, which is why the surface looked
+partly functional.
+
+**Legacy is deliberately not sent the header.** devType 11 completes v2 writes
+without it, so adding an unproven header there is risk with no upside.
+`_v2_headers(dev_id)` consults a devId→devType map populated by `get_devices()`;
+an unknown devId falls back to the legacy set, because a wrong "legacy" costs an
+AI+ write and fails loudly, while a wrong "AI+" would send an untested header to
+hardware that currently works.
+
 Detection:
 ```python
 from ac_infinity_mcp.controller import ControllerType, detect_controller_type

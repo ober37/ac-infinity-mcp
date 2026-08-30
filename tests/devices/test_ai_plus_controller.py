@@ -453,3 +453,104 @@ def test_999999_speed_write_on_ai_plus_still_reroutes(ai_plus_device):
 
     assert "set_port_on" in str(exc.value)
     assert "on/off hardware" in str(exc.value)
+
+
+# ============ v2 Advance-Automation writes: the minversion gate (#290) ============
+#
+# Quirk 14 covers the v1 write path (addDevMode). It applies to the v2 surface
+# too, and the failure mode there is worse: without `minversion`, addGroups on an
+# AI+ never responds at all. The caller dies on the 10s read timeout, which is
+# what #290 recorded as "AI controllers may not support the Groups API".
+#
+# Measured on live devType-20 hardware, identical payload, one header differing:
+#
+#   no minversion   -> read timeout at 10.0s, nothing created
+#   + minversion    -> 200 success in 0.2s, automation created
+#
+# Legacy is deliberately NOT sent the header: devType 11 already works without
+# it, so adding an unproven header there is risk with no upside.
+
+
+def _client_with_devices(*devices):
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    for dev_id, dev_type in devices:
+        c._dev_types[str(dev_id)] = dev_type
+    return c
+
+
+def test_v2_headers_carry_minversion_for_ai_plus():
+    c = _client_with_devices((999, 20))
+    assert c._v2_headers("999")["minversion"] == AI_PLUS_MINVERSION
+
+
+def test_v2_headers_omit_minversion_for_legacy():
+    """devType 11 works without it — do not send an unproven header there."""
+    c = _client_with_devices((111, 11))
+    assert "minversion" not in c._v2_headers("111")
+
+
+def test_v2_headers_omit_minversion_when_devtype_unknown():
+    """Unknown devType falls back to the legacy header set, not a guess.
+
+    A wrong "legacy" costs an AI+ write and fails loudly; a wrong "AI+" would
+    send an unproven header to hardware that currently works.
+    """
+    c = _client_with_devices()
+    assert "minversion" not in c._v2_headers("not-in-cache")
+    assert "minversion" not in c._v2_headers(None)
+
+
+def test_v2_headers_legacy_set_is_otherwise_unchanged():
+    """The AI+ path adds exactly one key and alters nothing else."""
+    c = _client_with_devices((999, 20), (111, 11))
+    ai, legacy = c._v2_headers("999"), c._v2_headers("111")
+    assert set(ai) - set(legacy) == {"minversion"}
+    assert {k: v for k, v in ai.items() if k != "minversion"} == legacy
+
+
+@pytest.mark.parametrize("dev_type,expected", [(11, False), (18, False), (20, True), (22, True)])
+def test_is_new_framework_threshold(dev_type, expected):
+    c = _client_with_devices((7, dev_type))
+    assert c._is_new_framework("7") is expected
+
+
+def test_get_devices_populates_the_devtype_cache():
+    """The cache is what lets _v2_headers tell the controllers apart."""
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    payload = {"code": 200, "data": [{"devId": 1, "devType": 20}, {"devId": 2, "devType": 11}]}
+
+    class _R:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return payload
+
+    with patch.object(c.session, "post", lambda *a, **k: _R()):
+        c.get_devices()
+    assert c._dev_types == {"1": 20, "2": 11}
+
+
+def test_get_devices_ignores_entries_with_unusable_devtype():
+    """A malformed entry must not poison the cache or raise."""
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    payload = {"code": 200, "data": [
+        {"devId": 1, "devType": 20},
+        {"devId": 2, "devType": "20"},   # string, not int
+        {"devId": 3},                    # missing
+        {"devType": 20},                 # no devId
+    ]}
+
+    class _R:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return payload
+
+    with patch.object(c.session, "post", lambda *a, **k: _R()):
+        c.get_devices()
+    assert c._dev_types == {"1": 20}
