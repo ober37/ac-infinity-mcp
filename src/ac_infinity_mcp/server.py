@@ -1940,6 +1940,73 @@ def _decode_mode(mode_int: int | None) -> str:
 _MODE_AT_TYPES: dict[str, int] = {v: k for k, v in _MODE_LABELS.items()}
 
 
+def _temp_pair(low: object, high: object) -> tuple[float, float] | None:
+    """Coerce a stored (low, high) trigger pair to floats, or None if unusable.
+
+    Values arrive as ints on every capture we have, but the API is
+    inconsistently typed elsewhere (Quirk 20 sensors ship strings), so this
+    coerces rather than assuming and treats anything unparseable as absent.
+    """
+    if low is None or high is None:
+        return None
+    try:
+        return (float(low), float(high))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_temp_trigger(settings: dict, unit: str) -> tuple[float, float]:
+    """Return the (low, high) temperature triggers already in the device's unit.
+
+    The API stores each trigger twice — ``devLt``/``devHt`` in °C and
+    ``devLtf``/``devHtf`` in °F — and which pair carries the real value depends
+    on the controller (Quirk 37):
+
+    - devType 11 (legacy): both pairs populated and mutually consistent.
+    - devType 20 (AI+): ``devLt``/``devHt`` are always ``0``; only °F is real.
+
+    Reading the °C pair unconditionally therefore renders *every* AI+
+    temperature trigger as 0 °C / 32 °F, including ones the grower can watch
+    working in the app.
+
+    Prefer the pair matching the device's own display unit — that is the one the
+    grower set, so it is exact rather than round-tripped through a conversion (a
+    legacy port storing 27 °C / 80 °F should report 80 °F, not the 80.6 °F that
+    converting the °C value would give). Fall back to the other pair when the
+    preferred one is absent or still at its unset default, which is what makes
+    AI+ work: its °C pair is always the unset ``(0, 0)``.
+    """
+    pair_c = _temp_pair(settings.get("devLt"), settings.get("devHt"))
+    pair_f = _temp_pair(settings.get("devLtf"), settings.get("devHtf"))
+
+    # The unset default, expressed in each scale: 0 °C is exactly 32 °F.
+    unset_c = (0.0, 0.0)
+    unset_f = (32.0, 32.0)
+
+    if unit == "C":
+        if pair_c is not None and pair_c != unset_c:
+            lo, hi = pair_c
+        elif pair_f is not None:
+            lo = (pair_f[0] - 32) * 5 / 9
+            hi = (pair_f[1] - 32) * 5 / 9
+        elif pair_c is not None:
+            lo, hi = pair_c
+        else:
+            lo, hi = unset_c
+        return (round(lo, 1), round(hi, 1))
+
+    if pair_f is not None and pair_f != unset_f:
+        lo, hi = pair_f
+    elif pair_c is not None and pair_c != unset_c:
+        lo = pair_c[0] * 9 / 5 + 32
+        hi = pair_c[1] * 9 / 5 + 32
+    elif pair_f is not None:
+        lo, hi = pair_f
+    else:
+        lo, hi = unset_f
+    return (round(lo, 1), round(hi, 1))
+
+
 def _format_schedule_time(minutes: int | None) -> str | None:
     """Convert minutes-since-midnight to HH:MM string. Returns None when disabled.
 
@@ -2402,11 +2469,10 @@ async def get_port_settings(device_id: str, port: int) -> str:
 
         temp_range = None
         if settings.get("activeLt") or settings.get("activeHt"):
-            min_c_raw = settings.get("devLt", 0)
-            max_c_raw = settings.get("devHt", 0)
+            _t_lo, _t_hi = _resolve_temp_trigger(settings, _unit)
             temp_range = {
-                "min": _to_preferred_temp(float(min_c_raw), _unit),
-                "max": _to_preferred_temp(float(max_c_raw), _unit),
+                "min": _t_lo,
+                "max": _t_hi,
                 "unit": _unit_lbl,
             }
 

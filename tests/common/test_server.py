@@ -39,6 +39,7 @@ from ac_infinity_mcp.server import (
     _is_port_not_powered,
     _parse_duration_seconds,
     _parse_schedule_time,
+    _resolve_temp_trigger,
     _sanitize_api_string,
     _short_date,
     _utc_hour_to_local,
@@ -11196,3 +11197,106 @@ async def test_break_out_of_automation_held_on_ai_plus(mock_client):
     assert "AI+" in data["error"]
     assert data["tracking_issue"] == 316
     mock_client.set_port_mode.assert_not_called()
+# ============ Temperature trigger resolution (Quirk 37) ============
+#
+# The API stores each temperature trigger twice: devLt/devHt in °C and
+# devLtf/devHtf in °F. Which pair is real depends on the controller. Captured
+# from live hardware:
+#
+#   devType 11 (JNFZA, °F display)  port 1: devLt=10  devHt=27  devLtf=50 devHtf=80
+#   devType 20 (SPEGQ, °F display)  port 2: devLt=0   devHt=0   devLtf=32 devHtf=80
+#
+# Both pairs agree on legacy; the AI+ leaves °C at zero. Reading °C
+# unconditionally reported every AI+ trigger as 32.0–32.0°F, and the
+# human_summary stated it as fact ("Fan speeds up above 32.0°F").
+
+
+def test_resolve_temp_trigger_ai_plus_reads_the_f_pair():
+    """AI+ leaves devLt/devHt at 0; the real trigger is in devLtf/devHtf.
+
+    Live capture: SPEGQ port 2 (Exhaust) has a genuine 80°F high trigger.
+    """
+    settings = {"devLt": 0, "devHt": 0, "devLtf": 32, "devHtf": 80}
+    assert _resolve_temp_trigger(settings, "F") == (32.0, 80.0)
+
+
+def test_resolve_temp_trigger_legacy_prefers_stored_f_over_converting_c():
+    """Both pairs are populated on legacy; the display-unit pair is exact.
+
+    Live capture: JNFZA port 1 stores 27 °C and 80 °F for the same trigger.
+    Converting the °C value would report 80.6 °F — off by more than the
+    grower's own setting.
+    """
+    settings = {"devLt": 10, "devHt": 27, "devLtf": 50, "devHtf": 80}
+    assert _resolve_temp_trigger(settings, "F") == (50.0, 80.0)
+
+
+def test_resolve_temp_trigger_celsius_device_prefers_stored_c():
+    """On a °C device the °C pair is what the grower set, so use it directly."""
+    settings = {"devLt": 10, "devHt": 27, "devLtf": 50, "devHtf": 80}
+    assert _resolve_temp_trigger(settings, "C") == (10.0, 27.0)
+
+
+def test_resolve_temp_trigger_celsius_device_falls_back_when_c_unset():
+    """An AI+ set to °C has no usable °C pair — convert from °F rather than 0."""
+    settings = {"devLt": 0, "devHt": 0, "devLtf": 32, "devHtf": 80}
+    assert _resolve_temp_trigger(settings, "C") == (0.0, 26.7)
+
+
+def test_resolve_temp_trigger_unset_ai_plus_range():
+    """(32, 32) °F is the unset default and must not fall through to the °C pair."""
+    settings = {"devLt": 0, "devHt": 0, "devLtf": 32, "devHtf": 32}
+    assert _resolve_temp_trigger(settings, "F") == (32.0, 32.0)
+
+
+def test_resolve_temp_trigger_full_range_ai_plus():
+    """The widest AI+ range (32–194 °F) survives intact."""
+    settings = {"devLt": 0, "devHt": 0, "devLtf": 32, "devHtf": 194}
+    assert _resolve_temp_trigger(settings, "F") == (32.0, 194.0)
+
+
+def test_resolve_temp_trigger_f_pair_absent_converts_from_c():
+    """Firmware that omits the °F pair entirely still reports a real range."""
+    settings = {"devLt": 10, "devHt": 27}
+    assert _resolve_temp_trigger(settings, "F") == (50.0, 80.6)
+
+
+def test_resolve_temp_trigger_both_pairs_absent_is_safe():
+    """Neither pair present: return the unset default rather than raising."""
+    assert _resolve_temp_trigger({}, "F") == (32.0, 32.0)
+
+
+async def test_get_port_settings_reports_real_ai_plus_temp_range(mock_client):
+    """End-to-end: the AI+ Exhaust port must report 80 °F, not 32 °F.
+
+    This is the whole bug. Before the fix this returned 32.0-32.0 and the
+    human_summary asserted the fan sped up above 32 °F.
+    """
+    # The AI+ in question displays °F; the shared legacy fixture is °C.
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device.setdefault("deviceInfo", {})["unit"] = 0
+    mock_client.get_devices.return_value = [device]
+    mock_client.get_mode_settings.return_value = {
+        **MOCK_MODE_SETTINGS_BASIC,
+        "atType": 3,
+        "devLt": 0, "devHt": 0,
+        "devLtf": 32, "devHtf": 80,
+        "activeLt": 0, "activeHt": 1,
+    }
+    result = await get_port_settings("C58ZA", 1)
+    data = json.loads(result)
+    assert data["temp_range"] == {"min": 32.0, "max": 80.0, "unit": "°F"}
+    assert "80.0" in data["human_summary"]
+    assert "32.0–32.0" not in data["human_summary"]
+
+
+def test_resolve_temp_trigger_tolerates_string_typed_values():
+    """The API is inconsistently typed elsewhere; coerce rather than assume."""
+    settings = {"devLt": "0", "devHt": "0", "devLtf": "32", "devHtf": "80"}
+    assert _resolve_temp_trigger(settings, "F") == (32.0, 80.0)
+
+
+def test_resolve_temp_trigger_unparseable_pair_falls_back():
+    """A garbage °F pair must not take precedence over a usable °C pair."""
+    settings = {"devLt": 10, "devHt": 27, "devLtf": "n/a", "devHtf": None}
+    assert _resolve_temp_trigger(settings, "F") == (50.0, 80.6)
