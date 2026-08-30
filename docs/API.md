@@ -510,7 +510,7 @@ devId=REDACTED_DEV_ID&externalPort=1&onSpead=5&modeType=2&offSpead=0&...
 
 ---
 
-## All 37 Known API Quirks
+## All 38 Known API Quirks
 
 ### Quirk 1 — Auth typo: `appPasswordl`
 
@@ -907,6 +907,60 @@ an automation. See the retraction in Quirk 14.
 
 `999999` retains its documented ADVANCE-conflict meaning for ports that report a
 real resistance value; that path is unchanged and still reachable.
+### Quirk 38 — Temperature triggers are stored twice; which copy is real depends on the controller
+
+Every port stores its temperature trigger in **two** field pairs:
+
+| Fields | Scale |
+|---|---|
+| `devLt` / `devHt` | °C |
+| `devLtf` / `devHtf` | °F |
+
+They are not interchangeable. Captured from live hardware, both controllers set
+to display °F:
+
+| Device | devType | Port | `devLt` / `devHt` | `devLtf` / `devHtf` | Real trigger |
+|---|---|---|---|---|---|
+| JNFZA | 11 | 1 | `10` / `27` | `50` / `80` | 50–80 °F |
+| SPEGQ | 20 | 2 | `0` / `0` | `32` / `80` | 32–80 °F |
+| SPEGQ | 20 | 3 | `0` / `0` | `82` / `82` | 82 °F low |
+
+**Legacy populates both pairs and they agree. AI+ leaves the °C pair at `0`** —
+the app writes only the °F fields there — so reading `devLt`/`devHt`
+unconditionally reports *every* AI+ temperature trigger as 0 °C, which renders
+as `32.0–32.0°F` on a °F device. That was live on all 8 ports of a devType-20
+controller, and `get_port_settings`' `human_summary` stated it as fact:
+
+```
+Temperature automation: 32.0–32.0°F. Fan speeds up above 32.0°F and slows below 32.0°F.
+```
+
+The port in question has a real 80 °F high trigger.
+
+**Read the pair matching `deviceInfo.unit`.** That is the pair the grower
+actually set, so it is exact rather than round-tripped: the legacy port above
+stores both 27 °C and 80 °F for one trigger, and converting the °C copy yields
+80.6 °F — a value the grower never entered. Fall back to the other pair only
+when the preferred one is absent or still at its unset default, which is what
+makes AI+ resolve correctly:
+
+| Scale | Unset default |
+|---|---|
+| °C | `(0, 0)` |
+| °F | `(32, 32)` |
+
+Those two are the same range, so a port legitimately configured to 32–32 °F is
+indistinguishable from an unset one — harmless, since both render identically.
+
+`_resolve_temp_trigger()` in `server.py` implements this. Note the asymmetry
+with the **write** path: `set_temperature_automation` writes `devLt`/`devHt`
+always and adds `devLtf`/`devHtf` only when the device displays °F, so a write
+followed by a read is consistent on both controller types. Anything writing only
+the °C pair will not be visible on AI+ at all (see #316 for
+`apply_grow_stage_template`, which does exactly that).
+
+Not to be confused with Quirk 36: that is about writes being silently discarded.
+This one is about a stored value being read from the wrong copy.
 
 ---
 

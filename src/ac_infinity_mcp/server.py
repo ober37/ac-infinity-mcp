@@ -1960,7 +1960,7 @@ def _resolve_temp_trigger(settings: dict, unit: str) -> tuple[float, float]:
 
     The API stores each trigger twice — ``devLt``/``devHt`` in °C and
     ``devLtf``/``devHtf`` in °F — and which pair carries the real value depends
-    on the controller (Quirk 37):
+    on the controller (Quirk 38):
 
     - devType 11 (legacy): both pairs populated and mutually consistent.
     - devType 20 (AI+): ``devLt``/``devHt`` are always ``0``; only °F is real.
