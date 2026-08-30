@@ -1886,7 +1886,10 @@ Get current sensor readings (temp, humidity, VPD) and port states for one device
     {"sensor_id": "9.18", "sensor_type": 18, "sensor_type_label": "Water Temp", "value": 68.5, "unit": "°F"},
     {"sensor_id": "9.13", "sensor_type": 13, "sensor_type_label": "pH", "value": 6.5, "unit": ""}
   ],
-  "human_summary": "Towlie Tent: 24.3°C, 58.2% RH, VPD 1.31 kPa. External sensors — CO2: 793 ppm, Water Temp: 68.5°F, pH: 6.5. Reading from 2026-05-20T09:32:00-05:00."
+  "probes": [
+    {"sensor_port": 2, "temperature": 19.1, "unit": "°C", "humidity": 81.6, "vpd": 0.39}
+  ],
+  "human_summary": "Towlie Tent: 24.3°C, 58.2% RH, VPD 1.31 kPa. Probe Sensor (Sensor Port 2): 19.1°C, 81.6% RH, VPD 0.39 kPa. External sensors — CO2: 793 ppm, Water Temp: 68.5°F, pH: 6.5. Reading from 2026-05-20T09:32:00-05:00."
 }
 ```
 
@@ -1905,6 +1908,7 @@ Get current sensor readings (temp, humidity, VPD) and port states for one device
     {"port": 2, "name": "Port 2", "speed": 0, "plug_status": "not powered"}
   ],
   "external_sensors": [],
+  "probes": [],
   "human_summary": "Towlie Tent: 24.3°C, 58.2% RH, VPD 1.31 kPa. Reading from 2026-05-20T09:32:00-05:00."
 }
 ```
@@ -1917,6 +1921,7 @@ Get current sensor readings (temp, humidity, VPD) and port states for one device
 - `ports[].speed` — current port speed 0–10 from `speak` field
 - `ports[].plug_status` *(conditional)* — `"not powered"` when `loadState == 0` AND `speak == 0` AND the port still has its **default name** (`"Port N"`). Custom-named ports are excluded — a user-assigned name implies a device was intentionally connected, and `loadState=0` alone cannot distinguish "nothing plugged in" from "device is off" for on/off devices (see Quirk 26). **Omitted entirely** otherwise. Matches the identical signal in `get_port_status`.
 - `external_sensors` — list of UIS sensor readings when sensors are attached; phantom entries (API-reported but no hardware connected) are filtered out (Quirk 20); empty `[]` for built-in-only devices. Each entry: `sensor_id`, `sensor_type` (raw int), `sensor_type_label` (Title Case, e.g. `"CO2"`, `"Water Temp"`), `value`, and `unit` (derived from `sensor_type` per Quirk 20/28; empty string for unitless types pH and Water Level)
+- `probes` — readings from plug-in **AC-SPC24 sensor probes** (`sensorType` 0-3). The controller's own onboard sensor (`sensorType` 4-7) is excluded *by type*, because it is already reported as the top-level `temperature`/`humidity`/`vpd`; identifying it by type rather than by comparing values means a probe reading identically to the onboard sensor is still surfaced, and a probe present with no onboard group is too. Each entry: `sensor_port` (the `accessPort` the probe is attached to), `temperature`, `unit`, `humidity`, `vpd` — temperature in the device's preferred unit, like every other reading. Empty `[]` when no probe is attached. Groups with a missing or `null` member, an all-zero triplet (the Quirk 20 phantom class), or an unrecognized `sensorType < 10` shape are skipped and logged at INFO. Raw probe scale is decided by the per-entry `sensorUnit` flag (`>0` = already Celsius), falling back to the type itself (0 = °F, 1 = °C) when absent.
 - `human_summary` — one-line natural language summary: `"DeviceName: N°U, N% RH, VPD N kPa.[ External sensors — Label: value unit, …] Reading from <timestamp>."` The `External sensors —` clause is present only when external sensors are attached; `%`/`°C`/`°F` attach to the number, other units (ppm, ppt, µS/cm, mS/cm) take a leading space. Always present.
 
 ---
@@ -1939,7 +1944,8 @@ Get current sensor readings for all devices at once.
       "humidity": 58.2,
       "vpd": 1.31,
       "ports": [...],
-      "external_sensors": []
+      "external_sensors": [],
+      "probes": []
     }
   ]
 }
@@ -1951,6 +1957,7 @@ Get current sensor readings for all devices at once.
 - Devices that fail to parse individually include `"error"` instead of sensor fields
 - Useful for a dashboard view across multiple tents/controllers
 - `external_sensors` — phantom sensor entries (sensors present in the API response but with no hardware connected) are filtered out; see Quirk 20. Each entry carries `sensor_type_label` and `unit` (same shape as `get_device_reading`)
+- `probes` — plug-in AC-SPC24 probe readings, same shape and filtering as `get_device_reading`; empty `[]` when no probe is attached
 - `human_summary` — one-line prose for 1–2 parseable devices (each device's prose gains an `External sensors — …` clause when sensors are attached); markdown table (`| Device | Temp | Humidity | VPD |`) for 3+ parseable devices (table is unchanged — no sensor clause); `"No readings available."` when all fail. Always present at the top level.
 
 ---
