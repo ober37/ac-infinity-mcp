@@ -46,6 +46,7 @@ from ac_infinity_mcp.client import (
     build_groups_payload,
     resolve_port_type,
 )
+from ac_infinity_mcp.controller import ControllerType, detect_controller_type
 from ac_infinity_mcp.formatting import (
     _effective_tz,
     _effective_unit,
@@ -1613,8 +1614,9 @@ async def get_port_activity_report(device_id: str, days: int = 7) -> str:
         Note: data_quality is an internal classification field stripped from the JSON
         output before serialization — it is NOT present in the response JSON. Its
         effects are visible only in human_summary: toggle hardware (heaters, lights,
-        humidifiers — loadType 4 or 128 on standard devices, or pattern-detected on
-        devType=18/22 where loadType is unreliable) produces a ▎-prefixed caveat line;
+        humidifiers — loadType 4, 128, 129 or 132 on standard devices, or
+        pattern-detected on devType=18/22 where loadType is unreliable) produces a
+        ▎-prefixed caveat line;
         devType=22 (Q0KT4 Genetics Lab) produces a device-level Note about missing
         power-draw data. devType=18 (UIS 69 Pro+) does NOT emit this Note — its active
         ports produce reliable runtime data in historical records even though portsLoad
@@ -1936,6 +1938,73 @@ def _decode_mode(mode_int: int | None) -> str:
 
 
 _MODE_AT_TYPES: dict[str, int] = {v: k for k, v in _MODE_LABELS.items()}
+
+
+def _temp_pair(low: object, high: object) -> tuple[float, float] | None:
+    """Coerce a stored (low, high) trigger pair to floats, or None if unusable.
+
+    Values arrive as ints on every capture we have, but the API is
+    inconsistently typed elsewhere (Quirk 20 sensors ship strings), so this
+    coerces rather than assuming and treats anything unparseable as absent.
+    """
+    if low is None or high is None:
+        return None
+    try:
+        return (float(low), float(high))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_temp_trigger(settings: dict, unit: str) -> tuple[float, float]:
+    """Return the (low, high) temperature triggers already in the device's unit.
+
+    The API stores each trigger twice — ``devLt``/``devHt`` in °C and
+    ``devLtf``/``devHtf`` in °F — and which pair carries the real value depends
+    on the controller (Quirk 38):
+
+    - devType 11 (legacy): both pairs populated and mutually consistent.
+    - devType 20 (AI+): ``devLt``/``devHt`` are always ``0``; only °F is real.
+
+    Reading the °C pair unconditionally therefore renders *every* AI+
+    temperature trigger as 0 °C / 32 °F, including ones the grower can watch
+    working in the app.
+
+    Prefer the pair matching the device's own display unit — that is the one the
+    grower set, so it is exact rather than round-tripped through a conversion (a
+    legacy port storing 27 °C / 80 °F should report 80 °F, not the 80.6 °F that
+    converting the °C value would give). Fall back to the other pair when the
+    preferred one is absent or still at its unset default, which is what makes
+    AI+ work: its °C pair is always the unset ``(0, 0)``.
+    """
+    pair_c = _temp_pair(settings.get("devLt"), settings.get("devHt"))
+    pair_f = _temp_pair(settings.get("devLtf"), settings.get("devHtf"))
+
+    # The unset default, expressed in each scale: 0 °C is exactly 32 °F.
+    unset_c = (0.0, 0.0)
+    unset_f = (32.0, 32.0)
+
+    if unit == "C":
+        if pair_c is not None and pair_c != unset_c:
+            lo, hi = pair_c
+        elif pair_f is not None:
+            lo = (pair_f[0] - 32) * 5 / 9
+            hi = (pair_f[1] - 32) * 5 / 9
+        elif pair_c is not None:
+            lo, hi = pair_c
+        else:
+            lo, hi = unset_c
+        return (round(lo, 1), round(hi, 1))
+
+    if pair_f is not None and pair_f != unset_f:
+        lo, hi = pair_f
+    elif pair_c is not None and pair_c != unset_c:
+        lo = pair_c[0] * 9 / 5 + 32
+        hi = pair_c[1] * 9 / 5 + 32
+    elif pair_f is not None:
+        lo, hi = pair_f
+    else:
+        lo, hi = unset_f
+    return (round(lo, 1), round(hi, 1))
 
 
 def _format_schedule_time(minutes: int | None) -> str | None:
@@ -2400,11 +2469,10 @@ async def get_port_settings(device_id: str, port: int) -> str:
 
         temp_range = None
         if settings.get("activeLt") or settings.get("activeHt"):
-            min_c_raw = settings.get("devLt", 0)
-            max_c_raw = settings.get("devHt", 0)
+            _t_lo, _t_hi = _resolve_temp_trigger(settings, _unit)
             temp_range = {
-                "min": _to_preferred_temp(float(min_c_raw), _unit),
-                "max": _to_preferred_temp(float(max_c_raw), _unit),
+                "min": _t_lo,
+                "max": _t_hi,
                 "unit": _unit_lbl,
             }
 
@@ -2563,9 +2631,6 @@ async def set_port_speed(
             require_variable_speed=True,
         )
 
-        if write_result.get("ai_plus_write_unsupported"):
-            return _ai_plus_unsupported_error(device_id, port, write_result["controller_type"])
-
         port_name, port_label, port_data = _get_port_label(device, port)
 
         response: dict = {
@@ -2580,8 +2645,8 @@ async def set_port_speed(
         if write_result["dry_run"]:
             response["payload"] = write_result["payload"]
 
-        prior_mode_type = write_result.get("prior_mode_type")
-        if prior_mode_type in (0, 1):
+        prior_at_type = write_result.get("prior_at_type")
+        if prior_at_type in (0, 1):
             response["warning"] = (
                 f"{port_label} is currently in OFF mode — speed was stored but the port "
                 "will not run until the mode is changed to ON. "
@@ -2658,9 +2723,6 @@ async def set_port_on(
         write_result = await asyncio.to_thread(
             _client().set_port_mode, device, port, {"atType": 2, "onSpead": 10}, dry_run
         )
-
-        if write_result.get("ai_plus_write_unsupported"):
-            return _ai_plus_unsupported_error(device_id, port, write_result["controller_type"])
 
         port_name, port_label, port_data = _get_port_label(device, port)
 
@@ -2747,9 +2809,6 @@ async def set_port_off(
             _client().set_port_mode, device, port, {"onSpead": 0, "atType": 1}, dry_run
         )
 
-        if write_result.get("ai_plus_write_unsupported"):
-            return _ai_plus_unsupported_error(device_id, port, write_result["controller_type"])
-
         port_name, port_label, port_data = _get_port_label(device, port)
 
         response: dict = {
@@ -2797,19 +2856,32 @@ async def set_port_off(
 # ============ Automation Write Tools ============
 
 
-def _ai_plus_unsupported_error(device_id: str, port: int, controller_type: str) -> str:
-    # dry_run is always False here: the AI+ guard in client._set_port_mode_inner fires
-    # only on the live-write path (dry_run returns early before the guard is reached).
+def _ai_plus_write_held(device: dict | None) -> bool:
+    """True when a tool must refuse a live write because the device is an AI+.
+
+    #308 enabled AI+ (devType >= 20) writes generally, but deliberately held two
+    tools back pending per-tool verification on real hardware — see #316. Both
+    write field combinations whose persistence is unproven on AI+, where
+    ``addDevMode`` accepts mode-irrelevant fields with code 200 and silently
+    discards them (Quirk 36). Reporting ``sent: true`` for settings the device
+    threw away is worse than refusing.
+    """
+    return detect_controller_type(device or {}) == ControllerType.NEW_FRAMEWORK
+
+
+def _ai_plus_held_error(tool: str, device_id: str, port: int, reason: str) -> str:
+    """Refusal payload for a tool held back on AI+ controllers."""
     return json.dumps({
         "error": (
-            "AI+ controllers live write path is not yet implemented. "
-            "Preview mode (showing what would happen) is fully supported for this device type "
-            "— ask me to preview the action first."
+            f"{tool} is not yet enabled for AI+ controllers (devType >= 20). {reason} "
+            "Preview mode is fully supported — ask me to preview the action first, or "
+            "use the individual port and automation tools, which are verified on AI+."
         ),
         "device_id": device_id,
         "port": port,
         "dry_run": False,
-        "controller_type": controller_type,
+        "controller_type": ControllerType.NEW_FRAMEWORK.value,
+        "tracking_issue": 316,
     })
 
 
@@ -2870,9 +2942,6 @@ async def set_vpd_automation(
         write_result = await asyncio.to_thread(
             _client().set_port_mode, device, port, updates, dry_run
         )
-
-        if write_result.get("ai_plus_write_unsupported"):
-            return _ai_plus_unsupported_error(device_id, port, write_result["controller_type"])
 
         port_name, port_label, port_data = _get_port_label(device, port)
 
@@ -3017,9 +3086,6 @@ async def set_temperature_automation(
             _client().set_port_mode, device, port, updates, dry_run
         )
 
-        if write_result.get("ai_plus_write_unsupported"):
-            return _ai_plus_unsupported_error(device_id, port, write_result["controller_type"])
-
         port_name, port_label, port_data = _get_port_label(device, port)
 
         response: dict = {
@@ -3128,9 +3194,6 @@ async def set_humidity_automation(
         write_result = await asyncio.to_thread(
             _client().set_port_mode, device, port, updates, dry_run
         )
-
-        if write_result.get("ai_plus_write_unsupported"):
-            return _ai_plus_unsupported_error(device_id, port, write_result["controller_type"])
 
         port_name, port_label, port_data = _get_port_label(device, port)
 
@@ -3300,9 +3363,6 @@ async def set_port_mode(
             _client().set_port_mode, device, port, updates, dry_run
         )
 
-        if write_result.get("ai_plus_write_unsupported"):
-            return _ai_plus_unsupported_error(device_id, port, write_result["controller_type"])
-
         port_name, port_label, port_data = _get_port_label(device, port)
 
         response: dict = {
@@ -3433,6 +3493,23 @@ async def apply_grow_stage_template(
     if cap_err:
         return cap_err
 
+    # Held on AI+ (#316). This tool writes temp/humidity thresholds alongside
+    # atType=8 specifically so they are stored as a fallback for a later switch to
+    # AUTO — but on AI+ a field that is not relevant to the port's mode at write
+    # time is accepted with code 200 and silently discarded (Quirk 36). The whole
+    # point of those fields here is that they are NOT live, so they are exactly
+    # what AI+ throws away, and the tool would report a stored fallback that does
+    # not exist. It also never writes devLtf/devHtf, so on a °F AI+ the °F pair
+    # stays stale regardless. Verifying this needs live writes that put real
+    # trigger values on a running port; not done, so not claimed.
+    if not dry_run and _ai_plus_write_held(device):
+        return _ai_plus_held_error(
+            "apply_grow_stage_template", device_id, port,
+            "It stores temperature and humidity fallback thresholds that AI+ "
+            "controllers accept and then discard, so the confirmation would be "
+            "misleading.",
+        )
+
     # Single atomic write: VPD mode active, temp/humidity thresholds stored on the
     # controller for fallback if the user later switches to AUTO mode. Earlier
     # versions issued three separate writes; the temp and humidity writes carried
@@ -3489,9 +3566,6 @@ async def apply_grow_stage_template(
             "error": "Unexpected error",
             "detail": "see server logs",
         })
-
-    if write_result.get("ai_plus_write_unsupported"):
-        return _ai_plus_unsupported_error(device_id, port, write_result["controller_type"])
 
     _temp_unit_raw = device.get("deviceInfo", {}).get("unit")
     _unit = _effective_unit(_temp_unit_raw)
@@ -5406,6 +5480,20 @@ async def break_out_of_automation(
         dev_id = device.get("devId")
         if not dev_id:
             return json.dumps({"error": f"Device {device_id} is missing devId"})
+
+        # Held on AI+ (#316). This tool issues one live write per co-governed port
+        # plus the target, and its rollback path re-enables the automation without
+        # unwinding co-ports it already switched to manual — leaving those ports
+        # pinned manually AND claimed by a re-enabled automation. Those call sites
+        # were never among the AI+ refusal branches, so pre-#308 they returned
+        # sent=False silently; enabling AI+ writes makes them real. Multi-port
+        # partial-failure handling needs its own fix and its own tests.
+        if not dry_run and _ai_plus_write_held(device):
+            return _ai_plus_held_error(
+                "break_out_of_automation", device_id, port,
+                "It performs multi-port writes whose partial-failure rollback is "
+                "not yet safe on this controller type.",
+            )
 
         # Step 0: Idempotency check — is this port actually under automation?
         port_settings = await asyncio.to_thread(
