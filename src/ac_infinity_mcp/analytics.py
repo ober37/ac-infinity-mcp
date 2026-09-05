@@ -34,9 +34,22 @@ STAGE_TARGETS: dict[str, dict[str, tuple[float, float]]] = {
 
 _DEFAULT_STAGE = "veg"
 
-# AC Infinity loadType values for toggle hardware (heaters, lights, humidifiers).
-# These devices always emit speed=1 in the history API even when physically OFF.
-_TOGGLE_LOAD_TYPES: frozenset[int] = frozenset({4, 128})
+# AC Infinity loadType values for toggle (on/off) hardware — heaters, lights,
+# humidifiers. Two behaviours key off this set: such devices always emit speed=1
+# in the history API even when physically OFF, and they reject variable-speed
+# writes with code 999999 (see client._set_port_mode_inner).
+#
+# All four values are attested on live hardware:
+#   4, 128  — devType 11 (C58ZA)
+#   129     — devType 22 (Q0KT4) ports 2/3/5: clone lights, rack lights, heat pad
+#   132     — devType 22 (Q0KT4) port 1: clone heat pad; devType 20 toggle ports
+#
+# Deliberately a membership set, not a bitmask. 132 == 128|4 invites
+# `load_type & (4|128)`, but that would newly catch 5, 6, 12, 136, 260... on a
+# field Quirk 24 already calls unreliable for devType 18/22. Membership fails
+# safe toward letting a write through; a mask fails toward permanently refusing
+# a genuinely variable-speed port, which is unfalsifiable from the write path.
+_TOGGLE_LOAD_TYPES: frozenset[int] = frozenset({4, 128, 129, 132})
 
 # Minimum number of consecutive readings a state must persist to count as a real transition.
 # Single-reading blips at automation window boundaries are API artifacts (Quirk 22).
@@ -349,7 +362,7 @@ def build_activity_report(
 
         # Detect toggle-device history artifact: AC Infinity always emits nibble 0xF
         # (decoded speed=1) for heaters/lights/humidifiers, even when physically off.
-        # Confirmed toggle hardware (loadType 4/128) is sufficient. For _ZERO_LOAD_DEV_TYPES,
+        # Confirmed toggle hardware (_TOGGLE_LOAD_TYPES) is sufficient. For _ZERO_LOAD_DEV_TYPES,
         # loadType is also unreliable (Quirk 24), so the pattern alone is used instead —
         # a variable-speed device stuck at speed 1 is indistinguishable, but that is an
         # acceptable trade-off given the load signal is completely absent on these devices.
@@ -451,7 +464,7 @@ def build_activity_report(
         ):
             continue
         # Rule D: non-toggle named port with speed history ≤ 1 and no current draw.
-        # Confirmed toggle hardware (loadType 4/128) with transitions > 0 is exempt —
+        # Confirmed toggle hardware (_TOGGLE_LOAD_TYPES) with transitions > 0 is exempt —
         # it ran and the grower should see the data. The data_quality early-exit above
         # handles the 100%-uptime constant-speed artifact for toggle hardware. Any
         # non-toggle port reaching this point with avg_speed ≤ 1.0 and zero load is a

@@ -55,7 +55,7 @@ Every write operation — changing a speed, toggling a port, creating an automat
 |---|---|---|
 | UIS Controller 69 Pro | ✅ | ✅ |
 | UIS Controller 69 Pro+ | ✅ | ✅ |
-| UIS Controller 89 AI+ and other AI+ controllers | ✅ | ❌ v1.0 read-only |
+| UIS Controller 89 AI+ and other AI+ controllers | ✅ | ✅ |
 
 ### A note on network security
 
@@ -337,7 +337,7 @@ Claude will describe the change, tell you what it's changing from, and wait for 
 
 ### AI+ controllers
 
-If you have an AI+ controller (like the 89 AI+), preview mode works fully — Claude will show you exactly what it would do. But when you confirm, Claude will let you know that live writes aren't supported in v1.0. You can read everything; you just can't change settings yet.
+If you have an AI+ controller (like the 89 AI+), reads, previews and live changes all work — the same as on the 69 Pro. AI+ controllers speak a newer protocol, which this server handles for you.
 
 ---
 
@@ -667,7 +667,7 @@ Check the `AC_INFINITY_EMAIL` and `AC_INFINITY_PASSWORD` values in your config f
 Verify your credentials are correct and check that your devices are paired in the AC Infinity app. If you just added a new device, try asking again — it can take a moment to appear.
 
 **AI+ write errors**
-AI+ controllers (like the 89 AI+) are read-only in v1.0. Preview mode works fully — you can see exactly what would happen. Live changes are not yet supported. Write support for AI+ is planned for v2.0.
+AI+ controllers (like the 89 AI+) support live changes. If a write fails with code `100001`, AC Infinity has changed the server-side gate this server relies on — reads and previews keep working. Please open an issue if you hit it.
 
 **HTTP security note**
 The AC Infinity API doesn't use HTTPS. Your credentials and sensor data travel over the network without encryption. Keep your config file private and avoid running on untrusted networks. This is an upstream limitation of the AC Infinity service. If you need to run on a less-trusted network, see DEPLOYMENT.md for HTTPS reverse-proxy options.

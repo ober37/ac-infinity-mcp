@@ -151,7 +151,7 @@ userId=<appId>
 | `devId` | Numeric ID (as string at top level, as integer inside `deviceInfo`). Required by history API. (Quirk 7) |
 | `devCode` | Alphanumeric device code (e.g. `"C58ZA"`). Used as `device_id` in MCP tools. (Quirk 7) |
 | `online` | `1` = online, `0` = offline |
-| `newFrameworkDevice` | `true` for AI+ controllers — use static full payload on write (Quirk 14) |
+| `newFrameworkDevice` | `true` for AI+ controllers — writes need the `minversion` header (Quirk 14) |
 | `deviceInfo.temperature` | Raw value ÷ 100 = °C (Quirk 4) |
 | `deviceInfo.temperatureF` | Raw value ÷ 100 = °F (Quirk 4) |
 | `deviceInfo.humidity` | Raw value ÷ 100 = % RH (Quirk 4) |
@@ -510,7 +510,7 @@ devId=REDACTED_DEV_ID&externalPort=1&onSpead=5&modeType=2&offSpead=0&...
 
 ---
 
-## All 34 Known API Quirks
+## All 37 Known API Quirks
 
 ### Quirk 1 — Auth typo: `appPasswordl`
 
@@ -716,21 +716,105 @@ from `getdevModeSettingList` and benefit from the same read-before-write pattern
 
 ---
 
-### Quirk 14 — AI+ controllers: live write path is unknown
+### Quirk 14 — AI+ controllers: live writes work; the gate is a single `minversion` header
 
-AI+ controllers (`newFrameworkDevice=true`, `devType=22`) use the same read-before-write
-pattern and return the same 142-field structure from `getdevModeSettingList` as legacy
-controllers. However, the write endpoint differs:
+AI+ controllers (`newFrameworkDevice=true`, `devType >= 20`) use the same
+read-before-write pattern and return the same 142-field structure from
+`getdevModeSettingList` as legacy controllers. `POST /dev/addDevMode` is the
+correct endpoint for them too — it simply refuses the stock header set.
 
-- `POST /dev/addDevMode` returns `{"code": 100001, "msg": "Something went wrong with your request."}` for AI+ devices — this endpoint is for legacy only.
-- Phase 8 exhaustively probed 11 endpoint variants; all returned HTTP 404 except `addDevMode`.
+**The entire fix is one request header:**
 
-**Current status:** AI+ `dry_run=True` is fully supported and returns the payload that
-would be sent. AI+ `dry_run=False` is not yet implemented and returns a documented error.
+```
+minversion: 3.5
+```
 
-**To discover the AI+ write endpoint:** Use mitmproxy to intercept mobile app traffic
-while making a setting change on an AI+ controller. Update this quirk and implement the
-branch in `client.py::set_port_mode` once discovered.
+With it, the ordinary merged read-before-write payload succeeds for manual
+control and automation targets alike. Without it, the same payload returns
+`{"code": 100001, "msg": "Something went wrong with your request."}`.
+
+**Ablation, live `devType=20` hardware, no-op write to an idle port** (each row
+writes the port's own current values back, so nothing changes either way):
+
+| Headers sent | Result |
+|---|---|
+| stock okhttp set only | `100001` |
+| `minversion: 3.5` only | **`200`** |
+| iOS `User-Agent` + `phoneType` + `appVersion`, no `minversion` | `100001` |
+| `appVersion: 1.9.7` alone | `100001` |
+| all four together | `200` |
+
+**Despite the name it is not a version comparison.** Only the literal string
+`"3.5"` is accepted; a *higher* value fails exactly as a lower one does:
+
+| Value | Result |
+|---|---|
+| `3.5` | `200` |
+| `3.4`, `3.6`, `3`, `3.50`, `3.5.0`, `99.9`, `""` | `100001` |
+
+Treat it as an opaque magic constant, not a number to bump. If AC Infinity ever
+stops honouring it, AI+ writes return `100001` and `client.py` raises an
+`ACInfinityDeviceError` naming this quirk rather than a bare API error.
+
+We therefore send **only** `minversion` on the AI+ write path — no spoofed
+User-Agent, no `appVersion`, no `phoneType`. Every header we declare is surface
+for the kind of server-side tightening that broke the v2 endpoints in #298
+(Quirk 33), and three of the four were proven unnecessary.
+
+**Retraction — the static payload was based on a bad experiment, twice over.**
+An earlier revision of this work used a static zeroed 75-field payload and
+refused all automation writes on AI+, on the basis that the ordinary merged
+payload returned `999999`. That test ran on an **empty port**. On a connected
+port the merged payload works. The static template has been removed — do not
+re-derive it.
+
+The first correction to that claim attributed the `999999` to a
+disabled-but-unreleased Advance Automation on the port. That was also wrong.
+`999999` on `addDevMode` means **nothing is connected to the port** — see
+Quirk 37.
+
+**`addDevMode` on AI+ is a live-mode override, not a whole-record replace.** A
+port switched to OFF retained its stored VPD target, humidity range and schedule
+window. See Quirk 36 for the important limit on that.
+
+**The gate covers the v2 surface too, and fails differently there.** On
+`/api/version=2.0/dev/addGroups` a missing `minversion` does not produce
+`100001` — the server never responds at all, and the client dies on its 10s read
+timeout. That is what #290 recorded as "AI controllers may not support the
+Groups/Advance-Automation API at all". They do.
+
+Measured on live devType-20 hardware, identical payload, one header differing:
+
+| v2 `addGroups` | Result |
+|---|---|
+| current headers, no `minversion` | **read timeout at 10.0s**, nothing created |
+| + `minversion: 3.5` | **`200` success in 0.2s**, automation created |
+| `devType` header 18 → 20, no `minversion` | still times out |
+| `devType` header omitted, no `minversion` | still times out |
+
+So the hardcoded `devType: "18"` in `_v2_headers()` is not the cause and is
+harmless; `minversion` alone decides it.
+
+The hang is specific to a payload the server is willing to act on. The same
+endpoint answers instantly without `minversion` when it intends to reject:
+
+| v2 request on AI+, no `minversion` | Result |
+|---|---|
+| `addGroups`, malformed body (`devId` only) | `999999` in 0.1s |
+| `addGroups`, valid shape but `grouptDevType=0` (no ports) | `500` in 0.1s |
+| `addGroups`, valid with a real port mask | **timeout** |
+| `updateGroupsById`, full valid body | `200` in 0.1s |
+| `getGroups` | `200` |
+
+Only the create-with-real-ports path hangs, which is why the surface looked
+partly functional.
+
+**Legacy is deliberately not sent the header.** devType 11 completes v2 writes
+without it, so adding an unproven header there is risk with no upside.
+`_v2_headers(dev_id)` consults a devId→devType map populated by `get_devices()`;
+an unknown devId falls back to the legacy set, because a wrong "legacy" costs an
+AI+ write and fails loudly, while a wrong "AI+" would send an untested header to
+hardware that currently works.
 
 Detection:
 ```python
@@ -738,6 +822,130 @@ from ac_infinity_mcp.controller import ControllerType, detect_controller_type
 ct = detect_controller_type(device_data)
 is_ai_plus = ct == ControllerType.NEW_FRAMEWORK  # devType >= 20 or newFrameworkDevice=True
 ```
+
+---
+
+### Quirk 35 — On AI+, `modeType` is a per-port resting value, not an ADVANCE signal
+
+On legacy controllers `modeType == 15` means the port is under Advance Automation
+control, and `client.py` uses it as a pre-write guard. **That reading does not
+hold on AI+.**
+
+Read across all 8 ports of a live `devType=22` controller with no automation
+configured anywhere:
+
+| Ports | `modeType` |
+|---|---|
+| 1, 3, 5, 7 | `0` |
+| 2, 4, 6, 8 | `15` |
+
+The value alternates with port parity and tracks nothing about automation. A
+second `devType=20` controller shows `modeType=15` on ports carrying ordinary
+manual and VPD settings.
+
+Consequently the guard now branches by controller type:
+
+- **Legacy** — unchanged: `modeType == 15` **and** `isOpenAutomation != 0`.
+- **AI+** — `modeType` is ignored entirely; `isOpenAutomation` must be **present
+  and `0`** or the write is refused. Absent is treated as active (safe-fail).
+
+This matters because the combined legacy condition could never fire on AI+ at
+all: the same `devType=22` controller reports `isOpenAutomation = 0` on all 8
+ports, in both `getdevModeSettingList` and the `devInfoListAll` port entries. The
+guard read as protective while being provably inert.
+
+---
+
+### Quirk 36 — On AI+, `addDevMode` returns `200` for fields it silently discards
+
+**A `200` from `addDevMode` does not mean the fields you sent were stored.** On
+AI+, only fields relevant to the port's mode *at the time of the write* persist.
+Everything else is accepted and thrown away, with no error and no indication in
+the response.
+
+Demonstrated on live `devType=20` hardware, writing to an idle port
+(`atType=1`, OFF) and reading back:
+
+| Port state at write | Fields written | Persisted? |
+|---|---|---|
+| `atType=1` (OFF) | `devHt`, `devLt`, `devHtf`, `devLtf`, `activeHt`, `activeLt` | **no** — every one discarded, code `200` |
+| `atType=3` (AUTO), triggers inactive | `targetVpd`, `schedStartTime` | **no** — discarded, code `200` |
+| `atType=3` (AUTO), humidity triggers active | `devHh`, `devLh` | yes |
+| `atType=3` (AUTO), temp triggers active | `devHtf`, `devHt` | yes |
+| one write carrying `atType=3` **plus** `activeHt/activeLt=1` **plus** the trigger values | all of the above | yes — the mode change lands first |
+
+That last row is why the ordinary automation tools work: `set_vpd_automation`,
+`set_humidity_automation` and `set_temperature_automation` each send the mode
+switch and its trigger fields in a single write, which makes those fields
+relevant as they arrive.
+
+The trap is **writing settings a port is not currently using** — storing a
+fallback for a mode the port is not in. That is exactly what
+`apply_grow_stage_template` does (it sets `atType=8` for VPD while storing temp
+and humidity thresholds "for later"), which is why that tool is held on AI+ (see
+#316) rather than reporting a success the controller did not honour.
+
+A practical consequence when restoring a port: to put a trigger value back you
+must first return the port to the mode that makes it relevant, change it, then
+switch the mode back.
+
+---
+
+### Quirk 37 — `addDevMode` returns `999999` when nothing is plugged into the port
+
+`999999` is not primarily an Advance Automation conflict. It is what the
+controller returns when the target port reports an **open circuit** —
+`portResistance == 65535`, the Quirk 27 sentinel.
+
+No-op writes (each port's own current values written straight back) across every
+port of two live controllers:
+
+| Device | devType | Port | `portResistance` | Result |
+|---|---|---|---|---|
+| AI+ | 20 | 1 Light | `400` | `200` |
+| AI+ | 20 | 2 Exhaust | `5100` | `200` |
+| AI+ | 20 | 3 SupLights | `15800` | `200` |
+| AI+ | 20 | 4 Humidity | `12000` | `200` |
+| AI+ | 20 | 5 Fan | **`65535`** | **`999999`** |
+| AI+ | 20 | 6 UV | `15800` | `200` |
+| AI+ | 20 | 7 | **`65535`** | **`999999`** |
+| AI+ | 20 | 8 | **`65535`** | **`999999`** |
+| 69 Pro | 11 | 1 | **`65535`** | **`999999`** |
+| 69 Pro | 11 | 2 | `3300` | `200` |
+| 69 Pro | 11 | 3 | **`65535`** | **`999999`** |
+| 69 Pro | 11 | 4 | **`65535`** | **`999999`** |
+
+Twelve for twelve, on both controller generations.
+
+**The automation reading is ruled out.** The devType-11 controller has *zero*
+Advance Automations configured and still rejects all three of its empty ports.
+Meanwhile AI+ ports 3 and 4 *are* covered by Advance Automations (both disabled)
+and wrote successfully. Automation coverage predicts nothing; `portResistance`
+predicts everything.
+
+**But `portResistance` cannot be used as the detector.** The correlation above is
+real on devType 11 and 20; the *signal* is not portable:
+
+- On **devType 22** the field is a frozen `15800` on every port (#315), so a
+  `== 65535` check never fires there — on the one controller family where AI+
+  writes are newly enabled.
+- On **legacy** it fires on ports that do have equipment attached: Quirk 26
+  records a device with its own power switch off still reading `65535`. Telling
+  that grower "nothing is connected — plug a device in" is a wrong answer with a
+  physical instruction attached.
+
+So `client.py` deliberately does **not** branch on `portResistance` in its
+`999999` handler. Detection needs the uniformity test proposed in #315 (treat a
+value identical across all ports as untrustworthy and fall through to the
+heuristic), which serves this call site, `ports.py::_is_port_empty` and the
+readings path together rather than being solved three times.
+
+One further consequence: the `999999` seen while first exploring the AI+ write
+path came from testing on an empty port, not from a payload defect and not from
+an automation. See the retraction in Quirk 14.
+
+`999999` retains its documented ADVANCE-conflict meaning for ports that report a
+real resistance value; that path is unchanged and still reachable.
 
 ---
 
@@ -2844,6 +3052,16 @@ One-click grow stage configuration. Calls `set_vpd_automation`, `set_temperature
 and `set_humidity_automation` in sequence using the VPD midpoint and full ranges from
 `STAGE_TARGETS` in `analytics.py`.
 
+> **Held on AI+ (`devType >= 20`) — live writes refused, previews unaffected (#316).**
+> This tool sets `atType=8` (VPD) while also storing temperature and humidity
+> thresholds as a fallback for a later switch to AUTO. On AI+ a field that is not
+> relevant to the port's mode at write time is accepted with code `200` and
+> silently discarded (Quirk 36) — which is precisely what those fallback fields
+> are. It also never writes `devLtf`/`devHtf`, so on a °F AI+ the °F pair stays
+> stale. `dry_run=True` works normally; for live changes use `set_vpd_automation`,
+> `set_temperature_automation` and `set_humidity_automation`, which send each mode
+> switch together with its own trigger fields and are verified on AI+.
+
 **Parameters:**
 | Parameter | Type | Description |
 |---|---|---|
@@ -3223,6 +3441,13 @@ Safely break a port out of Advance Automation control. Identifies the governing 
 (the one whose bitmask covers the target port), disables it, and locks only the co-ports
 within that same automation to their current manual speed, leaving the target port free for
 manual control. Ports in other automations are unaffected.
+
+> **Held on AI+ (`devType >= 20`) — live writes refused, previews unaffected (#316).**
+> This tool issues one live write per co-governed port plus the target, and its
+> rollback path re-enables the automation without unwinding co-ports it has
+> already switched to manual — leaving those ports pinned manually *and* claimed
+> by a re-enabled automation. Multi-port partial-failure handling needs its own
+> fix and its own tests before this runs live on AI+ hardware.
 
 **Parameters:**
 | Parameter | Type | Description |
