@@ -11,6 +11,17 @@ updates:
     groups:
       dev-dependencies:
         dependency-type: development
+    ignore:
+      # The `mcp<2` ceiling is deliberate, not stale (#309). mcp 2.x renamed
+      # FastMCP to MCPServer and dropped mcp.server.fastmcp, which breaks
+      # server.py at import time — dependabot proposed lifting it in #330 and
+      # every CI job failed on ModuleNotFoundError. Lifting the ceiling is
+      # tracked as #310 and requires the migration plus a fresh pip-audit
+      # (docs/SECURITY-RISKS.md records that precondition). Minor and patch
+      # updates within 1.x still come through.
+      - dependency-name: mcp
+        update-types:
+          - version-update:semver-major
 
   - package-ecosystem: github-actions
     directory: /
@@ -20,3 +31,13 @@ updates:
     labels:
       - dependencies
     open-pull-requests-limit: 3
+    groups:
+      # codeql-action/init and codeql-action/analyze must move together: init
+      # writes the config that analyze reads, so a version mismatch fails with
+      # "Loaded a configuration file for version 'X', but running version 'Y'".
+      # Dependabot split them into separate PRs twice — #297 (4.37.8) and
+      # #331/#332 (4.37.9) — and each PR failed on its own. Grouping them makes
+      # the pair arrive as one PR.
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
