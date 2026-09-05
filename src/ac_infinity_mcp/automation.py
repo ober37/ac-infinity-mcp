@@ -362,9 +362,11 @@ def _is_port_not_powered(port_data: dict | None, device: dict | None) -> bool:
     Fires for both custom-named and default-named ports.  Unlike ``_is_port_empty``,
     this helper does NOT skip custom-named ports — a named port can still be off.
 
-    Returns False for devTypes 18 and 22 (``_ZERO_LOAD_DEV_TYPES``) because those
-    controllers always report ``portsLoad=0`` regardless of actual state; the signal
-    is meaningless there.  Returns False when either arg is None.
+    Returns False for devTypes 18, 20 and 22 (``_ZERO_LOAD_DEV_TYPES``) because those
+    controllers report ``portsLoad`` as 0/None regardless of actual state; the signal
+    is meaningless there.  devType 20 reports ``None`` on every port, including ones
+    with a running load, so ``(portsLoad or 0) == 0`` would otherwise be true for all
+    of them.  Returns False when either arg is None.
     """
     if port_data is None or device is None:
         return False
