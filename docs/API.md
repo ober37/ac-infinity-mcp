@@ -884,14 +884,26 @@ Meanwhile AI+ ports 3 and 4 *are* covered by Advance Automations (both disabled)
 and wrote successfully. Automation coverage predicts nothing; `portResistance`
 predicts everything.
 
-Two consequences:
+**But `portResistance` cannot be used as the detector.** The correlation above is
+real on devType 11 and 20; the *signal* is not portable:
 
-- `client.py` checks `portResistance` before blaming an automation, so an empty
-  port produces "nothing is connected to it" rather than an instruction to
-  release an automation that may not exist.
-- The `999999` seen while first exploring the AI+ write path came from testing
-  on an empty port, not from a payload defect and not from an automation. See
-  the retraction in Quirk 14.
+- On **devType 22** the field is a frozen `15800` on every port (#315), so a
+  `== 65535` check never fires there — on the one controller family where AI+
+  writes are newly enabled.
+- On **legacy** it fires on ports that do have equipment attached: Quirk 26
+  records a device with its own power switch off still reading `65535`. Telling
+  that grower "nothing is connected — plug a device in" is a wrong answer with a
+  physical instruction attached.
+
+So `client.py` deliberately does **not** branch on `portResistance` in its
+`999999` handler. Detection needs the uniformity test proposed in #315 (treat a
+value identical across all ports as untrustworthy and fall through to the
+heuristic), which serves this call site, `ports.py::_is_port_empty` and the
+readings path together rather than being solved three times.
+
+One further consequence: the `999999` seen while first exploring the AI+ write
+path came from testing on an empty port, not from a payload defect and not from
+an automation. See the retraction in Quirk 14.
 
 `999999` retains its documented ADVANCE-conflict meaning for ports that report a
 real resistance value; that path is unchanged and still reachable.

@@ -409,82 +409,47 @@ def test_legacy_advance_guard_still_requires_mode_type_15(legacy_11_device):
     assert cap["result"]["sent"] is True
 
 
-# ============ 999999 usually means "nothing is plugged in" ============
+# ============ 999999 scoping (legacy conflict UX must not regress) ============
 #
-# No-op writes across 12 ports on two live controllers:
-#
-#   portResistance == 65535 (open circuit)  -> 999999, every time
-#   any real resistance value               -> 200, every time
-#
-# That held on a devType-11 controller with ZERO Advance Automations
-# configured, which rules out the automation reading, and connected ports
-# covered by disabled automations wrote fine. The empty-port check therefore
-# runs before both the toggle-hardware and ADVANCE branches.
+# The speed-write reroute is scoped to NEW_FRAMEWORK. 999999 correlates strongly
+# with an empty port (12 no-op writes across devType 11 and 20: every
+# portResistance == 65535 port returned 999999, every connected port 200, on a
+# controller with zero Advance Automations - Quirk 37). We deliberately do not
+# branch on portResistance to say so: per #315 it is a frozen 15800 on devType 22
+# and 65535 on legacy ports that do have equipment attached.
 
 
-def _dev_with_resistance(base: dict, port: int, resistance: int) -> dict:
-    dev = {**base, "deviceInfo": {**base.get("deviceInfo", {}),
-                                  "ports": [{"port": port, "portResistance": resistance}]}}
-    return dev
+def test_999999_speed_write_on_legacy_keeps_advance_conflict(legacy_11_device):
+    """Legacy loadType is dependable, so a cleared guard + 999999 is a real conflict.
 
-
-def test_999999_on_empty_port_reports_nothing_connected(ai_plus_device):
-    """The common case: the grower picked a port with nothing plugged into it."""
+    The AI+ reroute exists because loadType is unreliable there (Quirks 24/34).
+    Applying it to legacy would replace an accurate ADVANCE-conflict response
+    with on/off-hardware guidance that does not fit the device.
+    """
     c = ACInfinityClient("test@example.com", "pw")
     c.token = "tok"
-    dev = _dev_with_resistance(ai_plus_device, 1, 65535)
 
     with patch.object(c.session, "post", _post_returning(999999, "Operation failed")), \
          patch.object(c, "_enforce_write_rate_limit"), \
          patch.object(c, "get_mode_settings", autospec=True,
-                      return_value=dict(AI_PLUS_SETTINGS)):
-        with pytest.raises(ACInfinityDeviceError) as exc:
-            c.set_port_mode(dev, port=1, updates={"atType": 2}, dry_run=False)
-
-    assert "nothing is connected" in str(exc.value)
-    assert "Advance Automation" not in str(exc.value)
-
-
-def test_999999_on_connected_port_still_reports_advance_conflict(ai_plus_device):
-    """A real resistance value means the open-circuit explanation does not apply."""
-    c = ACInfinityClient("test@example.com", "pw")
-    c.token = "tok"
-    dev = _dev_with_resistance(ai_plus_device, 1, 400)
-
-    with patch.object(c.session, "post", _post_returning(999999, "Operation failed")), \
-         patch.object(c, "_enforce_write_rate_limit"), \
-         patch.object(c, "get_mode_settings", autospec=True,
-                      return_value=dict(AI_PLUS_SETTINGS)):
+                      return_value={**MOCK_MODE_SETTINGS_LEGACY_PORT1, "loadType": 0}):
         with pytest.raises(ACInfinityAdvanceConflictError):
-            c.set_port_mode(dev, port=1, updates={"atType": 2}, dry_run=False)
+            c.set_port_mode(legacy_11_device, port=1, updates={"onSpead": 5},
+                            dry_run=False, require_variable_speed=True)
 
 
-def test_999999_empty_port_takes_precedence_over_the_speed_write_branch(ai_plus_device):
-    """An empty port is an empty port, whether or not a speed was requested."""
+def test_999999_speed_write_on_ai_plus_still_reroutes(ai_plus_device):
+    """The counterpart: on NEW_FRAMEWORK the reroute must still fire."""
     c = ACInfinityClient("test@example.com", "pw")
     c.token = "tok"
-    dev = _dev_with_resistance(ai_plus_device, 1, 65535)
 
     with patch.object(c.session, "post", _post_returning(999999, "Operation failed")), \
          patch.object(c, "_enforce_write_rate_limit"), \
          patch.object(c, "get_mode_settings", autospec=True,
                       return_value={**AI_PLUS_SETTINGS, "loadType": 0}):
         with pytest.raises(ACInfinityDeviceError) as exc:
-            c.set_port_mode(dev, port=1, updates={"onSpead": 5},
+            c.set_port_mode(ai_plus_device, port=1, updates={"onSpead": 5},
                             dry_run=False, require_variable_speed=True)
 
-    assert "nothing is connected" in str(exc.value)
-
-
-def test_999999_falls_through_when_resistance_is_absent(ai_plus_device):
-    """Firmware that omits portResistance must keep the prior behaviour."""
-    c = ACInfinityClient("test@example.com", "pw")
-    c.token = "tok"
-    dev = {**ai_plus_device, "deviceInfo": {"ports": [{"port": 1}]}}
-
-    with patch.object(c.session, "post", _post_returning(999999, "Operation failed")), \
-         patch.object(c, "_enforce_write_rate_limit"), \
-         patch.object(c, "get_mode_settings", autospec=True,
-                      return_value=dict(AI_PLUS_SETTINGS)):
-        with pytest.raises(ACInfinityAdvanceConflictError):
-            c.set_port_mode(dev, port=1, updates={"atType": 2}, dry_run=False)
+    assert "set_port_on" in str(exc.value)
+    assert "on/off hardware" in str(exc.value)
