@@ -33,7 +33,7 @@
 |---|---|---|---|
 | UIS Controller 69 Pro | ✅ | ✅ | Legacy protocol |
 | UIS Controller 69 Pro+ | ✅ | ✅ | Legacy protocol |
-| UIS Controller 89 AI+ | ✅ | ⚠️ v1 read-only | New AI+ protocol — write support planned for v2 |
+| UIS Controller 89 AI+ | ✅ | ✅ | New AI+ protocol — writes require the `minversion` header (Quirk 14) |
 
 ## Tools
 

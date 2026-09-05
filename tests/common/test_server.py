@@ -39,6 +39,7 @@ from ac_infinity_mcp.server import (
     _is_port_not_powered,
     _parse_duration_seconds,
     _parse_schedule_time,
+    _resolve_temp_trigger,
     _sanitize_api_string,
     _short_date,
     _utc_hour_to_local,
@@ -554,7 +555,6 @@ async def test_get_device_reading_human_summary(mock_client):
     assert "RH" in summary
     assert "kPa" in summary
     assert "Reading from" in summary
-
 
 
 async def test_get_device_reading_no_load_field_in_ports(mock_client):
@@ -2771,7 +2771,7 @@ MOCK_SET_PORT_MODE_DRY = {
     "dry_run": True,
     "controller_type": "legacy",
     "sent": False,
-    "prior_mode_type": 2,
+    "prior_at_type": 2,
 }
 
 MOCK_SET_PORT_MODE_LIVE = {
@@ -2779,7 +2779,7 @@ MOCK_SET_PORT_MODE_LIVE = {
     "dry_run": False,
     "controller_type": "legacy",
     "sent": True,
-    "prior_mode_type": 2,
+    "prior_at_type": 2,
 }
 
 
@@ -2882,7 +2882,7 @@ async def test_set_port_speed_uses_asyncio_to_thread(mock_client):
 
 async def test_set_port_speed_off_mode_warning_modeType_0(mock_client):
     """modeType=0 (uninitialised OFF) in prior state triggers a warning field."""
-    mock_result = {**MOCK_SET_PORT_MODE_DRY, "prior_mode_type": 0}
+    mock_result = {**MOCK_SET_PORT_MODE_DRY, "prior_at_type": 0}
     mock_client.set_port_mode.return_value = mock_result
     result = await set_port_speed("C58ZA", 2, 5, dry_run=True)
     data = json.loads(result)
@@ -2896,7 +2896,7 @@ async def test_set_port_speed_off_mode_warning_modeType_0(mock_client):
 
 async def test_set_port_speed_off_mode_warning_modeType_1(mock_client):
     """modeType=1 (explicit OFF) in prior state triggers a warning field."""
-    mock_result = {**MOCK_SET_PORT_MODE_DRY, "prior_mode_type": 1}
+    mock_result = {**MOCK_SET_PORT_MODE_DRY, "prior_at_type": 1}
     mock_client.set_port_mode.return_value = mock_result
     result = await set_port_speed("C58ZA", 2, 5, dry_run=True)
     data = json.loads(result)
@@ -2910,7 +2910,7 @@ async def test_set_port_speed_off_mode_warning_modeType_1(mock_client):
 
 async def test_set_port_speed_no_warning_when_on_mode(mock_client):
     """modeType=2 (ON) — no warning is included in the response."""
-    mock_client.set_port_mode.return_value = {**MOCK_SET_PORT_MODE_DRY, "prior_mode_type": 2}
+    mock_client.set_port_mode.return_value = {**MOCK_SET_PORT_MODE_DRY, "prior_at_type": 2}
     result = await set_port_speed("C58ZA", 2, 5, dry_run=True)
     data = json.loads(result)
     assert "warning" not in data
@@ -3210,14 +3210,6 @@ async def test_set_port_on_off_does_not_pass_require_variable_speed(mock_client,
 
 # ============ Guard rails — Phase 8 ============
 
-MOCK_AI_PLUS_UNSUPPORTED = {
-    "payload": {"onSpead": 5, "modeType": 2},
-    "dry_run": False,
-    "controller_type": "new_framework",
-    "sent": False,
-    "ai_plus_write_unsupported": True,
-}
-
 
 async def test_set_port_speed_rejects_load_type_4(mock_client):
     """set_port_speed rejects on/off devices (loadType=4) — guard fires in client layer."""
@@ -3317,41 +3309,6 @@ async def test_set_port_off_returns_conflict_for_modeType_15(mock_client):
     assert data["conflict"] == "ADVANCE_AUTOMATION"
     assert "summary" in data
     assert "error" not in data
-
-
-async def test_set_port_speed_ai_plus_live_write_returns_not_implemented(mock_client):
-    """AI+ dry_run=False returns a clear documented error, not a crash."""
-    mock_client.set_port_mode.return_value = MOCK_AI_PLUS_UNSUPPORTED
-    result = await set_port_speed("C58ZA", 1, 5, dry_run=False)
-    data = json.loads(result)
-    assert "error" in data
-    assert "AI+" in data["error"] or "devType=22" in data["error"]
-    assert data["controller_type"] == "new_framework"
-    assert "dry_run" not in data["error"]
-    assert "preview" in data["error"].lower()
-
-
-async def test_set_port_on_ai_plus_live_write_returns_not_implemented(mock_client):
-    """AI+ set_port_on dry_run=False returns documented error."""
-    mock_client.set_port_mode.return_value = MOCK_AI_PLUS_UNSUPPORTED
-    result = await set_port_on("C58ZA", 1, dry_run=False)
-    data = json.loads(result)
-    assert "error" in data
-    assert data["controller_type"] == "new_framework"
-    assert "dry_run" not in data["error"]
-    assert "preview" in data["error"].lower()
-
-
-async def test_set_port_off_ai_plus_live_write_returns_not_implemented(mock_client):
-    """AI+ set_port_off dry_run=False returns documented error."""
-    mock_client.set_port_mode.return_value = MOCK_AI_PLUS_UNSUPPORTED
-    result = await set_port_off("C58ZA", 1, dry_run=False)
-    data = json.loads(result)
-    assert "error" in data
-    assert data["controller_type"] == "new_framework"
-    assert "dry_run" not in data["error"]
-    assert "preview" in data["error"].lower()
-
 
 async def test_set_port_speed_passes_require_variable_speed_to_client(mock_client):
     """set_port_speed passes require_variable_speed=True; client layer enforces the guard."""
@@ -4506,7 +4463,6 @@ async def test_get_port_settings_advance_degraded_empty_port_note_concatenated(m
     assert "stale" not in data["human_summary"]
 
 
-
 async def test_get_port_settings_portresistance_custom_name_stale_note(mock_client):
     """portResistance=65535 + custom-named port → staleness advisory fires (core #183 fix).
 
@@ -4646,33 +4602,6 @@ async def test_set_vpd_automation_port_zero(mock_client):
     assert "port" in data["error"]
 
 
-async def test_set_vpd_automation_ai_plus_returns_not_implemented(mock_client):
-    mock_client.set_port_mode.return_value = {
-        "payload": {}, "dry_run": False,
-        "controller_type": "new_framework", "sent": False,
-        "ai_plus_write_unsupported": True,
-    }
-    result = await set_vpd_automation("C58ZA", 1, 1.4, dry_run=False)
-    data = json.loads(result)
-    assert "error" in data
-    assert "AI+" in data["error"]
-    assert data["controller_type"] == "new_framework"
-
-
-@pytest.mark.asyncio
-async def test_set_vpd_automation_ai_plus_no_dry_run_in_error(mock_client):
-    """AI+ error message contains no 'dry_run' text (grower-facing string clean)."""
-    mock_client.set_port_mode.return_value = {
-        "payload": {}, "dry_run": False,
-        "controller_type": "new_framework", "sent": False,
-        "ai_plus_write_unsupported": True,
-    }
-    result = await set_vpd_automation("C58ZA", 1, 1.4, dry_run=False)
-    data = json.loads(result)
-    assert "dry_run" not in data["error"]
-    assert "preview" in data["error"].lower()
-
-
 async def test_set_vpd_automation_api_error(mock_client):
     mock_client.set_port_mode.side_effect = ACInfinityAPIError("server error")
     result = await set_vpd_automation("C58ZA", 1, 1.4)
@@ -4783,19 +4712,6 @@ async def test_set_temperature_automation_port_zero(mock_client):
     data = json.loads(result)
     assert "error" in data
     assert "port" in data["error"]
-
-
-async def test_set_temperature_automation_ai_plus_returns_not_implemented(mock_client):
-    mock_client.set_port_mode.return_value = {
-        "payload": {}, "dry_run": False,
-        "controller_type": "new_framework", "sent": False,
-        "ai_plus_write_unsupported": True,
-    }
-    result = await set_temperature_automation("C58ZA", 1, 20.0, 28.0, dry_run=False)
-    data = json.loads(result)
-    assert "error" in data
-    assert "AI+" in data["error"]
-
 
 async def test_set_temperature_automation_api_error(mock_client):
     mock_client.set_port_mode.side_effect = ACInfinityAPIError("err")
@@ -4947,19 +4863,6 @@ async def test_set_humidity_automation_port_zero(mock_client):
     data = json.loads(result)
     assert "error" in data
     assert "port" in data["error"]
-
-
-async def test_set_humidity_automation_ai_plus_returns_not_implemented(mock_client):
-    mock_client.set_port_mode.return_value = {
-        "payload": {}, "dry_run": False,
-        "controller_type": "new_framework", "sent": False,
-        "ai_plus_write_unsupported": True,
-    }
-    result = await set_humidity_automation("C58ZA", 1, 50.0, 70.0, dry_run=False)
-    data = json.loads(result)
-    assert "error" in data
-    assert "AI+" in data["error"]
-
 
 async def test_set_humidity_automation_api_error(mock_client):
     mock_client.set_port_mode.side_effect = ACInfinityAPIError("err")
@@ -5203,19 +5106,6 @@ async def test_set_port_mode_port_zero(mock_client):
     assert "error" in data
     assert "port" in data["error"]
 
-
-async def test_set_port_mode_ai_plus_returns_not_implemented(mock_client):
-    mock_client.set_port_mode.return_value = {
-        "payload": {}, "dry_run": False,
-        "controller_type": "new_framework", "sent": False,
-        "ai_plus_write_unsupported": True,
-    }
-    result = await set_port_mode("C58ZA", 1, "OFF", dry_run=False)
-    data = json.loads(result)
-    assert "error" in data
-    assert "AI+" in data["error"]
-
-
 async def test_set_port_mode_device_error(mock_client):
     mock_client.set_port_mode.side_effect = ACInfinityDeviceError("smart mode")
     result = await set_port_mode("C58ZA", 1, "OFF")
@@ -5383,20 +5273,6 @@ async def test_apply_grow_stage_template_device_not_found(mock_client):
     data = json.loads(result)
     assert "error" in data
     assert "NOTFOUND" in data["error"]
-
-
-async def test_apply_grow_stage_template_ai_plus_live(mock_client):
-    mock_client.set_port_mode.return_value = {
-        "payload": {}, "dry_run": False,
-        "controller_type": "new_framework", "sent": False,
-        "ai_plus_write_unsupported": True,
-    }
-    result = await apply_grow_stage_template("C58ZA", 1, "veg", dry_run=False)
-    data = json.loads(result)
-    assert "error" in data
-    assert "AI+" in data["error"]
-    assert mock_client.set_port_mode.call_count == 1
-
 
 async def test_apply_grow_stage_template_ai_plus_dry_run(mock_client):
     mock_client.set_port_mode.return_value = _stage_dry_response()
@@ -9126,7 +9002,7 @@ MOCK_WRITE_DRY = {
     "dry_run": True,
     "controller_type": "legacy",
     "sent": False,
-    "prior_mode_type": 2,
+    "prior_at_type": 2,
 }
 
 MOCK_WRITE_DRY_SPEED = {
@@ -9134,7 +9010,7 @@ MOCK_WRITE_DRY_SPEED = {
     "dry_run": True,
     "controller_type": "legacy",
     "sent": False,
-    "prior_mode_type": 2,
+    "prior_at_type": 2,
 }
 
 
@@ -9198,7 +9074,7 @@ async def test_set_port_speed_connected_port_no_warning(mock_client):
 
 async def test_set_port_speed_off_mode_and_empty_port_both_warned(mock_client):
     """set_port_speed: OFF-mode warning and empty-port advisory are separate keys."""
-    off_mode_dry = {**MOCK_WRITE_DRY_SPEED, "prior_mode_type": 1}  # atType=1 = OFF
+    off_mode_dry = {**MOCK_WRITE_DRY_SPEED, "prior_at_type": 1}  # atType=1 = OFF
     mock_client.set_port_mode.return_value = off_mode_dry
     mock_client.get_devices.return_value = [_make_device_with_empty_port(7)]
     result = await set_port_speed("C58ZA", 7, 5)
@@ -11257,3 +11133,261 @@ async def test_get_all_device_readings_summary_unchanged_without_probes(mock_cli
     data = json.loads(await get_all_device_readings())
     assert data["readings"][0]["probes"] == []
     assert "Probe Sensor" not in data["human_summary"]
+
+
+# ============ AI+ holds (#316) ============
+#
+# #308 enabled AI+ writes generally but deliberately held two tools back. Both
+# write field combinations whose persistence on AI+ is unproven, and AI+
+# accepts mode-irrelevant fields with code 200 and silently discards them
+# (Quirk 36) — so reporting sent=true would be misleading rather than merely
+# incomplete. These tests pin the hold so it cannot be dropped by accident.
+
+_AI_PLUS_DEVICE_FOR_HOLD = {
+    **copy.deepcopy(MOCK_DEVICE_LEGACY),
+    "devCode": "D89XA",
+    "devType": 20,
+    "newFrameworkDevice": True,
+}
+
+
+async def test_apply_grow_stage_template_held_on_ai_plus(mock_client):
+    """Live apply_grow_stage_template must refuse on AI+ rather than half-apply."""
+    mock_client.get_devices.return_value = [_AI_PLUS_DEVICE_FOR_HOLD]
+    result = await apply_grow_stage_template("D89XA", 1, "veg", dry_run=False)
+    data = json.loads(result)
+    assert "error" in data
+    assert "AI+" in data["error"]
+    assert data["controller_type"] == "new_framework"
+    assert data["tracking_issue"] == 316
+    mock_client.set_port_mode.assert_not_called()
+
+
+async def test_apply_grow_stage_template_preview_still_works_on_ai_plus(mock_client):
+    """The hold is live-write only — dry_run previews stay available."""
+    mock_client.get_devices.return_value = [_AI_PLUS_DEVICE_FOR_HOLD]
+    mock_client.set_port_mode.return_value = {
+        "payload": {}, "dry_run": True, "controller_type": "new_framework", "sent": False,
+    }
+    result = await apply_grow_stage_template("D89XA", 1, "veg", dry_run=True)
+    data = json.loads(result)
+    assert "error" not in data
+    mock_client.set_port_mode.assert_called_once()
+
+
+async def test_apply_grow_stage_template_not_held_on_legacy(mock_client):
+    """Legacy controllers are unaffected by the AI+ hold."""
+    mock_client.set_port_mode.return_value = {
+        "payload": {}, "dry_run": False, "controller_type": "legacy", "sent": True,
+    }
+    result = await apply_grow_stage_template("C58ZA", 1, "veg", dry_run=False)
+    data = json.loads(result)
+    assert "tracking_issue" not in data
+    mock_client.set_port_mode.assert_called_once()
+
+
+async def test_break_out_of_automation_held_on_ai_plus(mock_client):
+    """break_out_of_automation must refuse on AI+ before any co-port write."""
+    mock_client.get_devices.return_value = [_AI_PLUS_DEVICE_FOR_HOLD]
+    result = await break_out_of_automation(
+        "D89XA", 1, dry_run=False, confirm_automation_name="Test Automation"
+    )
+    data = json.loads(result)
+    assert "error" in data
+    assert "AI+" in data["error"]
+    assert data["tracking_issue"] == 316
+    mock_client.set_port_mode.assert_not_called()
+# ============ Temperature trigger resolution (Quirk 37) ============
+#
+# The API stores each temperature trigger twice: devLt/devHt in °C and
+# devLtf/devHtf in °F. Which pair is real depends on the controller. Captured
+# from live hardware:
+#
+#   devType 11 (JNFZA, °F display)  port 1: devLt=10  devHt=27  devLtf=50 devHtf=80
+#   devType 20 (SPEGQ, °F display)  port 2: devLt=0   devHt=0   devLtf=32 devHtf=80
+#
+# Both pairs agree on legacy; the AI+ leaves °C at zero. Reading °C
+# unconditionally reported every AI+ trigger as 32.0–32.0°F, and the
+# human_summary stated it as fact ("Fan speeds up above 32.0°F").
+
+
+def test_resolve_temp_trigger_ai_plus_reads_the_f_pair():
+    """AI+ leaves devLt/devHt at 0; the real trigger is in devLtf/devHtf.
+
+    Live capture: SPEGQ port 2 (Exhaust) has a genuine 80°F high trigger.
+    """
+    settings = {"devLt": 0, "devHt": 0, "devLtf": 32, "devHtf": 80}
+    assert _resolve_temp_trigger(settings, "F") == (32.0, 80.0)
+
+
+def test_resolve_temp_trigger_legacy_prefers_stored_f_over_converting_c():
+    """Both pairs are populated on legacy; the display-unit pair is exact.
+
+    Live capture: JNFZA port 1 stores 27 °C and 80 °F for the same trigger.
+    Converting the °C value would report 80.6 °F — off by more than the
+    grower's own setting.
+    """
+    settings = {"devLt": 10, "devHt": 27, "devLtf": 50, "devHtf": 80}
+    assert _resolve_temp_trigger(settings, "F") == (50.0, 80.0)
+
+
+def test_resolve_temp_trigger_celsius_device_prefers_stored_c():
+    """On a °C device the °C pair is what the grower set, so use it directly."""
+    settings = {"devLt": 10, "devHt": 27, "devLtf": 50, "devHtf": 80}
+    assert _resolve_temp_trigger(settings, "C") == (10.0, 27.0)
+
+
+def test_resolve_temp_trigger_celsius_device_falls_back_when_c_unset():
+    """An AI+ set to °C has no usable °C pair — convert from °F rather than 0."""
+    settings = {"devLt": 0, "devHt": 0, "devLtf": 32, "devHtf": 80}
+    assert _resolve_temp_trigger(settings, "C") == (0.0, 26.7)
+
+
+def test_resolve_temp_trigger_unset_ai_plus_range():
+    """(32, 32) °F is the unset default and must not fall through to the °C pair."""
+    settings = {"devLt": 0, "devHt": 0, "devLtf": 32, "devHtf": 32}
+    assert _resolve_temp_trigger(settings, "F") == (32.0, 32.0)
+
+
+def test_resolve_temp_trigger_full_range_ai_plus():
+    """The widest AI+ range (32–194 °F) survives intact."""
+    settings = {"devLt": 0, "devHt": 0, "devLtf": 32, "devHtf": 194}
+    assert _resolve_temp_trigger(settings, "F") == (32.0, 194.0)
+
+
+def test_resolve_temp_trigger_f_pair_absent_converts_from_c():
+    """Firmware that omits the °F pair entirely still reports a real range."""
+    settings = {"devLt": 10, "devHt": 27}
+    assert _resolve_temp_trigger(settings, "F") == (50.0, 80.6)
+
+
+def test_resolve_temp_trigger_both_pairs_absent_is_safe():
+    """Neither pair present: return the unset default rather than raising."""
+    assert _resolve_temp_trigger({}, "F") == (32.0, 32.0)
+
+
+async def test_get_port_settings_reports_real_ai_plus_temp_range(mock_client):
+    """End-to-end: the AI+ Exhaust port must report 80 °F, not 32 °F.
+
+    This is the whole bug. Before the fix this returned 32.0-32.0 and the
+    human_summary asserted the fan sped up above 32 °F.
+    """
+    # The AI+ in question displays °F; the shared legacy fixture is °C.
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device.setdefault("deviceInfo", {})["unit"] = 0
+    mock_client.get_devices.return_value = [device]
+    mock_client.get_mode_settings.return_value = {
+        **MOCK_MODE_SETTINGS_BASIC,
+        "atType": 3,
+        "devLt": 0, "devHt": 0,
+        "devLtf": 32, "devHtf": 80,
+        "activeLt": 0, "activeHt": 1,
+    }
+    result = await get_port_settings("C58ZA", 1)
+    data = json.loads(result)
+    assert data["temp_range"] == {"min": 32.0, "max": 80.0, "unit": "°F"}
+    assert "80.0" in data["human_summary"]
+    assert "32.0–32.0" not in data["human_summary"]
+
+
+def test_resolve_temp_trigger_tolerates_string_typed_values():
+    """The API is inconsistently typed elsewhere; coerce rather than assume."""
+    settings = {"devLt": "0", "devHt": "0", "devLtf": "32", "devHtf": "80"}
+    assert _resolve_temp_trigger(settings, "F") == (32.0, 80.0)
+
+
+def test_resolve_temp_trigger_unparseable_pair_falls_back():
+    """A garbage °F pair must not take precedence over a usable °C pair."""
+    settings = {"devLt": 10, "devHt": 27, "devLtf": "n/a", "devHtf": None}
+    assert _resolve_temp_trigger(settings, "F") == (50.0, 80.6)
+
+
+# ============ human_summary must describe the active mode ============
+#
+# The summary used to be a first-match chain over stored thresholds
+# (temp -> vpd -> humidity) that never consulted atType. Thresholds persist
+# across mode changes, so this reported settings a port was not using, and
+# dropped whichever family came second. Three failures observed live on a
+# devType-20 controller:
+#
+#   port 3  OFF  + stale 82°F range   -> "Fan speeds up above 82.0°F"  (port is off)
+#   port 2  AUTO + temp AND humidity  -> temperature only, humidity dropped
+#   port 4  AUTO + humidity + stale
+#           VPD target                -> "VPD automation", but humidity governs
+
+_F_DEVICE = {"deviceInfo": {"unit": 0}}          # °F display
+
+
+def _settings(**over):
+    base = {
+        **MOCK_MODE_SETTINGS_BASIC,
+        "devLt": 0, "devHt": 0, "devLtf": 32, "devHtf": 32,
+        "activeLt": 0, "activeHt": 0,
+        "devLh": 0, "devHh": 100, "activeLh": 0, "activeHh": 0,
+        "targetVpd": 0, "targetVpdSwitch": 0,
+    }
+    base.update(over)
+    return base
+
+
+async def _summary(mock_client, settings):
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device.setdefault("deviceInfo", {})["unit"] = 0
+    mock_client.get_devices.return_value = [device]
+    mock_client.get_mode_settings.return_value = settings
+    return json.loads(await get_port_settings("C58ZA", 1))["human_summary"]
+
+
+async def test_summary_off_port_does_not_claim_temperature_automation(mock_client):
+    """The live port-3 case: OFF, but carrying an active 82°F trigger."""
+    s = await _summary(mock_client, _settings(
+        atType=1, devLtf=82, devHtf=82, activeLt=1))
+    assert "Fan speeds up" not in s
+    assert "Temperature automation" not in s
+    assert "OFF mode" in s
+    assert "not active" in s
+
+
+async def test_summary_auto_reports_both_temperature_and_humidity(mock_client):
+    """The live port-2 case: both families active; neither may be dropped."""
+    s = await _summary(mock_client, _settings(
+        atType=3, devHtf=80, activeHt=1, devLh=55, devHh=55, activeLh=1))
+    assert "Temperature automation" in s
+    assert "80.0" in s
+    assert "Humidity automation" in s
+    assert "55" in s
+
+
+async def test_summary_auto_with_stale_vpd_reports_the_governing_family(mock_client):
+    """The live port-4 case: AUTO + humidity floor, with a leftover VPD target.
+
+    atType=3 means the humidity trigger governs. The stored targetVpd is from a
+    previous VPD-mode configuration and must not be described as running.
+    """
+    s = await _summary(mock_client, _settings(
+        atType=3, devLh=48, devHh=100, activeLh=1,
+        targetVpd=12, targetVpdSwitch=1, vpdSettingMode=1))
+    assert "Humidity automation: 48–100%." in s
+    assert "VPD" not in s
+
+
+async def test_summary_vpd_mode_reports_the_vpd_target(mock_client):
+    """atType=8 is the mode where a VPD target actually governs."""
+    s = await _summary(mock_client, _settings(
+        atType=8, targetVpd=12, targetVpdSwitch=1, vpdSettingMode=1))
+    assert s == "VPD automation: target 1.2 kPa."
+
+
+async def test_summary_schedule_mode_flags_stored_settings_as_inactive(mock_client):
+    """Stored thresholds are still worth surfacing — but as stored, not as live."""
+    s = await _summary(mock_client, _settings(
+        atType=7, devHtf=80, activeHt=1))
+    assert "SCHEDULE mode" in s
+    assert "not active" in s
+    assert "Fan speeds up" not in s
+
+
+async def test_summary_clean_off_port_says_only_the_mode(mock_client):
+    """No stored config: no dangling caveat about settings that do not exist."""
+    s = await _summary(mock_client, _settings(atType=1))
+    assert s == "Port is in OFF mode."
