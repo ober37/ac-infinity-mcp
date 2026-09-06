@@ -53,6 +53,10 @@ _SWITCHTIME_ALL_DAYS = 127
 _SWITCHTIME_WEEKDAYS = 31  # Mon–Fri
 _DAY_ABBR = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
+# What a Groups `currentMode` this class does not define renders as. Public because
+# server.py needs the same string for its own fallback — two copies would drift.
+UNRECOGNIZED_RULE = "a rule type I don't recognize yet — check this one in the AC Infinity app"
+
 
 def _fmt_hhmm(minutes: int | None) -> str:
     """Format minutes-since-midnight as HH:MM (clamped to a valid clock value)."""
@@ -129,7 +133,10 @@ def _decode_modifiers(entry: dict, mode: str | None) -> list[str]:
 
 
 def _decode_auto_clauses(entry: dict) -> tuple[list[str], str | None]:
-    """Collect sensor-labeled clauses for a currentMode=4 (Auto) rule. Returns (clauses, dir).
+    """Collect sensor-labeled clauses for an Auto rule. Returns (clauses, direction).
+
+    Auto's wire code differs by controller class (4 on legacy, 3 on new-framework) —
+    see the table in controller.py. This helper is reached by resolved mode name only.
 
     Target sub-mode (settingMode==1): collect every non-rail target. Trigger sub-mode:
     collect every active threshold (switch==1 AND value non-rail). ``direction`` is reported
@@ -202,7 +209,11 @@ def _trigger_clause(
 
 
 def _decode_vpd_clauses(entry: dict) -> tuple[list[str], str | None]:
-    """Collect VPD clauses for a currentMode=6 rule. Returns (clauses, direction)."""
+    """Collect VPD clauses for a VPD rule. Returns (clauses, direction).
+
+    VPD's wire code differs by controller class (6 on legacy, 8 on new-framework), and
+    6 means CYCLE on new-framework — see controller.py. Reached by mode name only.
+    """
     if entry.get("settingMode") == 1:
         kpa = int(entry.get("targetVpd") or 0) / 10
         return [f"VPD: hold at {kpa:g} kPa"], None
@@ -239,12 +250,11 @@ def _no_rule_clause(label: str, entry: dict, controller_type: ControllerType) ->
     missing key to 0 would produce exactly the false reassurance this guards against.
     """
     if controller_type is ControllerType.NEW_FRAMEWORK:
-        raw = entry.get("sensorModeDataNum", "<absent>")
-        try:
-            count = int(raw)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            count = -1  # absent or unparseable -> cautious branch
-        if count != 0:
+        # Only a real int 0 earns the reassuring branch — the same strictness
+        # groups_mode_name applies, and for the same reason: this field decides whether a
+        # grower is told a running heater has no rule. A float, a string "0", a bool, an
+        # absent key and an unparseable value all take the cautious branch.
+        if type(entry.get("sensorModeDataNum")) is not int or entry["sensorModeDataNum"] != 0:
             return f"{label} (rule set in the AC Infinity app — I can't read its details yet)"
     return f"{label} (no rule set)"
 
@@ -292,13 +302,7 @@ def _decode_rule(entry: dict, *, controller_type: ControllerType) -> dict:
         if not clauses:
             clauses = [_no_rule_clause("VPD", entry, controller_type)]
     else:
-        return {
-            "mode": "unknown",
-            "control": (
-                "a rule type I don't recognize yet — check this one in the AC Infinity app"
-            ),
-            "direction": None,
-        }
+        return {"mode": "unknown", "control": UNRECOGNIZED_RULE, "direction": None}
 
     parts = list(clauses)
     parts.extend(_decode_modifiers(entry, mode))

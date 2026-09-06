@@ -228,6 +228,8 @@ _RAIL_VPD_LOW = 0
 
 # Groups `currentMode` is device-class dependent and lives in controller.py — the two
 # classes invert on/off and disagree on cycle/auto/vpd. See Issues #326 and #328.
+
+
 def resolve_port_type(raw_entries: list[dict[str, Any]], ports: list[int]) -> int:
     """Resolve the device-identity ``portType`` for ``ports`` from existing getGroups rules.
 
@@ -295,8 +297,11 @@ def build_groups_payload(
     program "0624"). ``ports`` is a list of 1-based port numbers governed by this single
     rule; the grouptDevType bitmask is ``sum(2**(p-1) for p in ports)``.
 
-    ``mode`` is the single mode pick: ``off`` (currentMode=2), ``on`` (1), ``cycle`` (3),
-    ``auto`` (4), ``vpd`` (6). Auto and VPD additionally take a ``control_style``:
+    ``mode`` is the single mode pick: ``off``, ``on``, ``cycle``, ``auto`` or ``vpd``. The
+    wire integer for each is resolved from ``controller_type`` — the two controller classes
+    number these differently and invert on/off, so there is no single correct set of
+    literals to quote here. See the table in ``controller.py`` (#326, #328). Auto and VPD
+    additionally take a ``control_style``:
     ``target`` (settingMode=1) or ``trigger`` (settingMode=0).
 
     Speed range: ``max_level`` → ``onSpeed``, ``min_level`` → ``offSpeed``. (``on_speed``
@@ -425,6 +430,8 @@ def build_groups_payload(
         # Base dict is the verified On-mode signature — leave as-is.
         pass
     elif mode == "off":
+        # Off needs no signature fields — only `currentMode`, already resolved above.
+        # Kept as an explicit branch so the five modes stay exhaustive at a glance.
         pass
     elif mode == "cycle":
         # cycleOn/cycleOff are stored in SECONDS on the controller (the app shows
@@ -477,7 +484,10 @@ def _apply_auto(
     temp_target_f: int | None,
     humidity_target: int | None,
 ) -> None:
-    """Apply the currentMode=4 (Auto) signature in place.
+    """Apply the Auto-mode signature in place.
+
+    Auto's wire code is class-dependent (4 on legacy, 3 on new-framework); this helper is
+    reached by mode name and never writes ``currentMode`` itself.
 
     Trigger sub-mode (settingMode=0, setSelect=1): each named threshold sets its value +
     switch=1; the opposite/unused threshold is parked at its rail with switch=0. Target
@@ -569,7 +579,11 @@ def _apply_vpd(
     vpd_high: float | None,
     vpd_low: float | None,
 ) -> None:
-    """Apply the currentMode=6 (VPD) signature in place.
+    """Apply the VPD-mode signature in place.
+
+    VPD's wire code is class-dependent (6 on legacy, 8 on new-framework), and 6 means
+    CYCLE on new-framework; this helper is reached by mode name and never writes
+    ``currentMode`` itself.
 
     The auto temp/humidity families and the temp/humidity target families are INERT in VPD
     mode — the app zeroes them (values at 0/32 rails, all switches 0). The old code left them

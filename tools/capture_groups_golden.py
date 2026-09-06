@@ -1,7 +1,13 @@
 """Capture the legacy Advance-Automation regression baseline for #326/#328.
 
 Run this against `main` BEFORE the enum change, then assert equality on the branch.
-Running it on the branch reproduces the branch and asserts nothing.
+Running it on the branch reproduces the branch and asserts nothing, so the committed
+artifact is only ever regenerated from `main`.
+
+Kept runnable on both: `_decode_rule` takes a required `controller_type` on the branch and
+none on `main`, so the call below is written the branch's way and the `main` run needs the
+keyword dropped. `tools/` is outside both the ruff and mypy gates, so nothing else catches
+a signature drift here.
 
     python3 tools/capture_groups_golden.py
 
@@ -25,6 +31,7 @@ from pathlib import Path
 
 from ac_infinity_mcp.automation import _decode_rule
 from ac_infinity_mcp.client import ACInfinityClient
+from ac_infinity_mcp.controller import detect_controller_type
 
 _REDACT = ("devId", "userId", "appId")
 LEGACY_DEVCODES = ("C58ZA", "8T4TC")
@@ -62,7 +69,10 @@ def main() -> int:
         out["devices"][code] = {  # type: ignore[index]
             "devType": device.get("devType"),
             "entries": [_redact(e) for e in entries],
-            "decoded": [_decode_rule(e) for e in entries],
+            "decoded": [
+                _decode_rule(e, controller_type=detect_controller_type(device))
+                for e in entries
+            ],
         }
         total += len(entries)
         print(f"{code}: devType={device.get('devType')} entries={len(entries)}")

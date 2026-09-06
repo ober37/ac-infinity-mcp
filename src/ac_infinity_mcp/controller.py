@@ -89,9 +89,11 @@ def groups_mode_name(controller_type: ControllerType, code: object) -> str | Non
     unrecognised rule rather than guessing.
 
     Matching is strict: only a real `int` resolves. The API sends this field as an integer,
-    and pre-#328 the decoder compared it with `==` against int literals, so a string, float
-    or bool has always read as unrecognised. Coercing here would be a silent behaviour
-    change on a field that decides whether a grower is told their equipment is on or off.
+    and pre-#328 the decoder compared it with `==` against int literals — so a *string*
+    already read as unrecognised, and this keeps that. It also tightens two cases that the
+    old `==` accepted by accident: `2.0 == 2` and `True == 1` both matched, so a float or a
+    bool used to decode as a real mode. Failing closed is the right bias on the field that
+    decides whether a grower is told their equipment is running.
     """
     if type(code) is not int:
         return None

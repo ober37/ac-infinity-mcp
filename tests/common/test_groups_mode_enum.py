@@ -128,10 +128,10 @@ def test_cross_class_round_trip_is_wrong_where_the_tables_differ(mode):
     load-bearing.
     """
     encoded = _payload(mode, NEW)["currentMode"]
-    misread = groups_mode_name(LEGACY, encoded)
-    if WIRE[LEGACY][mode] == encoded:
-        pytest.skip(f"{mode} happens to share a code across classes")
-    assert misread != mode
+    # No skip: a skip here would go silent precisely when the two tables have collapsed
+    # into one, which is the failure this test exists to catch.
+    assert WIRE[LEGACY][mode] != encoded, f"{mode} must not share a code across classes"
+    assert groups_mode_name(LEGACY, encoded) != mode
 
 
 def test_off_encoded_for_new_framework_never_reads_as_on_anywhere():
@@ -292,6 +292,7 @@ def test_golden_capture_covers_every_legacy_mode():
 import copy  # noqa: E402
 
 from ac_infinity_mcp.server import (  # noqa: E402
+    add_automation_rule,
     create_advance_automation,
     get_advance_automation,
     list_advance_automations,
@@ -346,9 +347,10 @@ async def test_get_advance_automation_decodes_new_framework_cycle_not_vpd(ai_plu
     assert "VPD" not in rule["control"]
 
 
-async def test_list_advance_automations_reaches_the_tool_for_new_framework(ai_plus_client):
-    """list_ groups through _group_automations, which is a separate threading site from
-    the decode path get_ uses."""
+async def test_list_advance_automations_does_not_crash_on_new_framework(ai_plus_client):
+    """A no-crash smoke test only. `list_advance_automations` emits automation_id / name /
+    enabled / currently_running and nothing mode-derived, so it cannot assert the class fix
+    — that gap is #339. Keeping the weaker claim honest rather than implying coverage."""
     data = json.loads(await list_advance_automations(AI_PLUS_CODE))
     assert [a["name"] for a in data["automations"]] == ["Lights"]
 
@@ -396,7 +398,11 @@ async def test_same_mode_edit_on_new_framework_takes_the_auto_overlay(ai_plus_cl
     overlay and emit no cycle keys — under the legacy table this wrote cycleOn/cycleOff
     onto an auto rule."""
     ai_plus_client.get_advance_automations.return_value = [
-        _ai_plus_entry(currentMode=3, beginTime=540, endTime=180, advName="Lights")
+        # switchTime 127 (not the base 255): a real window and the 24/7 flag cannot
+        # coexist — the app cannot produce that entry (Quirk 21).
+        _ai_plus_entry(
+            currentMode=3, beginTime=540, endTime=180, switchTime=127, advName="Lights"
+        )
     ]
     await update_automation_rule(
         AI_PLUS_CODE, "Lights", [1], begin_time=540, end_time=180,
@@ -406,8 +412,10 @@ async def test_same_mode_edit_on_new_framework_takes_the_auto_overlay(ai_plus_cl
     assert sent["autoHighTempF"] == 85
     assert sent["autoHighTempSwitch"] == 1
     assert sent["currentMode"] == 3
-    assert sent.get("cycleOn", 0) == 0
-    assert sent.get("cycleOff", 0) == 0
+    # The contract is "emits no cycle keys", not "emits zeroed ones" — `== 0` would still
+    # pass if a future overlay started writing cycleOn: 0 onto an auto rule.
+    assert "cycleOn" not in sent
+    assert "cycleOff" not in sent
 
 
 # ============ sensorModeData degradation — "no rule set" must not lie ============
@@ -501,8 +509,8 @@ async def test_human_summary_substitutes_the_control_for_a_cycle_rule(ai_plus_cl
     ]
     data = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
     assert data["human_summary"] == (
-        "'Lights' cycle 10 min on / 20 min off; speed 0 (off)–7; runs continuously,"
-        " currently enabled."
+        "'Lights' — cycle 10 min on / 20 min off; speed 0 (off)–7; runs continuously."
+        " Currently enabled."
     )
 
 
@@ -512,15 +520,17 @@ async def test_human_summary_for_an_on_rule_is_unchanged(ai_plus_client):
     assert data["human_summary"] == "'Lights' runs continuously at speed 7, currently enabled."
 
 
-async def test_human_summary_for_an_unknown_rule_falls_back_to_the_speed_wording(
-    ai_plus_client,
-):
-    """An unrecognised code must not put "a rule type I don't recognize yet" into the
-    summary sentence — the per-rule `control` already says it."""
+async def test_human_summary_for_an_unknown_rule_admits_it(ai_plus_client):
+    """An unrecognised code must NOT fall back to "runs continuously at speed 7" — that
+    would assert a confident behaviour in the same response whose rule list says the rule
+    can't be read. Two opposite claims, and this is the one Claude reads aloud."""
     ai_plus_client.get_advance_automations.return_value = [_ai_plus_entry(currentMode=99)]
     data = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
-    assert "don't recognize" not in data["human_summary"]
-    assert data["human_summary"].startswith("'Lights' runs continuously at speed 7")
+    assert data["human_summary"] == (
+        "'Lights' uses a rule type I don't recognize yet — check this one in the"
+        " AC Infinity app. Currently enabled."
+    )
+    assert "speed 7" not in data["human_summary"]
 
 
 async def test_legacy_human_summary_for_an_auto_rule_names_the_trigger(mock_client):
@@ -534,4 +544,144 @@ async def test_legacy_human_summary_for_an_auto_rule_names_the_trigger(mock_clie
     }]
     data = json.loads(await get_advance_automation("C58ZA", "7001"))
     assert "temperature: on below 70°F" in data["human_summary"]
-    assert "currently enabled." in data["human_summary"]
+    assert data["human_summary"].endswith("Currently enabled.")
+
+
+# ============ The two write sites the direct-call matrix does not watch ============
+#
+# QA mutation experiment: forcing every threading site to LEGACY fails only the tool-boundary
+# tests. add_automation_rule and update_automation_rule's mode-change path both put
+# currentMode on the wire for a new-framework device, and neither had a boundary test — under
+# that mutation both wrote 2 for mode="off", the value that energized the grow light in #326.
+
+
+async def test_add_automation_rule_writes_new_framework_off_code(ai_plus_client):
+    """Appending an Off rule to an existing program is a separate encoder call site from
+    create_advance_automation, and the direct-call matrix does not reach it."""
+    ai_plus_client.get_advance_automations.return_value = [_ai_plus_entry(advName="Night")]
+    result = json.loads(await add_automation_rule(
+        AI_PLUS_CODE, "Night", [1], begin_time=1260, end_time=360,
+        mode="off", dry_run=False,
+    ))
+    assert "error" not in result, result
+    sent = ai_plus_client.create_advance_automation.call_args.args[1]
+    assert sent["currentMode"] == 1, "legacy 2 here reads as ON on a devType-20 controller"
+
+
+async def test_update_automation_rule_mode_change_writes_new_framework_off_code(
+    ai_plus_client,
+):
+    """The explicit mode-change path rebuilds the full per-mode signature, so it is a second
+    independent encoder call site."""
+    ai_plus_client.get_advance_automations.return_value = [
+        _ai_plus_entry(currentMode=2, beginTime=1260, endTime=360, switchTime=127,
+                       advName="Night")
+    ]
+    result = json.loads(await update_automation_rule(
+        AI_PLUS_CODE, "Night", [1], begin_time=1260, end_time=360,
+        mode="off", dry_run=False,
+    ))
+    assert "error" not in result, result
+    sent = ai_plus_client.update_advance_automation.call_args.args[1]
+    assert sent["currentMode"] == 1, "legacy 2 here reads as ON on a devType-20 controller"
+
+
+async def test_legacy_write_sites_still_emit_the_legacy_off_code(mock_client):
+    """The mirror of the two above: legacy must not move."""
+    mock_client.get_advance_automations.return_value = [{
+        "advId": 6001, "advName": "Night", "isOn": 1, "runState": 1, "currentMode": 1,
+        "onSpeed": 5, "offSpeed": 0, "grouptDevType": 1, "advKey": "1-0",
+        "beginTime": 1260, "endTime": 360, "onTimeSwitch": 0, "switchTime": 127,
+        "groupNums": 1, "sortType": 6, "subNumber": 0, "subNumberSort": 0,
+    }]
+    await add_automation_rule(
+        "C58ZA", "Night", [1], begin_time=1260, end_time=360, mode="off", dry_run=False,
+    )
+    assert mock_client.create_advance_automation.call_args.args[1]["currentMode"] == 2
+
+
+# ---- The preview must be the payload that gets sent ----
+
+
+async def test_preview_payload_matches_the_sent_payload(ai_plus_client):
+    """The preview is built with port_type=0 to stay read-free (#300), and the code comment
+    promises that is the only difference. Nothing asserted it, so the preview could drift
+    from reality — which would re-hide the class of bug the preview exists to expose.
+    With no existing rule on the port, resolve_port_type also yields 0, so they match
+    exactly; the divergent case is the test below."""
+    args = (AI_PLUS_CODE, "Lights Off")
+    kwargs = dict(on_speed=1, port=1, mode="off")
+    preview = json.loads(await create_advance_automation(*args, **kwargs, dry_run=True))
+    await create_advance_automation(*args, **kwargs, dry_run=False)
+    sent = ai_plus_client.create_advance_automation.call_args.args[1]
+
+    assert _differing(preview["payload"], sent) == set()
+    assert preview["payload"]["currentMode"] == sent["currentMode"] == 1
+
+
+def _differing(a: dict, b: dict) -> set:
+    return {k for k in set(a) | set(b) if a.get(k) != b.get(k)}
+
+
+async def test_preview_diverges_from_the_sent_payload_in_port_type_alone(ai_plus_client):
+    """With an existing outlet rule on the port, the live path resolves portType=1 while the
+    preview keeps 0. That one field is the whole permitted difference — anything else means
+    the preview stopped predicting the write, and `currentMode` must be identical."""
+    ai_plus_client.get_advance_automations.return_value = [
+        _ai_plus_entry(grouptDevType=1, portType=1)
+    ]
+    args, kwargs = (AI_PLUS_CODE, "Lights Off"), dict(on_speed=1, port=1, mode="off")
+    preview = json.loads(await create_advance_automation(*args, **kwargs, dry_run=True))
+    await create_advance_automation(*args, **kwargs, dry_run=False)
+    sent = ai_plus_client.create_advance_automation.call_args.args[1]
+
+    assert preview["payload"]["portType"] == 0
+    assert sent["portType"] == 1
+    assert _differing(preview["payload"], sent) == {"portType"}
+    assert preview["payload"]["currentMode"] == sent["currentMode"] == 1
+
+
+# ---- Off-rule summary must not contradict itself ----
+
+
+async def test_off_rule_human_summary_does_not_say_off_and_enabled(ai_plus_client):
+    """`_decode_rule` renders an Off rule's control as the bare word "off", which composed
+    into "'Lights' off, currently enabled." — two words that contradict each other in one
+    sentence, on the exact rule type that started #326. A grower reading it as "this
+    automation isn't doing anything" switches the port on manually and fights it."""
+    ai_plus_client.get_advance_automations.return_value = [_ai_plus_entry(currentMode=1)]
+    data = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
+    assert data["human_summary"] == "'Lights' holds its port off. Currently enabled."
+
+
+async def test_legacy_off_rule_human_summary_matches(mock_client):
+    mock_client.get_advance_automations.return_value = [{
+        "advId": 6002, "advName": "Kill Switch", "isOn": 1, "runState": 1, "currentMode": 2,
+        "onSpeed": 0, "offSpeed": 0, "grouptDevType": 1, "advKey": "1-0",
+        "beginTime": 255, "endTime": 255, "onTimeSwitch": 1, "switchTime": 255,
+    }]
+    data = json.loads(await get_advance_automation("C58ZA", "6002"))
+    assert data["human_summary"] == "'Kill Switch' holds its port off. Currently enabled."
+
+
+# ---- Port label must not double ----
+
+
+async def test_create_preview_does_not_double_an_unnamed_port_label(ai_plus_client):
+    """`port_name` already falls back to "Port N", so f"{port_name} (Port {port})" produced
+    "Port 3 (Port 3)". The codebase has fought this before — test_server.py asserts against
+    the same doubling on human_summary."""
+    device = copy.deepcopy(AI_PLUS_DEVICE)
+    device["deviceInfo"]["ports"] = [{"port": 3, "portName": "", "speak": 0, "portsLoad": 0}]
+    ai_plus_client.get_devices.return_value = [device]
+    data = json.loads(await create_advance_automation(
+        AI_PLUS_CODE, "Lights Off", on_speed=1, port=3, mode="off", dry_run=True,
+    ))
+    assert data["rule"]["ports"] == "Port 3"
+
+
+async def test_create_preview_keeps_name_and_number_for_a_named_port(ai_plus_client):
+    data = json.loads(await create_advance_automation(
+        AI_PLUS_CODE, "Lights Off", on_speed=1, port=1, mode="off", dry_run=True,
+    ))
+    assert data["rule"]["ports"] == "Fan Port (Port 1)"

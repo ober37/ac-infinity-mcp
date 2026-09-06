@@ -33,6 +33,7 @@ from ac_infinity_mcp.automation import (
     _RAIL_TEMP_LOW_F,
     _RAIL_VPD_HIGH,
     _RAIL_VPD_LOW,
+    UNRECOGNIZED_RULE,
     _build_advance_conflict_response,
     _decode_rule,  # noqa: F401 — re-exported for test compatibility
     _find_governing_automation,
@@ -296,11 +297,34 @@ _MODETYE_NO_TARGET = 0
 def _ctype(device: dict | None) -> ControllerType:
     """Resolve the controller class for the Groups mode tables (#326, #328).
 
-    Every caller holds a full devInfoListAll entry from `_get_device`, so this never
-    guesses. `detect_controller_type` covers both `devType >= 20` and the
-    `newFrameworkDevice` flag, so devType 21 resolves correctly without a second list.
+    Every live caller holds a full devInfoListAll entry from `_get_device`.
+    `detect_controller_type` covers both `devType >= 20` and the `newFrameworkDevice`
+    flag, so devType 21 resolves correctly without a second list.
+
+    `device` is Optional only for the eight ADVANCE-conflict handlers, which bind it to
+    None before their `try` so mypy cannot see the `assert device is not None` inside.
+    A genuine None means the device fetch itself failed, so LEGACY is a guess — it is
+    logged rather than applied silently. Guessing this class in silence is the shape of
+    #326, and these paths render text a grower acts on.
     """
-    return detect_controller_type(device or {})
+    if device is None:
+        logger.warning("Controller class unresolved (no device); assuming legacy")
+        return ControllerType.LEGACY
+    return detect_controller_type(device)
+
+
+def _log_groups_write(tool: str, device_id: str, device: dict, mode: str, payload: dict) -> None:
+    """Record which class table produced which wire value, once per Groups write.
+
+    #326 had to be diagnosed on live hardware by a human looking at a light fixture,
+    because nothing recorded the `currentMode` actually sent. Three scalars plus a mode
+    string already validated against `_RULE_MODES` — never the payload dict itself, which
+    carries device identifiers.
+    """
+    logger.info(
+        "%s: device=%s class=%s mode=%s currentMode=%s",
+        tool, device_id, _ctype(device).value, mode, payload.get("currentMode"),
+    )
 
 
 def _ports_without_target_support(device: dict, ports: list[int]) -> list[int]:
@@ -3734,16 +3758,38 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
 
         if len(port_groups) == 1:
             speed = port_groups[0]["on_speed"]
-            # #328: for anything but a plain On rule the speed-only wording states the
-            # wrong thing — a cycle, auto or VPD rule was summarised as "runs at speed N",
-            # hiding the trigger entirely. Substitute the decoded control, which already
-            # carries its own speed and window (so the "from X to Y" suffix goes with it).
-            # On rules keep the existing wording byte-for-byte. The multi-group branch below
-            # is unchanged: N rules with N controls needs a stated tie-break first (#341).
+            # #328: for anything but a plain On rule the speed-only wording states the wrong
+            # thing — a cycle, auto or VPD rule was summarised as "runs at speed N", hiding
+            # the trigger entirely. Substitute the decoded control, which carries its own
+            # speed and window. On rules keep the existing wording byte-for-byte. The
+            # multi-group branch below is unchanged: N rules with N controls needs a stated
+            # tie-break first (#341).
             _rule0 = port_groups[0].get("rule") or {}
+            _mode0 = _rule0.get("mode")
             _control0 = _rule0.get("control")
-            if _rule0.get("mode") not in (None, "on", "unknown") and _control0:
-                human_summary = f"'{name}' {_control0}, currently {state_str}."
+            # _decode_schedule renders the window with no timezone, so the qualifier the
+            # replaced branches carried has to be re-attached here — this is the one line
+            # Claude reads aloud.
+            _control_tz = _tz_suffix if is_scheduled else ""
+            if _mode0 == "off":
+                # _decode_rule's control for an Off rule is the bare word "off", which
+                # composes to "'X' off, currently enabled." — two words that contradict each
+                # other in one sentence, on the exact rule type that started #326. Say what
+                # the rule enforces instead of echoing its mode.
+                _port_word = "port" if len(governed_ports) == 1 else "ports"
+                human_summary = (
+                    f"'{name}' holds its {_port_word} off. Currently {state_str}."
+                )
+            elif _mode0 == "unknown":
+                # Never fall through to the speed wording here: it would assert
+                # "runs continuously at speed N" in the same response whose rule list says
+                # the rule cannot be read. Confidently wrong is what #328 was about.
+                human_summary = (
+                    f"'{name}' uses a rule type I don't recognize yet — check this one in"
+                    f" the AC Infinity app. Currently {state_str}."
+                )
+            elif _mode0 not in (None, "on") and _control0:
+                human_summary = f"'{name}' — {_control0}{_control_tz}. Currently {state_str}."
             elif is_scheduled and begin_str and end_str:
                 human_summary = (
                     f"'{name}' runs at speed {speed} from {begin_str} to {end_str}"
@@ -3792,7 +3838,7 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
                                  _pg_ports)
                     if _pg_ports else "Unknown"
                 ),
-                "control": _rule.get("control", "unknown rule type"),
+                "control": _rule.get("control", UNRECOGNIZED_RULE),
                 "speed": pg.get("on_speed"),
                 "window": _rule_window_str(
                     pg.get("begin_time"), pg.get("end_time"), _tz_label,
@@ -4133,9 +4179,15 @@ async def create_advance_automation(
     Returns:
         JSON with action, name, port, port_name, on_speed, min_speed (the port's
         configured minimum speed — used when the automation is inactive), begin_time,
-        end_time, schedule_summary, dry_run, sent. Live responses also include
-        automation_id (for programmatic chaining — do not surface to the user; use
-        ``name`` instead). On failure returns ``{"error": "..."}``.
+        end_time, schedule_summary, dry_run, sent. Preview responses also include
+        ``rule`` (the decoded rule as the grower will hear it: ports, control, _mode) and
+        ``payload`` — the wire dict that would be sent, for verification only, never to be
+        read back to the user. Its ``currentMode`` is the one field that proves the right
+        controller-class table was used; ``mode`` and ``control`` cannot, because one
+        echoes the caller and the other is decoded from what was just encoded (#326).
+        The preview payload differs from the sent one in ``portType`` alone. Live
+        responses also include automation_id (for programmatic chaining — do not surface
+        to the user; use ``name`` instead). On failure returns ``{"error": "..."}``.
         When the specified port does not exist on the device, returns
         ``{"error": "Port N not found on device X", "available_ports": [{"port": N,
         "name": "..."}], "suggested_reply": "..."}``. Port names absent or empty in
@@ -4297,11 +4349,13 @@ async def create_advance_automation(
                 "end_time": disp_end,
                 "schedule_summary": schedule_summary,
                 "rule": {
-                    "ports": f"{port_name} (Port {port})",
+                    "ports": _port_label_for(_build_port_name_map(device), port),
                     "control": preview_decoded["control"],
                     "_mode": preview_decoded["mode"],
                 },
-                "payload": {"currentMode": preview["currentMode"]},
+                # The full wire dict, matching what every other dry-run write tool returns
+                # under this key. `currentMode` is the field the class fix is about.
+                "payload": preview,
                 "dry_run": True,
                 "sent": False,
                 "note": (
@@ -4348,6 +4402,7 @@ async def create_advance_automation(
             **build_extra,
         )
 
+        _log_groups_write("create_advance_automation", device_id, device, mode, payload)
         result = await asyncio.to_thread(_client().create_advance_automation, str(dev_id), payload)
         adv_id = result.get("advId")
         if not adv_id:
@@ -4792,6 +4847,7 @@ async def add_automation_rule(
                 "note": "Preview only — nothing sent yet. Confirm to add this rule.",
             })
 
+        _log_groups_write("add_automation_rule", device_id, device, decoded["mode"], payload)
         try:
             await asyncio.to_thread(_client().create_advance_automation, str(dev_id), payload)
         except ACInfinityAPIError as e:
@@ -5238,6 +5294,7 @@ async def update_automation_rule(
                 ),
             })
         body["advId"] = match_now.get("advId")
+        _log_groups_write("update_automation_rule", device_id, device, effective_mode, body)
         try:
             await asyncio.to_thread(_client().update_advance_automation, str(dev_id), body)
         except ACInfinityAPIError as e:

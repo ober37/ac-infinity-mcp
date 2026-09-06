@@ -7537,6 +7537,7 @@ async def test_get_advance_automation_single_group_no_schedule(mock_client):
             "runState": 1,
             "beginTime": 255,
             "endTime": 255,
+            "currentMode": 1,  # legacy On — real getGroups entries always carry it
         }
     ]
     mock_client.get_advance_automations.return_value = single_no_schedule

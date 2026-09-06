@@ -20,6 +20,7 @@ MOCK_ADVANCE_AUTOMATIONS_LIST = [
         "beginTime": 255,
         "endTime": 255,
         "onTimeSwitch": 0,
+        "currentMode": 1,  # legacy On (#326/#328)
     },
     {
         "advId": 2179295,
@@ -33,6 +34,7 @@ MOCK_ADVANCE_AUTOMATIONS_LIST = [
         "beginTime": 255,
         "endTime": 255,
         "onTimeSwitch": 0,
+        "currentMode": 1,  # legacy On (#326/#328)
     },
     {
         "advId": 999001,
@@ -46,6 +48,7 @@ MOCK_ADVANCE_AUTOMATIONS_LIST = [
         "beginTime": 540,
         "endTime": 1020,
         "onTimeSwitch": 0,
+        "currentMode": 1,  # legacy On (#326/#328)
     },
 ]
 
@@ -134,5 +137,6 @@ MOCK_ADVANCE_AUTOMATIONS_SINGLE = [
         "beginTime": 540,
         "endTime": 1020,
         "onTimeSwitch": 0,
+        "currentMode": 1,  # legacy On (#326/#328)
     },
 ]
