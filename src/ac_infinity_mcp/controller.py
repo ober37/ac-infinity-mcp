@@ -25,11 +25,30 @@ def detect_controller_type(device_data: dict[str, Any]) -> ControllerType:
 
     Legacy: devType in {11, 18} or newFrameworkDevice == False
     New framework: devType >= 20 or newFrameworkDevice == True
-    """
-    dev_type = device_data.get("devType", 0)
-    new_framework = device_data.get("newFrameworkDevice", False)
 
-    if new_framework or dev_type >= 20:
+    Total by construction: never raises, whatever ``devType`` holds. It gates
+    ``_ai_plus_write_held`` in the server layer, and several of those gates sit
+    outside the try/except that wraps their tool body, so a ``TypeError`` here
+    escapes as an unhandled exception rather than a grower-readable error. A
+    numeric string ("20") is coerced and classified normally; anything that
+    cannot be read as a number falls back to LEGACY, which is the same answer an
+    absent devType has always produced via the ``0`` default.
+    """
+    if device_data.get("newFrameworkDevice", False):
+        return ControllerType.NEW_FRAMEWORK
+
+    raw_dev_type = device_data.get("devType", 0)
+    try:
+        dev_type = int(raw_dev_type)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Unreadable devType %r in device data — treating as legacy. If AI+ "
+            "payload handling is not being applied to a new controller, this is "
+            "the reason.", raw_dev_type,
+        )
+        return ControllerType.LEGACY
+
+    if dev_type >= 20:
         return ControllerType.NEW_FRAMEWORK
     return ControllerType.LEGACY
 

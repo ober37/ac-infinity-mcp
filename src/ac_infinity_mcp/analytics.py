@@ -12,6 +12,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+# Lives in schema.py, not here: client.py enforces it on the write path, and a
+# client -> analytics import would point the low-level layer at the high-level one.
+from ac_infinity_mcp.schema import TOGGLE_LOAD_TYPES as _TOGGLE_LOAD_TYPES
+
 logger = logging.getLogger(__name__)
 
 _DURATION_RE = re.compile(r"^(\d+)(m|h|d)$", re.IGNORECASE)
@@ -33,10 +37,6 @@ STAGE_TARGETS: dict[str, dict[str, tuple[float, float]]] = {
 }
 
 _DEFAULT_STAGE = "veg"
-
-# AC Infinity loadType values for toggle hardware (heaters, lights, humidifiers).
-# These devices always emit speed=1 in the history API even when physically OFF.
-_TOGGLE_LOAD_TYPES: frozenset[int] = frozenset({4, 128})
 
 # Minimum number of consecutive readings a state must persist to count as a real transition.
 # Single-reading blips at automation window boundaries are API artifacts (Quirk 22).
@@ -349,7 +349,7 @@ def build_activity_report(
 
         # Detect toggle-device history artifact: AC Infinity always emits nibble 0xF
         # (decoded speed=1) for heaters/lights/humidifiers, even when physically off.
-        # Confirmed toggle hardware (loadType 4/128) is sufficient. For _ZERO_LOAD_DEV_TYPES,
+        # Confirmed toggle hardware (_TOGGLE_LOAD_TYPES) is sufficient. For _ZERO_LOAD_DEV_TYPES,
         # loadType is also unreliable (Quirk 24), so the pattern alone is used instead —
         # a variable-speed device stuck at speed 1 is indistinguishable, but that is an
         # acceptable trade-off given the load signal is completely absent on these devices.
@@ -451,7 +451,7 @@ def build_activity_report(
         ):
             continue
         # Rule D: non-toggle named port with speed history ≤ 1 and no current draw.
-        # Confirmed toggle hardware (loadType 4/128) with transitions > 0 is exempt —
+        # Confirmed toggle hardware (_TOGGLE_LOAD_TYPES) with transitions > 0 is exempt —
         # it ran and the grower should see the data. The data_quality early-exit above
         # handles the 100%-uptime constant-speed artifact for toggle hardware. Any
         # non-toggle port reaching this point with avg_speed ≤ 1.0 and zero load is a

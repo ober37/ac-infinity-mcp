@@ -9,6 +9,7 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 
 from ac_infinity_mcp.controller import ControllerType, build_write_payload, detect_controller_type
 from ac_infinity_mcp.schema import (
+    TOGGLE_LOAD_TYPES,
     ACInfinityAdvanceConflictError,
     ACInfinityAPIError,
     ACInfinityAuthError,
@@ -16,6 +17,42 @@ from ac_infinity_mcp.schema import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# App-identity headers
+#
+# This client declares two different app identities to the same host, each
+# captured from a different AC Infinity app build. They are deliberately not
+# unified: each was observed being accepted on the endpoints it is used for, and
+# we have no capture proving either is accepted everywhere.
+#
+#   _LOGIN_UA           -> /user/appUserLogin only. Phase-1 capture, app 1.8.2.
+#   okhttp/3.10.0       -> v1 reads and all writes. Upstream default, unchanged.
+#   _V2_APP_VERSION     -> v2 automation endpoints (_v2_headers), app 2.0.4.
+#   _AI_PLUS_MINVERSION -> AI+ (devType >= 20) writes. NOT an app identity — an
+#                          opaque server-side gate. See Quirk 14 and below.
+#
+# docs/SECURITY-RISKS.md documents the UA-spoofing posture and locks these
+# values with exact-value regression tests. The AI+ write path deliberately
+# spoofs no User-Agent at all, so it adds no row to that table.
+# ---------------------------------------------------------------------------
+_LOGIN_UA = "ACController/1.8.2 (com.acinfinity.humiture; build:489; iOS 16.5.1)"
+
+_V2_APP_VERSION = "2.0.4"
+
+# AI+ (devType >= 20) port writes are gated on a single header: `minversion`,
+# which must be the exact string "3.5". Nothing else is required — not a spoofed
+# User-Agent, not `appVersion`, not `phoneType`. Ablated against live devType-20
+# hardware with a no-op write (Quirk 14 carries the full matrix and its coverage
+# gaps): `minversion: "3.5"` alone against the stock okhttp header set returns
+# 200, and all three tested combinations that omit it — including the full iOS
+# triple — return 100001.
+#
+# Despite the name it is NOT a minimum-version comparison. "3.4", "3.6", "3",
+# "3.50", "3.5.0", "" and "99.9" all fail — a higher value fails just as a lower
+# one does, so the server is matching the literal string, not parsing a version.
+# Treat it as an opaque magic constant, not a number to bump.
+_AI_PLUS_MINVERSION = "3.5"
 
 # Maps AC Infinity sensorType → (grower-readable label, unit). The unit is a
 # property of the sensorType itself: AC Infinity assigns a distinct type per unit
@@ -830,7 +867,7 @@ class ACInfinityClient:
         }
         headers = {
             "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
-            "User-Agent": "ACController/1.8.2 (com.acinfinity.humiture; build:489; iOS 16.5.1)",
+            "User-Agent": _LOGIN_UA,
         }
 
         resp = self.session.post(self.LOGIN_ENDPOINT, data=data, headers=headers, timeout=10)
@@ -1139,8 +1176,8 @@ class ACInfinityClient:
             updates: Fields to change, e.g. {"onSpead": 5}.
             dry_run: If True (default), build and return the payload without sending.
             require_variable_speed: If True, raise ACInfinityDeviceError when the port's
-                loadType indicates on/off hardware (loadType=4 or 128). Pass True from
-                set_port_speed; leave False for set_port_on/set_port_off.
+                loadType indicates toggle (on/off) hardware — see TOGGLE_LOAD_TYPES.
+                Pass True from set_port_speed; leave False for set_port_on/set_port_off.
 
         Returns:
             Dict with keys:
@@ -1148,7 +1185,7 @@ class ACInfinityClient:
                 "dry_run": bool
                 "controller_type": "legacy" or "new_framework"
                 "sent": bool (True only when dry_run=False and HTTP succeeded)
-                "ai_plus_write_unsupported": bool (True when AI+ live write attempted)
+                "prior_at_type": the port's atType before the write, or None
 
         Raises:
             ACInfinityAuthError: If not authenticated.
@@ -1182,19 +1219,50 @@ class ACInfinityClient:
 
         current_settings = self.get_mode_settings(dev_id, port)
 
-        # Guard: smart automation mode cannot be overridden via the write API (returns 999999)
-        # Only fire when isOpenAutomation != 0 (absent field defaults to 1 = assume active).
+        # Guard: smart automation mode cannot be overridden via the write API (returns 999999).
+        # Absent isOpenAutomation defaults to 1 (assume active) in both branches — safe-fail.
         mode_type = current_settings.get("modeType")
-        if mode_type == 15 and current_settings.get("isOpenAutomation", 1) != 0:
+        if controller_type == ControllerType.NEW_FRAMEWORK:
+            # Quirk 35: on AI+, modeType echoes the port's atType (SCHEDULE -> 0,
+            # CYCLE -> 1, OFF/ON/AUTO -> 15, agreeing across devType 20 and 22). It
+            # carries mode state, not an ADVANCE signal, so requiring modeType == 15
+            # here would gate the guard on an unrelated field — and because live AI+
+            # controllers report isOpenAutomation = 0 on every port, the combined
+            # legacy condition could never fire at all. isOpenAutomation alone is
+            # authoritative here.
+            open_automation = current_settings.get("isOpenAutomation")
+            if open_automation is None:
+                # Safe-fail: absent means "assume active". Logged because the failure
+                # is otherwise undiagnosable — every caller routes this exception to
+                # _build_advance_conflict_response, so the grower is told to release an
+                # automation rather than that a field went missing. If a firmware or
+                # endpoint revision drops isOpenAutomation, AI+ writes stop wholesale
+                # and this line is the only signal saying why.
+                logger.warning(
+                    "isOpenAutomation absent from getdevModeSettingList for devId=%s "
+                    "port=%s — refusing the write (safe-fail). If AI+ writes have "
+                    "stopped working across the board, start here.", dev_id, port,
+                )
+            if (1 if open_automation is None else open_automation) != 0:
+                raise ACInfinityAdvanceConflictError(
+                    f"Port {port} on device {dev_id} is under Advance Automation control "
+                    "(isOpenAutomation != 0) — cannot override manually."
+                )
+        elif mode_type == 15 and current_settings.get("isOpenAutomation", 1) != 0:
             raise ACInfinityAdvanceConflictError(
                 f"Port {port} on device {dev_id} is in smart automation mode (modeType=15) — "
                 "cannot override manually."
             )
 
-        # Guard: on/off hardware (loadType=4 or 128) rejects speed writes with 999999.
+        # Guard: toggle (on/off) hardware rejects speed writes with 999999.
         # Only enforced when require_variable_speed=True (i.e. called from set_port_speed).
+        # TOGGLE_LOAD_TYPES is shared with analytics.py so the two layers cannot drift;
+        # 129 and 132 were added after they were observed on live devType-22 lights and
+        # heat pads. This guard has always run for every controller type — only the set
+        # membership changed — so a legacy 132/129 port now raises here instead of POSTing
+        # and surfacing the 999999 as a misleading ADVANCE conflict.
         load_type = current_settings.get("loadType", 0)
-        if require_variable_speed and load_type in (4, 128):
+        if require_variable_speed and load_type in TOGGLE_LOAD_TYPES:
             raise ACInfinityDeviceError(
                 f"Port {port} is an on/off device (loadType={load_type}) — "
                 "use set_port_on or set_port_off instead of set_port_speed."
@@ -1207,7 +1275,11 @@ class ACInfinityClient:
             "dry_run": dry_run,
             "controller_type": controller_type.value,
             "sent": False,
-            "prior_mode_type": current_settings.get("atType"),
+            # Deliberately an atType (1=OFF, 2=ON, 3=AUTO, 7=SCHEDULE, 8=VPD), not a
+            # modeType — the server layer uses it to warn when a speed was stored on a
+            # port left in OFF mode. Named prior_mode_type until #308; renamed because
+            # modeType now carries real per-port state on AI+ (Quirk 35).
+            "prior_at_type": current_settings.get("atType"),
         }
 
         if dry_run:
@@ -1217,21 +1289,34 @@ class ACInfinityClient:
             )
             return result
 
-        # AI+ live write path is not yet implemented — addDevMode returns 100001 for devType=22
-        # and no alternative endpoint has been identified. dry_run=True is fully supported.
-        if controller_type == ControllerType.NEW_FRAMEWORK:
-            logger.warning(
-                "AI+ live write attempted for devId=%s port=%s — not yet supported", dev_id, port
-            )
-            result["ai_plus_write_unsupported"] = True
-            return result
-
         headers = {
             "token": self.token,
             "Host": "www.acinfinityserver.com",
             "User-Agent": "okhttp/3.10.0",
             "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
         }
+        if controller_type == ControllerType.NEW_FRAMEWORK:
+            # Quirk 14: AI+ rejects the stock okhttp header set with 100001 even
+            # given a correct payload. This one header is the entire fix; the
+            # ordinary merged read-before-write payload then succeeds for manual
+            # control and automation targets alike.
+            #
+            # Ablated on live devType-20 hardware, no-op write to an idle port
+            # (8 of the 16 header subsets; the three minversion-plus-one pairs
+            # were not run — see Quirk 14):
+            #   okhttp headers only                       -> 100001
+            #   appVersion alone                          -> 100001
+            #   iOS UA + phoneType + appVersion, no
+            #     minversion                              -> 100001
+            #   minversion="3.5" only                     -> 200
+            #   minversion + any two of the other three   -> 200
+            #   all four                                  -> 200
+            #
+            # The three headers an earlier revision also sent (a spoofed iOS
+            # User-Agent, phoneType, appVersion) are all droppable and are not
+            # sent: each one we declare is surface for the kind of server-side
+            # tightening that broke the v2 endpoints in #298.
+            headers["minversion"] = _AI_PLUS_MINVERSION
 
         # Retry loop: 403 "Data saving failed" = rate limit; back off and retry.
         # Other error codes fail immediately (auth, field validation, etc.).
@@ -1271,13 +1356,70 @@ class ACInfinityClient:
             # exception handler routes to _build_advance_conflict_response instead of the
             # generic ACInfinityAPIError path.
             if code == 999999:
+                # 999999 correlates strongly with an empty port: no-op writes across
+                # 12 ports on two controllers had every portResistance == 65535 port
+                # return 999999 and every connected port return 200, on a devType-11
+                # controller with zero Advance Automations. Recorded as Quirk 37.
+                #
+                # We deliberately do NOT branch on portResistance to report that here.
+                # Per #315 the field is a frozen 15800 on devType 22 — so the check
+                # would never fire on the controller family this change enables, while
+                # firing on legacy ports that do have equipment attached (Quirk 26: a
+                # device with its own power switch off still reads 65535). Detection
+                # needs the uniformity test from #315, which serves this call site,
+                # ports.py::_is_port_empty and the readings path together.
+
+                # 999999 is overloaded: it is also what toggle hardware returns when
+                # it rejects a speed write. On a speed write the pre-write
+                # TOGGLE_LOAD_TYPES guard has already cleared this port, so its
+                # loadType did not identify it as toggle hardware.
+                #
+                # Scoped to NEW_FRAMEWORK deliberately. The reroute is only justified
+                # where loadType is untrustworthy: Quirk 24 documents it as unreliable
+                # on devType 18/22 and Quirk 34 records devType 20 reporting 0 even for
+                # outlet ports. On legacy controllers loadType is dependable, so a
+                # cleared guard plus a 999999 really is more likely an ADVANCE conflict,
+                # and rerouting there would regress the conflict UX for no gain.
+                if (require_variable_speed
+                        and controller_type == ControllerType.NEW_FRAMEWORK):
+                    logger.warning(
+                        "Write returned code 999999 on a speed write for devId=%s port=%s "
+                        "(loadType=%s) — reporting as on/off hardware, not ADVANCE conflict",
+                        dev_id, port, load_type,
+                    )
+                    raise ACInfinityDeviceError(
+                        f"Port {port} on device {dev_id} rejected the speed write "
+                        f"(code 999999). Most often that means nothing is plugged "
+                        f"into port {port} — check the cable before anything else. "
+                        "Otherwise the port is on/off hardware that cannot take a "
+                        "speed (use set_port_on or set_port_off), or it is under "
+                        "Advance Automation control."
+                    )
                 logger.warning(
                     "Write returned code 999999 (ADVANCE conflict) for devId=%s port=%s",
                     dev_id, port,
                 )
                 raise ACInfinityAdvanceConflictError(
-                    f"Port {port} on device {dev_id} rejected write with code 999999 — "
-                    "port is under Advance Automation control."
+                    f"Port {port} on device {dev_id} rejected the write (code 999999). "
+                    f"The most common cause is that nothing is plugged into port {port} "
+                    "(Quirk 37) — check that first. If something is connected, the port "
+                    "is under Advance Automation control."
+                )
+
+            # AI+ writes are gated on the minversion header (Quirk 14). If AC Infinity
+            # ever stops honouring the value we send, every AI+ write starts returning
+            # 100001 — a generic code whose default handling gives the grower nothing to
+            # act on. Name the cause and point at the path that still works.
+            if code == 100001 and controller_type == ControllerType.NEW_FRAMEWORK:
+                logger.error(
+                    "AI+ write rejected with 100001 for devId=%s port=%s — the minversion "
+                    "gate may have changed server-side", dev_id, port,
+                )
+                raise ACInfinityDeviceError(
+                    f"Device {dev_id} rejected the write (code 100001). AC Infinity gates "
+                    "AI+ port writes on a header value that this client sends as "
+                    f"{_AI_PLUS_MINVERSION!r}; the server may no longer accept it. Reads "
+                    "and previews are unaffected. Please report this upstream."
                 )
 
             logger.error("Write failed for devId=%s port=%s: %s", dev_id, port, error_msg)
@@ -1319,7 +1461,7 @@ class ACInfinityClient:
             "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
             "phoneType": "1",
             "devType": "18",
-            "appVersion": "2.0.4",
+            "appVersion": _V2_APP_VERSION,
             "languageType": "en-US",
             "languageVersion": "idongle_pro_3",
         }
