@@ -87,13 +87,15 @@ def groups_mode_name(controller_type: ControllerType, code: object) -> str | Non
 
     None means "this class does not define that code" — the caller renders it as an
     unrecognised rule rather than guessing.
+
+    Matching is strict: only a real `int` resolves. The API sends this field as an integer,
+    and pre-#328 the decoder compared it with `==` against int literals, so a string, float
+    or bool has always read as unrecognised. Coercing here would be a silent behaviour
+    change on a field that decides whether a grower is told their equipment is on or off.
     """
-    if not isinstance(code, (int, str)) or isinstance(code, bool):
+    if type(code) is not int:
         return None
-    try:
-        return _GROUPS_MODE_NAMES[controller_type].get(int(code))
-    except (TypeError, ValueError):
-        return None
+    return _GROUPS_MODE_NAMES[controller_type].get(code)
 
 
 def build_write_payload(

@@ -3734,7 +3734,17 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
 
         if len(port_groups) == 1:
             speed = port_groups[0]["on_speed"]
-            if is_scheduled and begin_str and end_str:
+            # #328: for anything but a plain On rule the speed-only wording states the
+            # wrong thing — a cycle, auto or VPD rule was summarised as "runs at speed N",
+            # hiding the trigger entirely. Substitute the decoded control, which already
+            # carries its own speed and window (so the "from X to Y" suffix goes with it).
+            # On rules keep the existing wording byte-for-byte. The multi-group branch below
+            # is unchanged: N rules with N controls needs a stated tie-break first (#341).
+            _rule0 = port_groups[0].get("rule") or {}
+            _control0 = _rule0.get("control")
+            if _rule0.get("mode") not in (None, "on", "unknown") and _control0:
+                human_summary = f"'{name}' {_control0}, currently {state_str}."
+            elif is_scheduled and begin_str and end_str:
                 human_summary = (
                     f"'{name}' runs at speed {speed} from {begin_str} to {end_str}"
                     f"{_tz_suffix}, currently {state_str}."
@@ -4247,7 +4257,35 @@ async def create_advance_automation(
             disp_begin = _format_schedule_time(begin_time)
             disp_end = _format_schedule_time(end_time)
 
+        # #287: continuous → switch_time 255 (the 24/7 toggle), else the default day schedule.
+        build_extra = {k: v for k, v in rule_kwargs.items() if k not in ("min_level", "max_level")}
+        if create_continuous:
+            build_extra["switch_time"] = _days_to_switchtime(None, True)
+
         if dry_run:
+            # #326: the preview must show the wire value, not just the mode the caller asked
+            # for. `mode` echoes the input and `control` is decoded from what we just encoded
+            # — both read "off" whether the class table is right or wrong, which is how the
+            # off-writes-ON bug stayed hidden. `payload.currentMode` is the only field that
+            # is not circular, so it is what the Gate-5 write check asserts against.
+            #
+            # Built with port_type=0: portType is resolved on the live path only (see the
+            # #300 note below), and it cannot affect currentMode. The preview payload
+            # therefore differs from the sent payload in portType alone, which keeps the
+            # preview read-free — no extra API call, no new failure surface.
+            preview = build_groups_payload(
+                dev_id=str(dev_id),
+                ports=[port],
+                clean_name=clean_name,
+                begin_time=begin_time,
+                end_time=end_time,
+                on_speed=on_speed,
+                min_level=off_speed,
+                port_type=0,
+                controller_type=_ctype(device),
+                **build_extra,
+            )
+            preview_decoded = _decode_rule(preview, controller_type=_ctype(device))
             return json.dumps({
                 "action": "create",
                 "name": clean_name,
@@ -4258,6 +4296,12 @@ async def create_advance_automation(
                 "begin_time": disp_begin,
                 "end_time": disp_end,
                 "schedule_summary": schedule_summary,
+                "rule": {
+                    "ports": f"{port_name} (Port {port})",
+                    "control": preview_decoded["control"],
+                    "_mode": preview_decoded["mode"],
+                },
+                "payload": {"currentMode": preview["currentMode"]},
                 "dry_run": True,
                 "sent": False,
                 "note": (
@@ -4270,8 +4314,9 @@ async def create_advance_automation(
         # outlet/power-adaptor rule (portType=1) isn't written as a fan rule (portType=0, phantom
         # MIN/MAX speed). Only the fetch is guarded — a getGroups read failure must never block
         # creation (best-effort, fall back to 0), while a resolver bug stays visible. Resolved
-        # on the live path only: the dry-run preview does not surface portType, so it needs no
-        # read (and gains no new failure surface).
+        # on the live path only: the dry-run preview above builds its payload with portType=0
+        # — portType cannot affect the fields the preview surfaces, so the preview needs no
+        # read (and gains no new failure surface). The two payloads differ in portType alone.
         port_type = 0
         port_type_degraded = False
         try:
@@ -4290,10 +4335,6 @@ async def create_advance_automation(
 
         # Live path: build full addGroups payload via client helper. mode="on" reproduces
         # the original single-port On-mode payload byte-for-byte (on_speed passed directly).
-        # #287: continuous → switch_time 255 (the 24/7 toggle), else the default day schedule.
-        build_extra = {k: v for k, v in rule_kwargs.items() if k not in ("min_level", "max_level")}
-        if create_continuous:
-            build_extra["switch_time"] = _days_to_switchtime(None, True)
         payload = build_groups_payload(
             dev_id=str(dev_id),
             ports=[port],
