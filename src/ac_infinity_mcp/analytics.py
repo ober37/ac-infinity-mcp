@@ -12,6 +12,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+# Lives in schema.py, not here: client.py enforces it on the write path, and a
+# client -> analytics import would point the low-level layer at the high-level one.
+from ac_infinity_mcp.schema import TOGGLE_LOAD_TYPES as _TOGGLE_LOAD_TYPES
+
 logger = logging.getLogger(__name__)
 
 _DURATION_RE = re.compile(r"^(\d+)(m|h|d)$", re.IGNORECASE)
@@ -33,23 +37,6 @@ STAGE_TARGETS: dict[str, dict[str, tuple[float, float]]] = {
 }
 
 _DEFAULT_STAGE = "veg"
-
-# AC Infinity loadType values for toggle (on/off) hardware — heaters, lights,
-# humidifiers. Two behaviours key off this set: such devices always emit speed=1
-# in the history API even when physically OFF, and they reject variable-speed
-# writes with code 999999 (see client._set_port_mode_inner).
-#
-# All four values are attested on live hardware:
-#   4, 128  — devType 11 (C58ZA)
-#   129     — devType 22 (Q0KT4) ports 2/3/5: clone lights, rack lights, heat pad
-#   132     — devType 22 (Q0KT4) port 1: clone heat pad; devType 20 toggle ports
-#
-# Deliberately a membership set, not a bitmask. 132 == 128|4 invites
-# `load_type & (4|128)`, but that would newly catch 5, 6, 12, 136, 260... on a
-# field Quirk 24 already calls unreliable for devType 18/22. Membership fails
-# safe toward letting a write through; a mask fails toward permanently refusing
-# a genuinely variable-speed port, which is unfalsifiable from the write path.
-_TOGGLE_LOAD_TYPES: frozenset[int] = frozenset({4, 128, 129, 132})
 
 # Minimum number of consecutive readings a state must persist to count as a real transition.
 # Single-reading blips at automation window boundaries are API artifacts (Quirk 22).

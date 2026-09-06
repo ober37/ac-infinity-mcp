@@ -33,6 +33,33 @@ def test_detect_controller_type_ai_plus_fixture(ai_plus_device):
     assert detect_controller_type(ai_plus_device) == ControllerType.NEW_FRAMEWORK
 
 
+# detect_controller_type is total: it gates _ai_plus_write_held in the server layer,
+# and some of those gates sit outside the try/except wrapping their tool body, so a
+# TypeError here would escape as an unhandled exception instead of a readable error.
+
+def test_detect_controller_type_numeric_string_devtype():
+    """A stringified devType still classifies — "20" is an AI+, not a legacy fallback."""
+    assert detect_controller_type({"devType": "20"}) == ControllerType.NEW_FRAMEWORK
+    assert detect_controller_type({"devType": "11"}) == ControllerType.LEGACY
+
+
+def test_detect_controller_type_none_devtype_does_not_raise():
+    """devType: None is LEGACY (the same answer an absent devType gives), never a raise."""
+    assert detect_controller_type({"devType": None}) == ControllerType.LEGACY
+
+
+def test_detect_controller_type_unparseable_devtype_does_not_raise():
+    assert detect_controller_type({"devType": "unknown"}) == ControllerType.LEGACY
+    assert detect_controller_type({"devType": []}) == ControllerType.LEGACY
+
+
+def test_detect_controller_type_flag_wins_over_unreadable_devtype():
+    """newFrameworkDevice is checked first, so it survives a garbage devType."""
+    assert detect_controller_type(
+        {"devType": None, "newFrameworkDevice": True}
+    ) == ControllerType.NEW_FRAMEWORK
+
+
 # ============ build_write_payload — AI+ path ============
 
 def test_build_write_payload_ai_plus_merges_updates():
@@ -109,13 +136,17 @@ def test_parse_ai_plus_history_record_decodes_ports():
 # with minversion present the ordinary merged read-before-write payload succeeds
 # for manual control and automation targets alike.
 #
-# Ablated one header at a time against live devType-20 hardware, no-op write to
-# an idle port (full matrix in docs/API.md Quirk 14):
+# Ablated against live devType-20 hardware, no-op write to an idle port. 8 of the
+# 16 header subsets were run; the three minversion-plus-one pairs were not. Full
+# matrix and the reasoning for why that gap is harmless: docs/API.md Quirk 14.
 #
 #   okhttp headers only ................................ 100001
-#   minversion="3.5" only .............................. 200
+#   appVersion alone ................................... 100001
 #   iOS User-Agent + phoneType + appVersion, no
 #     minversion ....................................... 100001
+#   minversion="3.5" only .............................. 200
+#   minversion + any two of the other three ............ 200
+#   all four ........................................... 200
 #
 # Despite the name it is not a version comparison: "3.4", "3.6", "3", "3.50",
 # "3.5.0", "" and "99.9" all return 100001. The server matches the literal
@@ -132,7 +163,8 @@ LEGACY_EXPECTED_HEADERS = {
 }
 
 # Every AI+ test below overrides modeType to 0. The fixture ships modeType=15,
-# which is the realistic AI+ resting value (Quirk 35) — but leaning on the
+# which is what a real AI+ port reports whenever its atType is OFF, ON or AUTO
+# (Quirk 35 — modeType echoes atType) — but leaning on the
 # fixture's incidental isOpenAutomation=0 to slip past the ADVANCE guard would
 # make these tests fail for reasons unrelated to what they assert if that field
 # ever changed. Mirrors the override in tests/common/test_client.py.

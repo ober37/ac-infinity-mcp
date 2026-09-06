@@ -55,7 +55,14 @@ Every write operation — changing a speed, toggling a port, creating an automat
 |---|---|---|
 | UIS Controller 69 Pro | ✅ | ✅ |
 | UIS Controller 69 Pro+ | ✅ | ✅ |
-| UIS Controller 89 AI+ and other AI+ controllers | ✅ | ✅ |
+| UIS Controller 89 AI+ and other AI+ controllers | ✅ | ✅ * |
+
+\* Everything you do to a **port** — turn it on or off, set a speed, set a mode, set a
+temperature, humidity or VPD automation — writes normally on AI+. Two things do not, and
+both fail loudly rather than silently: **Advance Automations** (the multi-port programs)
+cannot be created or edited on an AI+ yet, and **one-click grow stages** and **taking a
+port out of a shared automation** are deliberately held back pending hardware
+verification. See [AI+ controllers](#ai-controllers) in Section 7.
 
 ### A note on network security
 
@@ -337,7 +344,23 @@ Claude will describe the change, tell you what it's changing from, and wait for 
 
 ### AI+ controllers
 
-If you have an AI+ controller (like the 89 AI+), reads, previews and live changes all work — the same as on the 69 Pro. AI+ controllers speak a newer protocol, which this server handles for you.
+If you have an AI+ controller (like the 89 AI+), reads and previews work exactly as they do
+on a 69 Pro, and so do live changes to any individual port — on/off, speed, mode, and the
+temperature, humidity and VPD automations. AI+ controllers speak a newer protocol, which
+this server handles for you.
+
+Two things are not there yet. Neither one fails quietly — if you ask for either, you get
+told why:
+
+- **Advance Automations** (the named programs that govern several ports at once) can be
+  read and previewed on an AI+, but creating or editing one does not go through. The cause
+  is understood and the fix is in review (#290); until it lands, set those up in the AC
+  Infinity app and this server will read them back correctly.
+- **One-click grow stages** and **taking a single port out of a shared automation** are
+  held back on purpose (#316). The first would report saving fallback limits that the
+  controller quietly discards; the second switches several ports at once and cannot yet
+  put them back safely if one of those switches fails partway. Previews of both work
+  normally, so you can still see exactly what they would do.
 
 ---
 
@@ -667,7 +690,19 @@ Check the `AC_INFINITY_EMAIL` and `AC_INFINITY_PASSWORD` values in your config f
 Verify your credentials are correct and check that your devices are paired in the AC Infinity app. If you just added a new device, try asking again — it can take a moment to appear.
 
 **AI+ write errors**
-AI+ controllers (like the 89 AI+) support live changes. If a write fails with code `100001`, AC Infinity has changed the server-side gate this server relies on — reads and previews keep working. Please open an issue if you hit it.
+AI+ controllers (like the 89 AI+) support live changes to individual ports. If a write
+fails with code `100001`, AC Infinity has changed the server-side gate this server relies
+on — reads and previews keep working. Please open an issue if you hit it.
+
+**"I can't do that on this controller yet" on an AI+**
+That is a deliberate hold, not a failure — the two capabilities it covers are listed under
+[AI+ controllers](#ai-controllers) in Section 7, along with what to do instead. Nothing was
+written to your controller, and previewing the same action still works.
+
+**An Advance Automation won't save on an AI+**
+Creating or editing a multi-port Advance Automation does not go through on AI+ controllers
+yet (#290) — it hangs rather than erroring. Set the program up in the AC Infinity app; this
+server reads it back, enables and disables it correctly.
 
 **HTTP security note**
 The AC Infinity API doesn't use HTTPS. Your credentials and sensor data travel over the network without encryption. Keep your config file private and avoid running on untrusted networks. This is an upstream limitation of the AC Infinity service. If you need to run on a less-trusted network, see DEPLOYMENT.md for HTTPS reverse-proxy options.

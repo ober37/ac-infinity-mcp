@@ -487,7 +487,19 @@ devId=REDACTED_DEV_ID&port=1&appId=REDACTED_TOKEN
 **Critical:** Strip `modeSetid` (Quirk 11). Set `modeType=2` when `onSpead > 0` (Quirk 12).
 Enforce 1.5s minimum between calls (Quirk 15).
 
-**Headers:** Same as `getdevModeSettingList`.
+> **`modeType=2` on AI+.** Quirk 12 is applied on both controller types, but on AI+
+> `modeType` is not a free slot — it echoes the port's `atType` (Quirk 35), so forcing
+> it to `2` alongside a nonzero speed overwrites a field that carries real state.
+> The rule is kept for AI+ because it is what makes a speed write take effect, and
+> because the write is a live-mode override rather than a whole-record replace (Quirk
+> 14) — the port's stored VPD target, humidity range and schedule window survive it.
+> Do not read `modeType == 2` back from an AI+ as "the port is in ON mode"; read
+> `atType`.
+
+**Headers:** **Not** the same as `getdevModeSettingList` on AI+ controllers. A read
+carries the stock okhttp set for every controller type; a write to a `devType >= 20`
+controller must additionally carry `minversion: 3.5` or it returns `100001` (Quirk 14).
+Legacy writes are unchanged and send the same headers as the read.
 
 **Request parameters:** All 140 flat scalar fields from `getdevModeSettingList` response,
 with `modeSetid` removed and desired changes overlaid. Do **not** include `fieldSet` (list)
@@ -739,10 +751,24 @@ writes the port's own current values back, so nothing changes either way):
 | Headers sent | Result |
 |---|---|
 | stock okhttp set only | `100001` |
-| `minversion: 3.5` only | **`200`** |
-| iOS `User-Agent` + `phoneType` + `appVersion`, no `minversion` | `100001` |
 | `appVersion: 1.9.7` alone | `100001` |
+| iOS `User-Agent` + `phoneType` + `appVersion`, no `minversion` | `100001` |
+| `minversion: 3.5` only | **`200`** |
+| `minversion` + iOS `User-Agent` + `appVersion` (drop `phoneType`) | `200` |
+| `minversion` + iOS `User-Agent` + `phoneType` (drop `appVersion`) | `200` |
+| `minversion` + `phoneType` + `appVersion` (drop iOS `User-Agent`) | `200` |
 | all four together | `200` |
+
+**Coverage, stated exactly.** Of the 16 subsets of
+{`User-Agent`, `phoneType`, `appVersion`, `minversion`}, 8 were run: 3 of the 8
+that omit `minversion` (all `100001`) and 5 of the 8 that include it (all `200`).
+The three **pairs** — `minversion` with exactly one other header — were not run.
+That gap does not weaken the conclusion, because the conclusion rests on the two
+rows that bracket it: `minversion` **alone** returns `200`, which establishes
+sufficiency without needing any pair, and the full triple **without** it returns
+`100001`, which establishes necessity. An untested pair could only fail if adding
+a header that is unnecessary on its own somehow broke a request that already
+succeeds with fewer headers.
 
 **Despite the name it is not a version comparison.** Only the literal string
 `"3.5"` is accepted; a *higher* value fails exactly as a lower one does:
@@ -777,6 +803,22 @@ Quirk 37.
 port switched to OFF retained its stored VPD target, humidity range and schedule
 window. See Quirk 36 for the important limit on that.
 
+**Verified scope — read this before generalising.** Everything above was measured
+on one controller and one account:
+
+| | |
+|---|---|
+| Controller | `devType` **20** (89 AI+), 8 ports |
+| Firmware | **12.8.26** (re-confirmed after an in-place update from 12.8.15; the header behaviour and the `"3.5"` literal were unchanged by it) |
+| Ports exercised | 6 and 8 for the ablation; ports 1–8 read |
+| Accounts | **1** |
+| `devType` 22 | **not verified** — no devType-22 hardware was available for the header ablation. Quirk 35's mode mapping agrees across 20 and 22, which is weak evidence the write gate is shared, but it is not a measurement of it |
+
+In the spirit of Quirk 33: this is a single-account, single-device result on a
+server-side gate that AC Infinity can change without notice, and did change for
+the v2 endpoints. Treat "AI+ writes need `minversion`" as the strongest available
+reading of the evidence, not as a specification.
+
 Detection:
 ```python
 from ac_infinity_mcp.controller import ControllerType, detect_controller_type
@@ -786,23 +828,35 @@ is_ai_plus = ct == ControllerType.NEW_FRAMEWORK  # devType >= 20 or newFramework
 
 ---
 
-### Quirk 35 — On AI+, `modeType` is a per-port resting value, not an ADVANCE signal
+### Quirk 35 — On AI+, `modeType` echoes the port's `atType`; it is not an ADVANCE signal
 
 On legacy controllers `modeType == 15` means the port is under Advance Automation
 control, and `client.py` uses it as a pre-write guard. **That reading does not
 hold on AI+.**
 
-Read across all 8 ports of a live `devType=22` controller with no automation
-configured anywhere:
+**`modeType` tracks `atType`.** An earlier version of this quirk said the value
+"alternates with port parity and tracks nothing about automation." That was
+wrong — the parity was an artifact of one controller's port layout, where two
+racks carried the same four device kinds in the same order.
 
-| Ports | `modeType` |
-|---|---|
-| 1, 3, 5, 7 | `0` |
-| 2, 4, 6, 8 | `15` |
+Read across all 8 ports of two live controllers, both with the port's `atType`
+alongside:
 
-The value alternates with port parity and tracks nothing about automation. A
-second `devType=20` controller shows `modeType=15` on ports carrying ordinary
-manual and VPD settings.
+| `atType` | Mode | `modeType` on devType 22 | `modeType` on devType 20 |
+|---|---|---|---|
+| `1` | OFF | `15` | `15` |
+| `2` | ON | `15` | `15` |
+| `3` | AUTO | — | `15` |
+| `6` | CYCLE | `1` | — |
+| `7` | SCHEDULE | `0` | `0` |
+
+The two controllers **agree on every mode they share**, and neither shows a
+parity pattern: the devType-20 device reads `0` on its single SCHEDULE port and
+`15` on the other seven regardless of position.
+
+So `modeType` is a per-port *mode* echo, not a per-port resting constant and not
+an automation flag. It carries real state — which is precisely why nothing should
+force it (see Quirk 12) and why it must not be read as an ADVANCE signal.
 
 Consequently the guard now branches by controller type:
 
@@ -814,6 +868,15 @@ This matters because the combined legacy condition could never fire on AI+ at
 all: the same `devType=22` controller reports `isOpenAutomation = 0` on all 8
 ports, in both `getdevModeSettingList` and the `devInfoListAll` port entries. The
 guard read as protective while being provably inert.
+
+> **Diagnosability note.** The AI+ branch fails closed on an *absent*
+> `isOpenAutomation`, which is deliberate. But the asymmetry is worth stating: on
+> legacy, absence alone cannot block, because it is ANDed with `modeType == 15`;
+> on AI+, absence alone blocks **every** write. If a firmware or endpoint revision
+> stops returning the field, AI+ writes turn off wholesale and surface as an
+> automation conflict that does not exist. The handler emits a `logger.warning`
+> on that branch so the cause is greppable, since the message itself never reaches
+> the grower.
 
 ---
 
@@ -2645,13 +2708,28 @@ time of the call, the response includes an additional `warning` field:
 The speed is stored in the controller's settings but the port does not activate. Ask Claude
 to switch the port to ON mode to bring it up at the stored speed.
 
+> **This was measured on AI+, not assumed.** The wording was challenged on the grounds
+> that Quirk 36 discards fields irrelevant to the port's mode, and a speed on an OFF port
+> looks exactly like such a field. It is not: `onSpead` was written to a live devType-20
+> port in OFF mode, read back, and had persisted. `onSpead` is a mode-agnostic port
+> property, which is why — and this is what forced the Quirk 36 rewording — Quirk 36 does
+> not reach it. The warning is accurate on AI+ as written.
+
 **Empty-port warning:** All 7 write tools (`set_port_on`, `set_port_off`, `set_port_speed`,
 `set_port_mode`, `set_vpd_automation`, `set_temperature_automation`, `set_humidity_automation`)
 include a `warning` field when the target port appears to have nothing connected. When both the
 OFF-mode condition and the empty-port condition apply simultaneously (on `set_port_speed`),
 both warning messages are concatenated in the same `warning` field.
 
-**AI+ note:** `dry_run=True` is supported. `dry_run=False` returns an unsupported error — see Quirk 14.
+**AI+ note:** Both `dry_run=True` and `dry_run=False` are supported — a live speed write
+lands on an AI+ exactly as it does on a legacy controller (Quirk 14). This note previously
+said `dry_run=False` returns an unsupported error; that was true before AI+ writes were
+enabled and is no longer.
+
+The two AI+-specific ways this call can still refuse are unrelated to `dry_run`: a port
+under Advance Automation control (`isOpenAutomation != 0`, Quirk 35) and a port with
+nothing plugged into it, which the API reports as `999999` (Quirk 37). Both raise before
+the POST rather than after it.
 
 ---
 
@@ -3030,9 +3108,13 @@ test locks both strings so a future refactor cannot silently revert to the defau
 
 ### `apply_grow_stage_template(device_id, port, stage, dry_run=True)`
 
-One-click grow stage configuration. Calls `set_vpd_automation`, `set_temperature_automation`,
-and `set_humidity_automation` in sequence using the VPD midpoint and full ranges from
-`STAGE_TARGETS` in `analytics.py`.
+One-click grow stage configuration, using the VPD midpoint and full ranges from
+`STAGE_TARGETS` in `analytics.py`. It issues a **single** write carrying `atType=8` (VPD)
+together with the stage's temperature and humidity thresholds, which the controller keeps
+as a fallback for a later switch to AUTO. (It called `set_vpd_automation`,
+`set_temperature_automation` and `set_humidity_automation` in sequence in an earlier
+version; that was replaced because the second and third writes each carry `atType=3`
+(AUTO) and clobbered the VPD mode the first one had just set.)
 
 > **Held on AI+ (`devType >= 20`) — live writes refused, previews unaffected (#316).**
 > This tool sets `atType=8` (VPD) while also storing temperature and humidity
@@ -3040,9 +3122,17 @@ and `set_humidity_automation` in sequence using the VPD midpoint and full ranges
 > relevant to the port's mode at write time is accepted with code `200` and
 > silently discarded (Quirk 36) — which is precisely what those fallback fields
 > are. It also never writes `devLtf`/`devHtf`, so on a °F AI+ the °F pair stays
-> stale. `dry_run=True` works normally; for live changes use `set_vpd_automation`,
-> `set_temperature_automation` and `set_humidity_automation`, which send each mode
-> switch together with its own trigger fields and are verified on AI+.
+> stale. `dry_run=True` works normally.
+>
+> **Workaround, corrected.** Earlier revisions of this note told AI+ growers to chain
+> `set_vpd_automation` → `set_temperature_automation` → `set_humidity_automation`
+> instead. That is wrong, and it is wrong in the same way the pre-atomic implementation
+> was: the temperature and humidity tools each write `atType=3` (AUTO), so the chain
+> leaves the port in AUTO on whichever trigger ran last, not in VPD — the opposite of
+> what the template does. Use `set_vpd_automation` alone, which lands VPD mode with its
+> target on AI+ (live-verified, devType 20 / firmware 12.8.26). The fallback thresholds
+> have no equivalent single-tool substitute, because setting them *is* the switch out of
+> VPD.
 
 **Parameters:**
 | Parameter | Type | Description |
@@ -3076,8 +3166,11 @@ the controller, or the prior state is preserved.
 - Temp/humidity: `int(value + 0.5)` raw integer — e.g. 20°C → `devLt=20` (no × 100 scaling)
 - Rate limit: a single write, so the 1.5s rate gate fires once (Quirk 15)
 
-**AI+ note:** `dry_run=True` is fully supported. `dry_run=False` returns the AI+
-unsupported error before any writes (same as individual automation tools).
+**AI+ note:** `dry_run=True` is fully supported. `dry_run=False` returns the #316 hold
+error before any writes. This is **not** the behavior of the individual automation tools —
+those write normally on AI+ as of #308. The hold is specific to this tool and to
+`break_out_of_automation`, for the per-tool reasons quoted above; nothing about AI+ write
+support in general is implied by it.
 
 ---
 

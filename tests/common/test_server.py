@@ -11162,6 +11162,67 @@ async def test_apply_grow_stage_template_held_on_ai_plus(mock_client):
     mock_client.set_port_mode.assert_not_called()
 
 
+# The hold error is read by a grower, not by a developer. These pin the three ways
+# the earlier wording failed that reader: it printed the raw function name, it leaked
+# the "devType >= 20" range that defines AI+ internally instead of the name on the
+# box, and it never said which port it was refusing. The machine-readable identifiers
+# moved to their own keys rather than being dropped.
+
+_AI_PLUS_HOLD_TOOL_NAMES = (
+    "apply_grow_stage_template",
+    "break_out_of_automation",
+    "set_vpd_automation",
+    "set_temperature_automation",
+    "set_humidity_automation",
+)
+
+
+async def test_apply_grow_stage_template_hold_error_is_grower_readable(mock_client):
+    mock_client.get_devices.return_value = [_AI_PLUS_DEVICE_FOR_HOLD]
+    result = await apply_grow_stage_template("D89XA", 1, "veg", dry_run=False)
+    data = json.loads(result)
+    message = data["error"]
+
+    assert "Intake Fan (Port 1)" in message, "must name the port the grower named"
+    assert "Test 69 Pro" in message, "must name the controller"
+    assert "devType" not in message
+    assert ">= 20" not in message
+    for name in _AI_PLUS_HOLD_TOOL_NAMES:
+        assert name not in message, f"raw function name {name!r} leaked to the grower"
+
+    # Identifiers stay available to callers that want them.
+    assert data["tool"] == "apply_grow_stage_template"
+    assert data["controller_type"] == "new_framework"
+
+
+async def test_apply_grow_stage_template_hold_workaround_is_not_the_broken_chain(mock_client):
+    """The old advice — chain the three automation tools — reproduces the bug the
+    single atomic write fixed: the temperature and humidity tools each carry
+    atType=3, so the chain ends in AUTO, not VPD. Only the VPD target is offered."""
+    mock_client.get_devices.return_value = [_AI_PLUS_DEVICE_FOR_HOLD]
+    data = json.loads(await apply_grow_stage_template("D89XA", 1, "veg", dry_run=False))
+    message = data["error"].lower()
+    assert "vpd target" in message
+    assert "temperature" not in message.split("does stick")[-1], (
+        "the workaround must not offer the temperature/humidity tools as substitutes"
+    )
+
+
+async def test_break_out_of_automation_hold_error_is_grower_readable(mock_client):
+    mock_client.get_devices.return_value = [_AI_PLUS_DEVICE_FOR_HOLD]
+    result = await break_out_of_automation(
+        "D89XA", 1, dry_run=False, confirm_automation_name="Test Automation"
+    )
+    data = json.loads(result)
+    message = data["error"]
+
+    assert "Intake Fan (Port 1)" in message
+    assert "devType" not in message
+    for name in _AI_PLUS_HOLD_TOOL_NAMES:
+        assert name not in message
+    assert data["tool"] == "break_out_of_automation"
+
+
 async def test_apply_grow_stage_template_preview_still_works_on_ai_plus(mock_client):
     """The hold is live-write only — dry_run previews stay available."""
     mock_client.get_devices.return_value = [_AI_PLUS_DEVICE_FOR_HOLD]
@@ -11196,3 +11257,98 @@ async def test_break_out_of_automation_held_on_ai_plus(mock_client):
     assert "AI+" in data["error"]
     assert data["tracking_issue"] == 316
     mock_client.set_port_mode.assert_not_called()
+
+
+# ============================================================================
+# AI+ server-layer write coverage (restored)
+#
+# Before this PR, each of these tools had exactly one AI+ server test, asserting
+# the live write returned the "not implemented on AI+" refusal. Enabling the
+# writes made those assertions false, and the first draft of this branch deleted
+# them — which left every one of these tools with NO AI+ server-layer test at
+# all, so nothing downstream of the client would catch a re-introduced refusal
+# branch, a controller_type that stopped propagating, or a tool quietly reverting
+# to sent=False on AI+.
+#
+# The right move was to invert them, not drop them. Each test below is the
+# deleted one with its assertion turned around: the same tool, the same AI+
+# device, dry_run=False, now asserting the write lands.
+# ============================================================================
+
+_AI_PLUS_WRITE_LIVE = {
+    "payload": {"onSpead": 5, "modeType": 2, "devId": 12345},
+    "dry_run": False,
+    "controller_type": "new_framework",
+    "sent": True,
+    "prior_at_type": 2,
+}
+
+# Wording from the refusal these tools used to return. If any of it comes back
+# on an enabled tool, the enablement has regressed.
+_RETIRED_REFUSAL_MARKERS = ("not implemented", "unsupported", "not yet enabled")
+
+
+def _assert_ai_plus_write_landed(data: dict) -> None:
+    assert "error" not in data, f"AI+ write refused: {data.get('error')}"
+    assert data["sent"] is True
+    assert data["dry_run"] is False
+    assert data["controller_type"] == "new_framework"
+
+
+def _assert_no_retired_refusal(data: dict) -> None:
+    blob = json.dumps(data).lower()
+    for marker in _RETIRED_REFUSAL_MARKERS:
+        assert marker not in blob, f"retired AI+ refusal wording {marker!r} is back"
+
+
+@pytest.fixture
+def ai_plus_write_client(mock_client):
+    """mock_client, but the device is an AI+ and set_port_mode reports a live write."""
+    mock_client.get_devices.return_value = [_AI_PLUS_DEVICE_FOR_HOLD]
+    mock_client.set_port_mode.return_value = _AI_PLUS_WRITE_LIVE
+    return mock_client
+
+
+async def test_set_port_speed_ai_plus_live_write_lands(ai_plus_write_client):
+    data = json.loads(await set_port_speed("D89XA", 1, 5, dry_run=False))
+    _assert_ai_plus_write_landed(data)
+    _assert_no_retired_refusal(data)
+    ai_plus_write_client.set_port_mode.assert_called_once()
+
+
+async def test_set_port_on_ai_plus_live_write_lands(ai_plus_write_client):
+    data = json.loads(await set_port_on("D89XA", 1, dry_run=False))
+    _assert_ai_plus_write_landed(data)
+    _assert_no_retired_refusal(data)
+
+
+async def test_set_port_off_ai_plus_live_write_lands(ai_plus_write_client):
+    data = json.loads(await set_port_off("D89XA", 1, dry_run=False))
+    _assert_ai_plus_write_landed(data)
+    _assert_no_retired_refusal(data)
+
+
+async def test_set_port_mode_ai_plus_live_write_lands(ai_plus_write_client):
+    data = json.loads(await set_port_mode("D89XA", 1, "off", dry_run=False))
+    _assert_ai_plus_write_landed(data)
+    _assert_no_retired_refusal(data)
+
+
+async def test_set_vpd_automation_ai_plus_live_write_lands(ai_plus_write_client):
+    data = json.loads(await set_vpd_automation("D89XA", 1, 1.4, dry_run=False))
+    _assert_ai_plus_write_landed(data)
+    _assert_no_retired_refusal(data)
+
+
+async def test_set_temperature_automation_ai_plus_live_write_lands(ai_plus_write_client):
+    data = json.loads(
+        await set_temperature_automation("D89XA", 1, 20, 28, dry_run=False)
+    )
+    _assert_ai_plus_write_landed(data)
+    _assert_no_retired_refusal(data)
+
+
+async def test_set_humidity_automation_ai_plus_live_write_lands(ai_plus_write_client):
+    data = json.loads(await set_humidity_automation("D89XA", 1, 50, 70, dry_run=False))
+    _assert_ai_plus_write_landed(data)
+    _assert_no_retired_refusal(data)

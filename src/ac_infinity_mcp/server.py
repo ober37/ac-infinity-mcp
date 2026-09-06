@@ -2803,14 +2803,31 @@ def _ai_plus_write_held(device: dict | None) -> bool:
     return detect_controller_type(device or {}) == ControllerType.NEW_FRAMEWORK
 
 
-def _ai_plus_held_error(tool: str, device_id: str, port: int, reason: str) -> str:
-    """Refusal payload for a tool held back on AI+ controllers."""
+def _ai_plus_held_error(
+    tool: str,
+    device: dict,
+    device_id: str,
+    port: int,
+    reason: str,
+    workaround: str,
+) -> str:
+    """Refusal payload for a tool held back on AI+ controllers.
+
+    The ``error`` string is what a grower reads, so it names the port the way
+    they named it, describes the capability rather than the function behind it,
+    and says "AI+" (the name on the controller) rather than the devType range
+    that defines it internally. The machine-readable identifiers stay in their
+    own keys: ``tool``, ``controller_type`` and ``tracking_issue``.
+    """
+    _, port_label, _ = _get_port_label(device, port)
+    device_name = _sanitize_api_string(device.get("devName"), 64)
     return json.dumps({
         "error": (
-            f"{tool} is not yet enabled for AI+ controllers (devType >= 20). {reason} "
-            "Preview mode is fully supported — ask me to preview the action first, or "
-            "use the individual port and automation tools, which are verified on AI+."
+            f"I can't do that to {port_label} on {device_name} yet — it's an AI+ "
+            f"controller, and {reason} {workaround} I can still show you exactly "
+            "what it would send: ask me to preview it first."
         ),
+        "tool": tool,
         "device_id": device_id,
         "port": port,
         "dry_run": False,
@@ -3438,10 +3455,13 @@ async def apply_grow_stage_template(
     # trigger values on a running port; not done, so not claimed.
     if not dry_run and _ai_plus_write_held(device):
         return _ai_plus_held_error(
-            "apply_grow_stage_template", device_id, port,
-            "It stores temperature and humidity fallback thresholds that AI+ "
-            "controllers accept and then discard, so the confirmation would be "
-            "misleading.",
+            "apply_grow_stage_template", device, device_id, port,
+            "a one-click stage also stores backup temperature and humidity limits "
+            "behind the VPD target. This controller accepts those backups and then "
+            "quietly drops them, so I'd be telling you they were saved when they "
+            "weren't.",
+            "Setting a VPD target on its own does stick here, so ask me for the "
+            "stage's VPD target and I'll set that.",
         )
 
     # Single atomic write: VPD mode active, temp/humidity thresholds stored on the
@@ -5424,9 +5444,13 @@ async def break_out_of_automation(
         # partial-failure handling needs its own fix and its own tests.
         if not dry_run and _ai_plus_write_held(device):
             return _ai_plus_held_error(
-                "break_out_of_automation", device_id, port,
-                "It performs multi-port writes whose partial-failure rollback is "
-                "not yet safe on this controller type.",
+                "break_out_of_automation", device, device_id, port,
+                "taking one port out of a shared automation means switching every "
+                "port that automation governs. If one of those switches fails "
+                "partway through, I can't reliably put the rest back, and you'd be "
+                "left with ports pinned by hand and still claimed by the automation.",
+                "Turning the whole automation off, or setting this port's mode "
+                "yourself, both work here today.",
             )
 
         # Step 0: Idempotency check — is this port actually under automation?
