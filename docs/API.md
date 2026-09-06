@@ -3106,18 +3106,22 @@ Get full detail for a single Advance Automation.
 }
 ```
 
-**Scheduled mode selected but no time window set:**
+**No readable time window** (both sentinels, no continuous flag) — reported as continuous,
+because a schedule the device is not keeping is worse than none:
 ```json
 {
   "schedule": {
-    "mode": "scheduled",
+    "mode": "continuous",
     "begin_time": null,
     "end_time": null,
-    "schedule_note": "scheduled mode selected but no time window is configured"
+    "timezone": "America/Chicago"
   },
-  "human_summary": "'Moderate Airflow' runs at speed 5 on a schedule (no time window set), currently enabled."
+  "human_summary": "'Moderate Airflow' runs continuously at speed 5, currently enabled."
 }
 ```
+(Before #329 this returned `"mode": "scheduled"` with null times and a `schedule_note` key.
+Neither the key nor that wording exists any more: `schedule.mode` is `"scheduled"` only when
+both times are real AND nothing claims 24/7.)
 
 **Field notes:**
 - `schedule.mode` — `"scheduled"` when `onTimeSwitch=0` AND real `begin_time`/`end_time` values are present (the "Continuous 24H/7D" app toggle is OFF, so the time window applies); `"continuous"` when `onTimeSwitch=1` (toggle ON, runs 24/7) or when times are sentinel values (255). See Quirk 21.
@@ -3137,13 +3141,12 @@ Get full detail for a single Advance Automation.
 - `human_summary` — natural-language description; for a **single** port group it now states the rule, not just the speed (#328 — a cycle, auto or VPD rule was previously summarized as "runs at speed N", hiding the trigger entirely):
   - `_mode` `"on"`, continuous: `"'Name' runs continuously at speed N, currently enabled."` (unchanged)
   - `_mode` `"on"`, scheduled with times: `"'Name' runs at speed N from HH:MM to HH:MM, currently enabled."` (unchanged)
-  - `_mode` `"on"`, scheduled with no time window: `"'Name' runs at speed N on a schedule (no time window set), currently enabled."` (unchanged)
-  - `_mode` `"off"`: `"'Name' holds its ports off from HH:MM to HH:MM (timezone). Currently enabled."` — or `"...off around the clock."` when the rule is 24/7, or `"...but I couldn't read which ports it covers — check it in the AC Infinity app."` when the bitmask resolved to nothing. The bare decoded control for an Off rule is the single word `"off"`, which would compose to `"'Name' off, currently enabled."` — two words contradicting each other in one sentence, on the exact rule type #326 was about. The window is never dropped: an Off rule leaves the port free outside it
+  - `_mode` `"off"`: `"'Name' holds Intake (Port 1), Heater (Port 2) off every day HH:MM–HH:MM (timezone). Currently enabled."` — the ports are named, not "its ports", and the phrase comes from the same day-mask decoder the `control` string uses, so `Mon–Fri` survives. `"...off around the clock."` when the rule is 24/7 or its window is unreadable or degenerate (begin == end), and `"'Name' holds its ports off, but I couldn't read which ports it covers — check it in the AC Infinity app."` when the bitmask resolved to nothing. The bare decoded control for an Off rule is the single word `"off"`, which would compose to `"'Name' off, currently enabled."` — two words contradicting each other in one sentence, on the exact rule type #326 was about. The window is never dropped: an Off rule leaves the port free outside it
   - `_mode` `"cycle"` / `"auto"` / `"vpd"`: `"'Name' — <control>. Currently enabled."`, where `<control>` is the same decoded string the `rules` array carries (it already includes the speed and the day/time window; the timezone qualifier is re-attached)
-  - `_mode` `"unknown"`: `"'Name' uses a rule type I don't recognize yet — check this one in the AC Infinity app. It runs from HH:MM to HH:MM. Currently enabled."` — never falls through to speed wording, which would confidently assert a behavior in the same response whose `rules` array says the rule can't be read
+  - `_mode` `"unknown"`: `"'Name' uses a rule type I don't recognize yet — check this one in the AC Infinity app. It runs every day HH:MM–HH:MM (timezone). Currently enabled."` (or `"It runs around the clock."`) — never falls through to speed wording, which would confidently assert a behavior in the same response whose `rules` array says the rule can't be read
   - Multi-group: `"'Name' controls Port N Name, Port M Name at varying speeds. Currently enabled."` (unchanged — N rules with N controls needs a stated tie-break first; deferred to #341)
 
-  **Two fields both claim "runs 24/7", and real data disagrees between them** (Quirk 21): `onTimeSwitch=1` is the app's Continuous toggle, and `switchTime` bit 7 (128) says the same thing. Legacy captures hold rules that are `switchTime=127` + `onTimeSwitch=1`, while every rule this server writes as continuous is `switchTime=255` + `onTimeSwitch=0` **with real begin/end times** — so each field is a false positive for the other's shape. `human_summary` reconciles them (either signal means 24/7) and suppresses the stale clock window the entry still carries; the `rules` array's `control` reads `switchTime` alone and is pinned byte-for-byte by the legacy golden capture. Reporting a 24/7 cycle as stopping at 17:00 leads a grower to add a second rule and double up equipment that was already running
+  **Two fields both claim "runs 24/7", and real data disagrees between them** (Quirk 21): `onTimeSwitch=1` is the app's Continuous toggle, and `switchTime` bit 7 (128) says the same thing. Legacy captures hold rules that are `switchTime=127` + `onTimeSwitch=1`, while every rule this server writes as continuous is `switchTime=255` + `onTimeSwitch=0` **with real begin/end times** — so each field is a false positive for the other's shape. All three fields that answer "when does this run?" — `schedule`, `rules[].window` and `human_summary` — are now derived from one reconciled value (either signal means 24/7), so the response can no longer call the same automation both continuous and scheduled (#329). An unrecognised `onTimeSwitch` value fails safe to 24/7. The stale clock window the entry still carries is suppressed. Only the `rules` array's `control` still reads `switchTime` alone — it is pinned byte-for-byte by the legacy golden capture and deliberately not touched. Reporting a 24/7 cycle as stopping at 17:00 leads a grower to add a second rule and double up equipment that was already running
 
 ---
 

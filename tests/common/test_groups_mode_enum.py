@@ -666,7 +666,7 @@ async def test_off_rule_human_summary_does_not_say_off_and_enabled(ai_plus_clien
     ai_plus_client.get_advance_automations.return_value = [_ai_plus_entry(currentMode=1)]
     data = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
     assert data["human_summary"] == (
-        "'Lights' holds its port off around the clock. Currently enabled."
+        "'Lights' holds Fan Port (Port 1) off around the clock. Currently enabled."
     )
 
 
@@ -678,7 +678,7 @@ async def test_legacy_off_rule_human_summary_matches(mock_client):
     }]
     data = json.loads(await get_advance_automation("C58ZA", "6002"))
     assert data["human_summary"] == (
-        "'Kill Switch' holds its port off around the clock. Currently enabled."
+        "'Kill Switch' holds Intake Fan (Port 1) off around the clock. Currently enabled."
     )
 
 
@@ -731,7 +731,8 @@ async def test_scheduled_off_rule_keeps_its_window(ai_plus_client):
     ai_plus_client.get_advance_automations.return_value = [_scheduled_off()]
     data = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
     assert data["human_summary"] == (
-        f"'Lights' holds its port off from 22:00 to 06:00{_TZ}. Currently enabled."
+        f"'Lights' holds Fan Port (Port 1) off every day 22:00–06:00{_TZ}."
+        " Currently enabled."
     )
     # The summary must agree with the rule list beside it.
     assert data["rules"][0]["window"] == f"22:00–06:00{_TZ}"
@@ -743,7 +744,7 @@ async def test_scheduled_unknown_rule_keeps_its_window(ai_plus_client):
     data = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
     assert data["human_summary"] == (
         "'Lights' uses a rule type I don't recognize yet — check this one in the"
-        f" AC Infinity app. It runs from 22:00 to 06:00{_TZ}. Currently enabled."
+        f" AC Infinity app. It runs every day 22:00–06:00{_TZ}. Currently enabled."
     )
 
 
@@ -888,3 +889,152 @@ def test_resolved_controller_class_does_not_warn(caplog):
     with caplog.at_level(logging.WARNING, logger="ac_infinity_mcp.server"):
         assert _ctype({"devType": 20}) is NEW
     assert caplog.text == ""
+
+
+# ============ One schedule truth: the response must not contradict itself (#329) ============
+#
+# Three fields answer "when does this run?" — `schedule`, each rule's `window`, and
+# `human_summary`. They read from two sources that disagree in real data, and round 2 fixed
+# only one of them, so one response called the same automation both continuous and
+# scheduled. These pin all three against each other in BOTH contradiction shapes.
+
+
+def _assert_all_three_agree_continuous(data):
+    assert data["schedule"]["mode"] == "continuous"
+    assert data["schedule"]["begin_time"] is None
+    assert data["schedule"]["end_time"] is None
+    assert data["rules"][0]["window"] == "runs continuously"
+    assert "around the clock" in data["human_summary"] or (
+        "runs continuously" in data["human_summary"]
+    )
+    assert "09:00" not in data["human_summary"]
+
+
+async def test_bit7_with_real_times_is_continuous_everywhere(ai_plus_client):
+    """switchTime bit 7 set, onTimeSwitch=0, real begin/end — 7 of the 31 entries in the
+    golden capture, and the shape every continuous rule this server writes. `schedule` used
+    to call it scheduled while rules[].window called it continuous (#329)."""
+    ai_plus_client.get_advance_automations.return_value = [
+        _ai_plus_entry(currentMode=2, beginTime=540, endTime=1020,
+                       switchTime=255, onTimeSwitch=0)
+    ]
+    _assert_all_three_agree_continuous(
+        json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
+    )
+
+
+async def test_continuous_toggle_with_a_day_mask_is_continuous_everywhere(ai_plus_client):
+    """The inverse shape: onTimeSwitch=1 with bit 7 clear. 'Clone Transplant' in the
+    capture."""
+    ai_plus_client.get_advance_automations.return_value = [
+        _ai_plus_entry(currentMode=2, beginTime=540, endTime=1020,
+                       switchTime=127, onTimeSwitch=1)
+    ]
+    _assert_all_three_agree_continuous(
+        json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
+    )
+
+
+async def test_off_rule_with_bit7_and_real_times_says_around_the_clock(ai_plus_client):
+    """Deleting the 24/7 guard from the window phrase passed all 1703 tests, because every
+    Off test used a shape where it did not matter. 'Automation 1' in the golden capture is
+    exactly this: an Off rule, switchTime=255, beginTime=540, endTime=1020. Reporting it as
+    off 09:00–17:00 implies the port is free the other sixteen hours."""
+    ai_plus_client.get_advance_automations.return_value = [
+        _ai_plus_entry(currentMode=1, beginTime=540, endTime=1020,
+                       switchTime=255, onTimeSwitch=0)
+    ]
+    data = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
+    assert data["human_summary"] == (
+        "'Lights' holds Fan Port (Port 1) off around the clock. Currently enabled."
+    )
+    assert "09:00" not in data["human_summary"]
+
+
+async def test_unknown_rule_with_bit7_and_real_times_says_around_the_clock(ai_plus_client):
+    """The same guard, on the other branch that reads it."""
+    ai_plus_client.get_advance_automations.return_value = [
+        _ai_plus_entry(currentMode=99, beginTime=540, endTime=1020,
+                       switchTime=255, onTimeSwitch=0)
+    ]
+    summary = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))["human_summary"]
+    assert summary.endswith("It runs around the clock. Currently enabled.")
+    assert "09:00" not in summary
+
+
+async def test_on_rule_with_bit7_and_real_times_is_not_given_a_window(ai_plus_client):
+    """The On branch reads `is_scheduled`, so the reconciliation has to live there rather
+    than in each branch. Before this, a continuous On automation created by this very
+    server read back as "runs at speed 7 from 09:00 to 17:00"."""
+    ai_plus_client.get_advance_automations.return_value = [
+        _ai_plus_entry(currentMode=2, beginTime=540, endTime=1020,
+                       switchTime=255, onTimeSwitch=0)
+    ]
+    data = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
+    assert data["human_summary"] == "'Lights' runs continuously at speed 7, currently enabled."
+    assert data["rules"][0]["window"] == "runs continuously"
+
+
+# ---- The day mask must survive into the wordless branches ----
+
+
+async def test_off_rule_keeps_its_day_mask(ai_plus_client):
+    """Write an Off rule for weekdays and read it back. Building the phrase from the raw
+    clock pair dropped "Mon–Fri" from the entire response, telling a grower their heater is
+    held off every night when it runs Saturday and Sunday."""
+    ai_plus_client.get_advance_automations.return_value = [
+        _scheduled_off(switchTime=31)  # Mon–Fri
+    ]
+    data = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
+    assert data["human_summary"] == (
+        f"'Lights' holds Fan Port (Port 1) off Mon–Fri 22:00–06:00{_TZ}. Currently enabled."
+    )
+
+
+async def test_unknown_rule_keeps_its_day_mask(ai_plus_client):
+    ai_plus_client.get_advance_automations.return_value = [
+        _scheduled_off(currentMode=99, switchTime=31)
+    ]
+    summary = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))["human_summary"]
+    assert f"It runs Mon–Fri 22:00–06:00{_TZ}." in summary
+
+
+async def test_degenerate_window_reads_as_around_the_clock(ai_plus_client):
+    """begin == end. `_rule_window_str` already calls this "always active"; the summary said
+    "from 12:00 to 12:00"."""
+    ai_plus_client.get_advance_automations.return_value = [
+        _scheduled_off(beginTime=720, endTime=720)
+    ]
+    data = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
+    assert data["human_summary"] == (
+        "'Lights' holds Fan Port (Port 1) off around the clock. Currently enabled."
+    )
+    assert data["rules"][0]["window"] == "always active"
+
+
+async def test_off_rule_names_every_port_it_governs(ai_plus_client):
+    """CLAUDE.md: never "its ports" when the response already holds the names."""
+    device = copy.deepcopy(AI_PLUS_DEVICE)
+    device["zoneId"] = "America/Chicago"
+    device["deviceInfo"]["ports"] = [
+        {"port": 1, "portName": "Intake", "speak": 0, "portsLoad": 0},
+        {"port": 2, "portName": "Heater", "speak": 0, "portsLoad": 0},
+    ]
+    ai_plus_client.get_devices.return_value = [device]
+    ai_plus_client.get_advance_automations.return_value = [
+        _ai_plus_entry(currentMode=1, grouptDevType=3)  # ports 1 and 2
+    ]
+    summary = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))["human_summary"]
+    assert summary.startswith("'Lights' holds Intake (Port 1), Heater (Port 2) off")
+
+
+async def test_unknown_on_time_switch_still_fails_safe_to_continuous(ai_plus_client):
+    """An unrecognised toggle value must read as 24/7, not as a schedule the device may not
+    be keeping. `== 1` would have silently changed this."""
+    ai_plus_client.get_advance_automations.return_value = [
+        _ai_plus_entry(currentMode=2, beginTime=540, endTime=1020,
+                       switchTime=127, onTimeSwitch=2)
+    ]
+    _assert_all_three_agree_continuous(
+        json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
+    )
