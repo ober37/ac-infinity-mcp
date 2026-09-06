@@ -810,7 +810,7 @@ on one controller and one account:
 |---|---|
 | Controller | `devType` **20** (89 AI+), 8 ports |
 | Firmware | **12.8.26** (re-confirmed after an in-place update from 12.8.15; the header behaviour and the `"3.5"` literal were unchanged by it) |
-| Ports exercised | 6 and 8 for the ablation; ports 1–8 read |
+| Ports exercised | **Port 6 only** for the header ablation — every row of both tables above is one port on one device. Port 8 carried a separate live write test; ports 1–8 were read |
 | Accounts | **1** |
 | `devType` 22 | **not verified** — no devType-22 hardware was available for the header ablation. Quirk 35's mode mapping agrees across 20 and 22, which is weak evidence the write gate is shared, but it is not a measurement of it |
 
