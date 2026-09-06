@@ -899,14 +899,17 @@ def test_resolved_controller_class_does_not_warn(caplog):
 # scheduled. These pin all three against each other in BOTH contradiction shapes.
 
 
-def _assert_all_three_agree_continuous(data):
+def _assert_all_three_agree_continuous(data, summary):
+    """All three fields say 24/7, and the summary is pinned exactly.
+
+    A substring check here would be exploitable: replacing the whole sentence with
+    "'Lights' around the clock." — no verb, no speed — passed an `or` of two substrings.
+    """
     assert data["schedule"]["mode"] == "continuous"
     assert data["schedule"]["begin_time"] is None
     assert data["schedule"]["end_time"] is None
     assert data["rules"][0]["window"] == "runs continuously"
-    assert "around the clock" in data["human_summary"] or (
-        "runs continuously" in data["human_summary"]
-    )
+    assert data["human_summary"] == summary
     assert "09:00" not in data["human_summary"]
 
 
@@ -919,7 +922,8 @@ async def test_bit7_with_real_times_is_continuous_everywhere(ai_plus_client):
                        switchTime=255, onTimeSwitch=0)
     ]
     _assert_all_three_agree_continuous(
-        json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
+        json.loads(await get_advance_automation(AI_PLUS_CODE, "9001")),
+        "'Lights' runs continuously at speed 7, currently enabled.",
     )
 
 
@@ -931,7 +935,8 @@ async def test_continuous_toggle_with_a_day_mask_is_continuous_everywhere(ai_plu
                        switchTime=127, onTimeSwitch=1)
     ]
     _assert_all_three_agree_continuous(
-        json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
+        json.loads(await get_advance_automation(AI_PLUS_CODE, "9001")),
+        "'Lights' runs continuously at speed 7, currently enabled.",
     )
 
 
@@ -1036,5 +1041,112 @@ async def test_unknown_on_time_switch_still_fails_safe_to_continuous(ai_plus_cli
                        switchTime=127, onTimeSwitch=2)
     ]
     _assert_all_three_agree_continuous(
-        json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
+        json.loads(await get_advance_automation(AI_PLUS_CODE, "9001")),
+        "'Lights' runs continuously at speed 7, currently enabled.",
     )
+
+
+# ============ Multi-rule programs: the shape the fixtures never had ============
+#
+# `runs_247` reading `any()` across port groups collapsed every heterogeneous program to
+# "continuous" and blanked its times, while its own rules[].window kept listing real clock
+# windows. Four of the five real automations in the golden capture regressed, including
+# 'Flower' — a 12/12 photoperiod. Zero tests caught it, because every multi-group fixture in
+# the suite uses a uniform switchTime, which makes `any` and `all` indistinguishable.
+
+
+def _program(switch_times, *, mode=2, on_time_switch=0, begin=540, end=1260):
+    """One automation, several port-group rules, each with its own switchTime."""
+    return [
+        _ai_plus_entry(
+            advId=7000 + i, advName="Flower", currentMode=mode, grouptDevType=1 << i,
+            beginTime=begin, endTime=end, switchTime=sw, onTimeSwitch=on_time_switch,
+            groupNums=1, sortType=6, subNumber=i, subNumberSort=i,
+        )
+        for i, sw in enumerate(switch_times)
+    ]
+
+
+async def test_one_continuous_sub_rule_does_not_blank_the_programs_schedule(ai_plus_client):
+    """'Flower' in the capture: seven windowed sub-rules plus one 24/7. The program is
+    scheduled — a grower told their flower lights run around the clock intervenes in a
+    photoperiod that was correct."""
+    ai_plus_client.get_advance_automations.return_value = _program(
+        [127, 127, 127, 127, 255, 127, 127, 127]
+    )
+    data = json.loads(await get_advance_automation(AI_PLUS_CODE, "7000"))
+    assert data["schedule"]["mode"] == "scheduled"
+    assert data["schedule"]["begin_time"] == "09:00"
+    assert data["schedule"]["end_time"] == "21:00"
+    # …and the schedule block must agree with the windows listed beneath it.
+    assert data["rules"][0]["window"] == f"09:00–21:00{_TZ}"
+
+
+async def test_a_wholly_continuous_program_is_still_continuous(ai_plus_client):
+    """The mirror: every sub-rule 24/7 means the program is."""
+    ai_plus_client.get_advance_automations.return_value = _program([255, 255, 255])
+    data = json.loads(await get_advance_automation(AI_PLUS_CODE, "7000"))
+    assert data["schedule"]["mode"] == "continuous"
+    assert data["schedule"]["begin_time"] is None
+    assert all(r["window"] == "runs continuously" for r in data["rules"])
+
+
+async def test_multi_group_human_summary_and_schedule_agree(ai_plus_client):
+    """The multi-group summary branch was executed 13 times by the suite and asserted by
+    nothing — hard-coding its schedule suffix to "" killed zero tests. That is the branch
+    the `any()` regression broke, which is why it broke silently."""
+    ai_plus_client.get_advance_automations.return_value = _program([127, 127, 255])
+    data = json.loads(await get_advance_automation(AI_PLUS_CODE, "7000"))
+    summary = data["human_summary"]
+    # Asserted in parts, not as one exact string: this branch has a pre-existing misplaced
+    # period ("…at varying speeds. from 09:00…") that predates this PR and belongs to #341.
+    # Pinning the broken sentence would make fixing it look like a regression; pinning the
+    # window's presence still kills the mutant that drops the schedule suffix.
+    assert summary.startswith("'Flower' controls Fan Port (Port 1), Light (Port 2), Port 3")
+    assert f"from 09:00 to 21:00{_TZ}" in summary
+    assert summary.endswith("Currently enabled.")
+    assert data["schedule"]["mode"] == "scheduled"
+
+
+async def test_multi_group_continuous_summary_carries_no_window(ai_plus_client):
+    ai_plus_client.get_advance_automations.return_value = _program([255, 255])
+    data = json.loads(await get_advance_automation(AI_PLUS_CODE, "7000"))
+    assert data["human_summary"] == (
+        "'Flower' controls Fan Port (Port 1), Light (Port 2) at varying speeds."
+        " Currently enabled."
+    )
+    assert "09:00" not in data["human_summary"]
+    assert data["schedule"]["mode"] == "continuous"
+
+
+# ---- control and window are both read aloud, so they must not disagree ----
+
+
+async def test_rule_control_and_window_agree_under_the_continuous_toggle(ai_plus_client):
+    """onTimeSwitch=1 with bit 7 clear: the decoder appends a window the toggle overrides.
+    Reconciling only `window` moved #329's contradiction inside one rule object — Claude
+    would read "every day 09:00–17:00" and "runs continuously" in the same breath."""
+    ai_plus_client.get_advance_automations.return_value = [
+        _ai_plus_entry(currentMode=6, cycleOn=600, cycleOff=1200,
+                       beginTime=540, endTime=1020, switchTime=127, onTimeSwitch=1)
+    ]
+    rule = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))["rules"][0]
+    assert rule["window"] == "runs continuously"
+    assert rule["control"] == (
+        "cycle 10 min on / 20 min off; speed 0 (off)–7; runs continuously"
+    )
+    assert "09:00" not in rule["control"]
+
+
+async def test_rule_control_is_untouched_when_the_toggle_is_off(ai_plus_client):
+    """The common path must not move: with the toggle off, control is the decoder's own
+    string, byte for byte."""
+    ai_plus_client.get_advance_automations.return_value = [
+        _ai_plus_entry(currentMode=6, cycleOn=600, cycleOff=1200,
+                       beginTime=540, endTime=1020, switchTime=127, onTimeSwitch=0)
+    ]
+    rule = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))["rules"][0]
+    assert rule["control"] == (
+        "cycle 10 min on / 20 min off; speed 0 (off)–7; every day 09:00–17:00"
+    )
+    assert rule["window"] == f"09:00–17:00{_TZ}"

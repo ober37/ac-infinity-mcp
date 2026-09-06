@@ -319,6 +319,28 @@ def _ctype(device: dict | None, context: str = "") -> ControllerType:
     return detect_controller_type(device)
 
 
+def _reconciled_control(rule: dict, pg: dict, on_time_switch: int) -> str:
+    """The rule's decoded control, with a clock window the Continuous toggle overrides
+    replaced by "runs continuously".
+
+    `_decode_rule` reads only `switchTime`, so on a rule whose 24/7 state comes from
+    `onTimeSwitch` instead it appends a window that does not apply. Both strings in the
+    rule object are read aloud, so they must not disagree with each other (#329).
+    """
+    control = rule.get("control", UNRECOGNIZED_RULE)
+    switch_time = int(pg.get("switch_time") or 0)
+    if on_time_switch == 0 or switch_time & _SWITCHTIME_CONTINUOUS_BIT:
+        return control
+    stale = _decode_schedule({
+        "switchTime": switch_time,
+        "beginTime": pg.get("begin_time"),
+        "endTime": pg.get("end_time"),
+    })
+    if not stale or not control.endswith(f"; {stale}"):
+        return control
+    return f"{control.removesuffix(f'; {stale}')}; runs continuously"
+
+
 def _log_groups_write(tool: str, device_id: str, device: dict, mode: str, payload: dict) -> None:
     """Record which class table produced which wire value, once per Groups write.
 
@@ -3642,10 +3664,17 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
         automation_id: The automation_id from list_advance_automations.
 
     Returns:
-        JSON with automation detail including name, enabled status, schedule
-        (with ``mode``: ``"continuous"`` or ``"scheduled"`` per Quirk 21;
-        ``begin_time``/``end_time`` as ``"HH:MM"`` or ``null``; optional
-        ``schedule_note`` when scheduled mode has no time window configured),
+        JSON with device_id, automation_id, name, enabled, currently_running, schedule
+        (``mode`` is ``"scheduled"`` only when nothing claims 24/7 and both times are
+        real, else ``"continuous"`` — the app's Continuous toggle and the schedule's own
+        24/7 flag are separate signals and either one wins, and an unreadable toggle
+        value is treated as 24/7; ``begin_time``/``end_time`` are ``"HH:MM"`` when
+        scheduled and ``null`` when continuous; ``timezone`` is the device's zone, or
+        ``"unknown"``),
+        rules (one entry per port group, each with ``ports``, ``control`` — the rule in
+        the same wording the rule-writing tools use — ``speed``, ``window``
+        (``"HH:MM–HH:MM (zone)"``, ``"runs continuously"`` or ``"always active"``),
+        ``running``, and the internal ``_mode``; ``control`` and ``window`` always agree),
         port_groups (each entry has ``device_type`` listing the actual port names
         governed by that group, resolved from the ``grouptDevType`` bitmask —
         e.g. ``"Left Fan (Port 5), Right Fan (Port 6)"``, formatted as
@@ -3768,8 +3797,19 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
         # deliberately NOT changed: its output is pinned byte-for-byte by the legacy golden
         # capture (#326). `!= 0`, not `== 1`: an unrecognised toggle value must fail safe to
         # continuous rather than be read as a schedule the device may not be keeping.
-        runs_247 = on_time_switch != 0 or any(
-            int(pg.get("switch_time") or 0) & _SWITCHTIME_CONTINUOUS_BIT for pg in port_groups
+        # Read the FIRST port group, the same entry `begin_time`, `end_time` and
+        # `on_time_switch` all come from. `any(...)` across every group was wrong: a
+        # multi-rule program pairs one continuous sub-rule with several clocked ones, and
+        # 'Flower' in the golden capture — a 12/12 photoperiod, seven windowed sub-rules
+        # plus one 24/7 — was collapsed to "continuous" with its times blanked while its
+        # own rules[].window still read 09:00–21:00. A grower told their flower lights run
+        # around the clock intervenes in a photoperiod that was correct.
+        runs_247 = bool(
+            on_time_switch != 0
+            or (
+                port_groups
+                and int(port_groups[0].get("switch_time") or 0) & _SWITCHTIME_CONTINUOUS_BIT
+            )
         )
         # Scheduled only when nothing claims 24/7 and both formatted times are real values.
         is_scheduled = not runs_247 and bool(begin_str) and bool(end_str)
@@ -3918,12 +3958,15 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
                                  _pg_ports)
                     if _pg_ports else "Unknown"
                 ),
-                "control": _rule.get("control", UNRECOGNIZED_RULE),
+                # The automation-level Continuous toggle overrides this rule's clock
+                # window too, and BOTH of this object's grower-facing strings have to say
+                # so. `control` comes from the decoder, which reads switchTime alone, so
+                # the stale clause is replaced here rather than in `_decode_rule` — whose
+                # output is pinned byte-for-byte by the legacy golden capture (#326).
+                # Leaving one of the two unreconciled just relocates #329's contradiction
+                # from across the response to inside a single rule.
+                "control": _reconciled_control(_rule, pg, on_time_switch),
                 "speed": pg.get("on_speed"),
-                # The automation-level Continuous toggle overrides this rule's clock window
-                # too — `_rule_window_str` sees only switchTime, so hand it the reconciled
-                # answer rather than letting this field disagree with `schedule` and
-                # `human_summary` in the same response (#329).
                 "window": (
                     "runs continuously" if on_time_switch != 0
                     else _rule_window_str(
