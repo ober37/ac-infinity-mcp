@@ -929,6 +929,10 @@ def _assert_all_three_agree_continuous(data, summary):
     assert data["schedule"]["begin_time"] is None
     assert data["schedule"]["end_time"] is None
     assert data["rules"][0]["window"] == "runs continuously"
+    # `control` too: without it the fail-safe branch runs and its output goes unchecked,
+    # and the rule object can say "every day 09:00–17:00" beside "runs continuously".
+    assert data["rules"][0]["control"].endswith("runs continuously")
+    assert "09:00" not in data["rules"][0]["control"]
     assert data["human_summary"] == summary
     assert "09:00" not in data["human_summary"]
 
@@ -1034,7 +1038,12 @@ async def test_degenerate_window_reads_as_around_the_clock(ai_plus_client):
     assert data["human_summary"] == (
         "'Lights' holds Fan Port (Port 1) off around the clock. Currently enabled."
     )
-    assert data["rules"][0]["window"] == "always active"
+    # "runs continuously" rather than _rule_window_str's "always active": a zero-length
+    # window is now answered by the same helper as every other 24/7 signal, which also
+    # collapses two of the three phrasings the tool used for one state.
+    assert data["rules"][0]["window"] == "runs continuously"
+    assert data["schedule"]["mode"] == "continuous"
+    assert data["schedule"]["begin_time"] is None
 
 
 async def test_off_rule_names_every_port_it_governs(ai_plus_client):
@@ -1185,3 +1194,58 @@ async def test_the_programs_own_first_rule_decides_24_7(ai_plus_client):
     assert data["schedule"]["mode"] == "continuous"
     assert data["schedule"]["begin_time"] is None
     assert data["rules"][0]["window"] == "runs continuously"
+    # …and the OTHER rules keep their own windows. Substituting the program-level answer
+    # here relabelled every clocked sub-rule as 24/7 — the harm this reconciliation exists
+    # to prevent, displaced from `schedule` into the rule list.
+    assert data["rules"][1]["window"] == f"09:00–21:00{_TZ}"
+    assert data["rules"][2]["window"] == f"09:00–21:00{_TZ}"
+
+
+async def test_the_continuous_toggle_is_per_rule_not_per_program(ai_plus_client):
+    """A grower puts ONE port on Continuous 24H/7D. The golden capture proves the field is
+    per-sub-rule — 'Clone Transplant' sets it on one of five rules — but the rule list read
+    rule 0's toggle for every rule, so the other ports were reported as running 24/7 too.
+    `main` was wrong once here, in the harmless direction; this was wrong twice, in the
+    direction that has a grower intervening in a photoperiod that was already correct."""
+    entries = _program([127, 127, 127])
+    entries[0]["onTimeSwitch"] = 1  # only the first rule is on the Continuous toggle
+    ai_plus_client.get_advance_automations.return_value = entries
+    data = json.loads(await get_advance_automation(AI_PLUS_CODE, "7000"))
+
+    assert data["rules"][0]["window"] == "runs continuously"
+    assert data["rules"][0]["control"].endswith("runs continuously")
+    for i in (1, 2):
+        assert data["rules"][i]["window"] == f"09:00–21:00{_TZ}", f"rule {i}"
+        assert data["rules"][i]["control"].endswith("every day 09:00–21:00"), f"rule {i}"
+
+
+async def test_multi_group_control_is_reconciled_per_rule(ai_plus_client):
+    """Passing port_groups[0] to the control reconciler instead of each rule's own group
+    left every later rule unreconciled — control said "every day 09:00–21:00" beside a
+    window of "runs continuously"."""
+    entries = _program([255, 127], mode=6)
+    for e in entries:
+        e["onTimeSwitch"] = 1
+        e["cycleOn"], e["cycleOff"] = 600, 1200
+    ai_plus_client.get_advance_automations.return_value = entries
+    data = json.loads(await get_advance_automation(AI_PLUS_CODE, "7000"))
+    for i, rule in enumerate(data["rules"]):
+        assert rule["window"] == "runs continuously", f"rule {i}"
+        assert rule["control"] == (
+            "cycle 10 min on / 20 min off; speed 0 (off)–7; runs continuously"
+        ), f"rule {i}"
+
+
+async def test_unreadable_window_is_continuous_everywhere(ai_plus_client):
+    """Sentinel times with no continuous flag: `_fmt_hhmm` renders 65535 as a fabricated
+    12:15, which the decoder puts in `control`. Treating an unreadable window as 24/7 keeps
+    that fabricated clock out of the summary and the schedule block."""
+    ai_plus_client.get_advance_automations.return_value = [
+        _ai_plus_entry(currentMode=6, cycleOn=600, cycleOff=1200,
+                       beginTime=65535, endTime=65535, switchTime=127, onTimeSwitch=0)
+    ]
+    data = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
+    assert data["schedule"]["mode"] == "continuous"
+    assert data["rules"][0]["window"] == "runs continuously"
+    assert "12:15" not in data["human_summary"]
+    assert "12:15" not in data["rules"][0]["control"]

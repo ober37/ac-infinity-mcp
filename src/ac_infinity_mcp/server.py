@@ -319,20 +319,51 @@ def _ctype(device: dict | None, context: str = "") -> ControllerType:
     return detect_controller_type(device)
 
 
-def _reconciled_control(rule: dict, pg: dict, on_time_switch: int) -> str:
-    """The rule's decoded control, with a clock window the Continuous toggle overrides
-    replaced by "runs continuously".
+def _rule_is_continuous(pg: dict) -> bool:
+    """Whether one Groups rule runs 24/7, from every signal that can say so.
 
-    `_decode_rule` reads only `switchTime`, so on a rule whose 24/7 state comes from
-    `onTimeSwitch` instead it appends a window that does not apply. Both strings in the
-    rule object are read aloud, so they must not disagree with each other (#329).
+    FOUR things can mean "no clock window applies", and none implies another
+    (Quirk 21):
+
+    * ``onTimeSwitch`` non-zero — the app's Continuous 24H/7D toggle. Any unrecognised
+      value counts: a schedule the device may not be keeping is worse than none.
+    * ``switchTime`` bit 7 — the schedule's own continuous flag. Seven of the 31 entries
+      in the golden capture set this *with real begin/end times*, which is the shape
+      every continuous rule this server writes takes.
+    * ``begin == end`` — a zero-length window, which `_rule_window_str` has always called
+      "always active".
+    * an unreadable window — the 255/65535 sentinels, which format to nothing.
+
+    Every field that answers "when does this run" derives from this one function, per
+    rule. Reconciling them one at a time is what produced #329 and then reproduced it
+    three more times: fix the summary and `schedule` disagrees, fix `schedule` and
+    `rules[].window` disagrees, fix that and `control` disagrees with its own window.
+    """
+    if int(pg.get("on_time_switch") or 0) != 0:
+        return True
+    if int(pg.get("switch_time") or 0) & _SWITCHTIME_CONTINUOUS_BIT:
+        return True
+    begin, end = pg.get("begin_time"), pg.get("end_time")
+    if begin == end:
+        return True
+    return _format_schedule_time(begin) is None or _format_schedule_time(end) is None
+
+
+def _reconciled_control(rule: dict, pg: dict) -> str:
+    """The rule's decoded control, with a clock window that does not apply replaced by
+    "runs continuously".
+
+    `_decode_rule` reads only `switchTime`, so on a rule whose 24/7 state comes from any
+    of the other three signals it appends a window that does not apply. Both strings in
+    the rule object are read aloud, so they must not disagree with each other (#329).
+    Rewritten here rather than in `_decode_rule`, whose output the legacy golden capture
+    pins byte-for-byte (#326).
     """
     control = rule.get("control", UNRECOGNIZED_RULE)
-    switch_time = int(pg.get("switch_time") or 0)
-    if on_time_switch == 0 or switch_time & _SWITCHTIME_CONTINUOUS_BIT:
+    if not _rule_is_continuous(pg):
         return control
     stale = _decode_schedule({
-        "switchTime": switch_time,
+        "switchTime": int(pg.get("switch_time") or 0),
         "beginTime": pg.get("begin_time"),
         "endTime": pg.get("end_time"),
     })
@@ -3778,41 +3809,27 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
         # onTimeSwitch=0 means the "Continuous 24H/7D" toggle is OFF — the time window
         # applies when real begin/end times are present.
         # onTimeSwitch=1 means the toggle is ON — runs 24/7 regardless of time values.
-        on_time_switch = found.get("on_time_switch", 0)
         begin_str = _format_schedule_time(found.get("begin_time"))
         end_str = _format_schedule_time(found.get("end_time"))
 
         # ---- One schedule truth for the whole response (#329) ----
-        # Three fields answer "when does this run?" — `schedule`, each rule's `window`, and
-        # `human_summary` — and they used to read from two sources that disagree in real
-        # data. Quirk 21: `onTimeSwitch` non-zero is the app's Continuous 24H/7D toggle and
-        # `switchTime` bit 7 says the same thing, but neither implies the other. Seven of
-        # the 31 entries in the golden capture are (bit 7 set, onTimeSwitch=0) *with real
-        # begin/end times* — the shape every continuous rule this server writes takes — and
-        # 'Clone Transplant' is the inverse, (bit 7 clear, onTimeSwitch=1). Reading one
-        # field alone makes the other shape a false positive, which is how one response
-        # came to call the same automation both continuous and scheduled.
+        # `_rule_is_continuous` is the single answer to "when does this run", and every
+        # field derives from it: this block, each rule's `window` and `control`, and the
+        # summary below. Reconciling them one at a time is what produced #329 and then
+        # reproduced it three more times over — fix the summary and `schedule` disagrees,
+        # fix `schedule` and `rules[].window` disagrees, fix that and `control` disagrees
+        # with its own window.
         #
-        # Reconcile here, once, and let every consumer below derive from it. The decoder is
-        # deliberately NOT changed: its output is pinned byte-for-byte by the legacy golden
-        # capture (#326). `!= 0`, not `== 1`: an unrecognised toggle value must fail safe to
-        # continuous rather than be read as a schedule the device may not be keeping.
-        # Read the FIRST port group, the same entry `begin_time`, `end_time` and
-        # `on_time_switch` all come from. `any(...)` across every group was wrong: a
-        # multi-rule program pairs one continuous sub-rule with several clocked ones, and
-        # 'Flower' in the golden capture — a 12/12 photoperiod, seven windowed sub-rules
-        # plus one 24/7 — was collapsed to "continuous" with its times blanked while its
-        # own rules[].window still read 09:00–21:00. A grower told their flower lights run
-        # around the clock intervenes in a photoperiod that was correct.
-        runs_247 = bool(
-            on_time_switch != 0
-            or (
-                port_groups
-                and int(port_groups[0].get("switch_time") or 0) & _SWITCHTIME_CONTINUOUS_BIT
-            )
-        )
-        # Scheduled only when nothing claims 24/7 and both formatted times are real values.
-        is_scheduled = not runs_247 and bool(begin_str) and bool(end_str)
+        # The program's schedule block describes its FIRST rule — `begin_time`, `end_time`
+        # and `on_time_switch` all come from `entries[0]` — so the 24/7 answer comes from
+        # that same rule. Not `any()` across every group: a multi-rule program pairs a
+        # continuous sub-rule with several clocked ones, and 'Flower' in the golden capture
+        # is a 12/12 photoperiod (seven windowed sub-rules plus one 24/7) that `any()`
+        # reported as running around the clock with no times at all.
+        runs_247 = _rule_is_continuous(port_groups[0]) if port_groups else True
+        # `_rule_is_continuous` already covers unreadable and zero-length windows, so
+        # "scheduled" is simply its complement.
+        is_scheduled = not runs_247
         if not is_scheduled:
             begin_str = None
             end_str = None
@@ -3965,17 +3982,16 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
                                  _pg_ports)
                     if _pg_ports else "Unknown"
                 ),
-                # The automation-level Continuous toggle overrides this rule's clock
-                # window too, and BOTH of this object's grower-facing strings have to say
-                # so. `control` comes from the decoder, which reads switchTime alone, so
-                # the stale clause is replaced here rather than in `_decode_rule` — whose
-                # output is pinned byte-for-byte by the legacy golden capture (#326).
-                # Leaving one of the two unreconciled just relocates #329's contradiction
-                # from across the response to inside a single rule.
-                "control": _reconciled_control(_rule, pg, on_time_switch),
+                # Both of this object's grower-facing strings answer "when does this run"
+                # and both are read aloud, so both derive from the same per-rule answer.
+                # Per-RULE, not the program's: onTimeSwitch is set on one of
+                # 'Clone Transplant''s five rules and clear on the other four, so
+                # applying the first rule's toggle to all of them reported four
+                # scheduled ports as running 24/7.
+                "control": _reconciled_control(_rule, pg),
                 "speed": pg.get("on_speed"),
                 "window": (
-                    "runs continuously" if on_time_switch != 0
+                    "runs continuously" if _rule_is_continuous(pg)
                     else _rule_window_str(
                         pg.get("begin_time"), pg.get("end_time"), _tz_label,
                         pg.get("switch_time"),

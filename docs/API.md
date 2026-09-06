@@ -1027,22 +1027,38 @@ zero-value filter alone is insufficient for devType=22.
 
 ---
 
-### Quirk 21 — `onTimeSwitch` field controls schedule mode
+### Quirk 21 — four independent signals mean "runs 24/7", and none implies another
 
-The Advance Automation API returns an `onTimeSwitch` field per group entry. It maps to the
-**"Continuous 24 Hours / 7 Days"** toggle in the AC Infinity app:
+`onTimeSwitch` is returned per group entry and maps to the **"Continuous 24 Hours / 7 Days"**
+toggle in the AC Infinity app:
 
-- `onTimeSwitch = 0` — toggle **OFF**: the time window applies. The automation is scheduled
-  and only active between `beginTime` and `endTime`. Both values must be real (non-sentinel)
-  for the schedule to be shown; if either is `255` (sentinel), treat as continuous.
-- `onTimeSwitch = 1` — toggle **ON**: runs 24/7 regardless of `beginTime`/`endTime` values.
-  Always treated as continuous.
-- Missing field defaults to `0` (scheduled if real times present, else continuous).
-- Values other than `0` and `1` are treated as continuous (safe fallback).
+- `onTimeSwitch = 0` — toggle **OFF**: the time window applies.
+- `onTimeSwitch = 1` — toggle **ON**: runs 24/7 regardless of `beginTime`/`endTime`.
+- Missing field defaults to `0`.
+- Any other value is treated as continuous (safe fallback — a schedule the device may not be
+  keeping is worse than none).
+
+**`onTimeSwitch` is not the only signal, and reading it alone is a defect.** Three others say
+the same thing, and real data has each of them set while the others are clear:
+
+| Signal | Meaning | Evidence |
+|---|---|---|
+| `onTimeSwitch` non-zero | app Continuous toggle | `'Clone Transplant'` — set on **one** of its five rules |
+| `switchTime` bit 7 (128) | the schedule's own continuous flag | 7 of the 31 captured entries, **with real begin/end times** — the shape every continuous rule this server writes takes |
+| `beginTime == endTime` | zero-length window | `_rule_window_str` has always called this "always active" |
+| sentinel times (`255` / `65535`) | no readable window | `_fmt_hhmm` renders `65535` as a fabricated `12:15` if not guarded |
+
+**`onTimeSwitch` is per RULE, not per automation.** `_group_automations` also surfaces the
+first entry's value at automation level for the `schedule` block, which describes that same
+first rule — but each rule's own value governs its own `window` and `control`. Applying rule
+0's toggle to every rule reported four correctly-scheduled ports as running 24/7.
+
+`_rule_is_continuous()` in `server.py` is the single implementation; `schedule`,
+`rules[].window`, `rules[].control` and `human_summary` all derive from it. See Issue #329 —
+reconciling those fields one at a time reproduced the same contradiction four times over.
 
 **Important:** The mapping is the opposite of what the field name implies. A value of `0`
-(switch "off") means the time-window restriction is in effect (scheduled). See
-`_group_automations()` — `on_time_switch` key.
+(switch "off") means the time-window restriction is in effect (scheduled).
 
 ### Quirk 22 — Ghost port filtering and toggle-device data quality in `get_port_activity_report`
 
@@ -3102,7 +3118,7 @@ Get full detail for a single Advance Automation.
     "begin_time": "09:00",
     "end_time": "17:00"
   },
-  "human_summary": "'Moderate Airflow' runs at speed 5 from 09:00 to 17:00, currently enabled."
+  "human_summary": "'Moderate Airflow' runs at speed 5 every day 09:00–17:00 (America/Chicago), currently enabled."
 }
 ```
 
@@ -3134,18 +3150,18 @@ both times are real AND nothing claims 24/7.)
 - `rules` — per-rule read parity (one entry per port group / `advId`), decoded so the wording matches exactly what the rule-write tools emit. Each entry is `{"ports", "control", "speed", "window", "running", "_mode"}`:
   - `ports` — name+number port label (e.g. `"Humidifier (Port 1)"`)
   - `control` — grower-readable behavior string, e.g. `"runs at speed 5"`, `"cycle 30 min on / 30 min off"`, `"hold humidity at 65%"`, `"hold VPD at 0.9 kPa"`, `"run when temp rises above 82°F"`, `"run when humidity drops below 50%"`. An Auto/VPD rule whose thresholds live in `sensorModeData` reads `"auto (rule set in the AC Infinity app — I can't read its details yet)"`, and a `currentMode` the class does not define reads `"a rule type I don't recognize yet — check this one in the AC Infinity app"` (Quirk 35)
-  - `window` — `"HH:MM–HH:MM (timezone)"`; wrap-around windows (begin > end) display as-is for the two-window pattern
+  - `window` — `"HH:MM–HH:MM (timezone)"`, or `"runs continuously"` when this rule is 24/7 by any of the four signals in Quirk 21; wrap-around windows (begin > end) display as-is for the two-window pattern
   - `running` — per-rule run state (`run_state`); different rules in one program may have different run states (e.g. complementary lights-on / lights-off windows)
   - `_mode` — internal round-trip key (`off`/`on`/`cycle`/`auto`/`vpd`, or `unknown` for a `currentMode` this controller class does not define); underscore-prefixed = not surfaced to the grower; Claude reads `control` + `window` (see Quirk 32, and Quirk 35 for the class-dependent mode integers)
 - `human_summary` — natural-language description; for a **single** port group it now states the rule, not just the speed (#328 — a cycle, auto or VPD rule was previously summarized as "runs at speed N", hiding the trigger entirely):
   - `_mode` `"on"`, continuous: `"'Name' runs continuously at speed N, currently enabled."` (unchanged)
-  - `_mode` `"on"`, scheduled with times: `"'Name' runs at speed N from HH:MM to HH:MM, currently enabled."` (unchanged)
+  - `_mode` `"on"`, scheduled with times: `"'Name' runs at speed N every day HH:MM–HH:MM (timezone), currently enabled."` — the day mask is stated (`Mon–Fri`, `Mon, Wed, Sat`, a single day), which the pre-#328 wording dropped entirely, so a weekday lights schedule read back as if it ran weekends
   - `_mode` `"off"`: `"'Name' holds Intake (Port 1), Heater (Port 2) off every day HH:MM–HH:MM (timezone). Currently enabled."` — the ports are named, not "its ports", and the phrase comes from the same day-mask decoder the `control` string uses, so `Mon–Fri` survives. `"...off around the clock."` when the rule is 24/7 or its window is unreadable or degenerate (begin == end), and `"'Name' holds its ports off, but I couldn't read which ports it covers — check it in the AC Infinity app."` when the bitmask resolved to nothing. The bare decoded control for an Off rule is the single word `"off"`, which would compose to `"'Name' off, currently enabled."` — two words contradicting each other in one sentence, on the exact rule type #326 was about. The window is never dropped: an Off rule leaves the port free outside it
   - `_mode` `"cycle"` / `"auto"` / `"vpd"`: `"'Name' — <control>. Currently enabled."`, where `<control>` is the same decoded string the `rules` array carries (it already includes the speed and the day/time window; the timezone qualifier is re-attached)
   - `_mode` `"unknown"`: `"'Name' uses a rule type I don't recognize yet — check this one in the AC Infinity app. It runs every day HH:MM–HH:MM (timezone). Currently enabled."` (or `"It runs around the clock."`) — never falls through to speed wording, which would confidently assert a behavior in the same response whose `rules` array says the rule can't be read
   - Multi-group: `"'Name' controls Port N Name, Port M Name at varying speeds. Currently enabled."` (unchanged — N rules with N controls needs a stated tie-break first; deferred to #341)
 
-  **Two fields both claim "runs 24/7", and real data disagrees between them** (Quirk 21): `onTimeSwitch=1` is the app's Continuous toggle, and `switchTime` bit 7 (128) says the same thing. Legacy captures hold rules that are `switchTime=127` + `onTimeSwitch=1`, while every rule this server writes as continuous is `switchTime=255` + `onTimeSwitch=0` **with real begin/end times** — so each field is a false positive for the other's shape. All three fields that answer "when does this run?" — `schedule`, `rules[].window` and `human_summary` — are now derived from one reconciled value (either signal means 24/7), so the response can no longer call the same automation both continuous and scheduled (#329). An unrecognised `onTimeSwitch` value fails safe to 24/7. The stale clock window the entry still carries is suppressed. Only the `rules` array's `control` still reads `switchTime` alone — it is pinned byte-for-byte by the legacy golden capture and deliberately not touched. Reporting a 24/7 cycle as stopping at 17:00 leads a grower to add a second rule and double up equipment that was already running
+  **Two fields both claim "runs 24/7", and real data disagrees between them** (Quirk 21): `onTimeSwitch=1` is the app's Continuous toggle, and `switchTime` bit 7 (128) says the same thing. Legacy captures hold rules that are `switchTime=127` + `onTimeSwitch=1`, while every rule this server writes as continuous is `switchTime=255` + `onTimeSwitch=0` **with real begin/end times** — so each field is a false positive for the other's shape. All three fields that answer "when does this run?" — `schedule`, `rules[].window` and `human_summary` — are now derived from one reconciled value (either signal means 24/7), so the response can no longer call the same automation both continuous and scheduled (#329). An unrecognised `onTimeSwitch` value fails safe to 24/7. The stale clock window the entry still carries is suppressed. `rules[].control` is reconciled too, in the tool's own output: the **decoder** still reads `switchTime` alone and is pinned byte-for-byte by the legacy golden capture, so the clause that no longer applies is replaced after decoding rather than inside `_decode_rule`. Leaving `control` alone while reconciling `window` only moved the contradiction inside a single rule object. Reporting a 24/7 cycle as stopping at 17:00 leads a grower to add a second rule and double up equipment that was already running
 
 ---
 

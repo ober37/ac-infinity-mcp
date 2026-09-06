@@ -349,6 +349,11 @@ def _group_automations(
                     "begin_time": e.get("beginTime"),
                     "end_time": e.get("endTime"),
                     "switch_time": e.get("switchTime"),
+                    # Per-rule, NOT per-automation: 'Clone Transplant' in the golden
+                    # capture has this set on one of its five rules and clear on the other
+                    # four. Reading it from entries[0] and applying it to every rule
+                    # reported four scheduled ports as running 24/7 (#329).
+                    "on_time_switch": e.get("onTimeSwitch", 0),
                     "run_state": bool(e.get("runState", 0)),
                     "current_mode": e.get("currentMode"),
                     "rule": _decode_rule(e, controller_type=controller_type),
