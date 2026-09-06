@@ -3653,7 +3653,11 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
         governed_ports (list of ports this automation controls, decoded from
         the automation's port_group bitmasks), port_resolution status
         ("resolved" or "error"), and
-        human_summary (adapts to continuous/scheduled/no-window variants).
+        human_summary (a sentence stating what the rule actually does and when — the
+        cycle timings, the temperature/humidity threshold, the VPD target, or that the
+        ports are held off; a plain single-speed rule keeps the speed wording, and a
+        rule type this controller does not report is named as unreadable rather than
+        guessed).
         On failure returns ``{"error": "..."}``.
     """
     try:
