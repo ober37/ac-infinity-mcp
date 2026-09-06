@@ -13,6 +13,7 @@ import unicodedata
 
 from ac_infinity_mcp.analytics import _ZERO_LOAD_DEV_TYPES
 from ac_infinity_mcp.client import ACInfinityClient
+from ac_infinity_mcp.controller import ControllerType, groups_mode_name
 from ac_infinity_mcp.schema import _AUTH_ERROR_MSG, ACInfinityAuthError
 
 logger = logging.getLogger(__name__)
@@ -52,11 +53,31 @@ _SWITCHTIME_ALL_DAYS = 127
 _SWITCHTIME_WEEKDAYS = 31  # Mon–Fri
 _DAY_ABBR = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
+# What a Groups `currentMode` this class does not define renders as. Public because
+# server.py needs the same string for its own fallback — two copies would drift.
+UNRECOGNIZED_RULE = "a rule type I don't recognize yet — check this one in the AC Infinity app"
+
 
 def _fmt_hhmm(minutes: int | None) -> str:
     """Format minutes-since-midnight as HH:MM (clamped to a valid clock value)."""
     m = int(minutes or 0) % 1440
     return f"{m // 60:02d}:{m % 60:02d}"
+
+
+def days_label(days_mask: int) -> str | None:
+    """Name a `switchTime` day bitmask, or None when no days are set.
+
+    Public because ``server.py`` renders the same mask into a rule's ``window``. Two
+    implementations of this would drift, and the day mask is the field whose absence made a
+    weekday heater rule read as a nightly one.
+    """
+    if days_mask == _SWITCHTIME_ALL_DAYS:
+        return "every day"
+    if days_mask == _SWITCHTIME_WEEKDAYS:
+        return "Mon–Fri"
+    if days_mask == 0:
+        return None
+    return ", ".join(_DAY_ABBR[i] for i in range(7) if days_mask & (1 << i))
 
 
 def _decode_schedule(entry: dict) -> str | None:
@@ -72,15 +93,7 @@ def _decode_schedule(entry: dict) -> str | None:
 
     begin = entry.get("beginTime")
     end = entry.get("endTime")
-    days_mask = switch_time & 0x7F
-    if days_mask == _SWITCHTIME_ALL_DAYS:
-        day_str = "every day"
-    elif days_mask == _SWITCHTIME_WEEKDAYS:
-        day_str = "Mon–Fri"
-    elif days_mask == 0:
-        day_str = None
-    else:
-        day_str = ", ".join(_DAY_ABBR[i] for i in range(7) if days_mask & (1 << i))
+    day_str = days_label(switch_time & 0x7F)
 
     if begin is None and end is None and day_str is None:
         return None
@@ -88,14 +101,16 @@ def _decode_schedule(entry: dict) -> str | None:
     return f"{day_str} {window}" if day_str else window
 
 
-def _decode_modifiers(entry: dict) -> list[str]:
+def _decode_modifiers(entry: dict, mode: str | None) -> list[str]:
     """Return speed-range + buffer/transition modifier phrases for the control string."""
     mods: list[str] = []
     min_level = int(entry.get("offSpeed") or 0)
     max_level = int(entry.get("onSpeed") or 0)
-    if entry.get("currentMode") == 1:
+    if mode == "on":
         # On mode runs at a single speed (the port's own min is used when inactive); there
         # is no user-settable min, so render just the active speed, not a range.
+        # Keyed on the resolved mode, not a raw currentMode literal: on new-framework
+        # controllers `1` is OFF and `2` is ON (#328).
         mods.append(f"speed {max_level}")
     else:
         min_render = "0 (off)" if min_level == 0 else str(min_level)
@@ -126,7 +141,10 @@ def _decode_modifiers(entry: dict) -> list[str]:
 
 
 def _decode_auto_clauses(entry: dict) -> tuple[list[str], str | None]:
-    """Collect sensor-labeled clauses for a currentMode=4 (Auto) rule. Returns (clauses, dir).
+    """Collect sensor-labeled clauses for an Auto rule. Returns (clauses, direction).
+
+    Auto's wire code differs by controller class (4 on legacy, 3 on new-framework) —
+    see the table in controller.py. This helper is reached by resolved mode name only.
 
     Target sub-mode (settingMode==1): collect every non-rail target. Trigger sub-mode:
     collect every active threshold (switch==1 AND value non-rail). ``direction`` is reported
@@ -199,7 +217,11 @@ def _trigger_clause(
 
 
 def _decode_vpd_clauses(entry: dict) -> tuple[list[str], str | None]:
-    """Collect VPD clauses for a currentMode=6 rule. Returns (clauses, direction)."""
+    """Collect VPD clauses for a VPD rule. Returns (clauses, direction).
+
+    VPD's wire code differs by controller class (6 on legacy, 8 on new-framework), and
+    6 means CYCLE on new-framework — see controller.py. Reached by mode name only.
+    """
     if entry.get("settingMode") == 1:
         kpa = int(entry.get("targetVpd") or 0) / 10
         return [f"VPD: hold at {kpa:g} kPa"], None
@@ -223,61 +245,85 @@ def _decode_vpd_clauses(entry: dict) -> tuple[list[str], str | None]:
     return [], None
 
 
-def _decode_rule(entry: dict) -> dict:
+def _no_rule_clause(label: str, entry: dict, controller_type: ControllerType) -> str:
+    """Clause for an Auto/VPD rule whose legacy trigger fields are all inactive.
+
+    On new-framework controllers some app-created rules keep their real configuration in
+    ``sensorModeData``, which this project does not decode, leaving the legacy fields at
+    their rails (#328). Saying "no rule set" there is a confident false statement about a
+    rule that is actively running equipment, so distinguish the two cases by the plain
+    ``sensorModeDataNum`` count.
+
+    An ABSENT count takes the cautious branch: the field is undocumented, and defaulting a
+    missing key to 0 would produce exactly the false reassurance this guards against.
+    """
+    if controller_type is ControllerType.NEW_FRAMEWORK:
+        # Only a real int 0 earns the reassuring branch — the same strictness
+        # groups_mode_name applies, and for the same reason: this field decides whether a
+        # grower is told a running heater has no rule. A float, a string "0", a bool, an
+        # absent key and an unparseable value all take the cautious branch.
+        count = entry.get("sensorModeDataNum")
+        if type(count) is not int or count != 0:
+            return f"{label} (rule set in the AC Infinity app — I can't read its details yet)"
+    return f"{label} (no rule set)"
+
+
+def _decode_rule(entry: dict, *, controller_type: ControllerType) -> dict:
     """Decode a raw getGroups entry into a grower-readable rule description.
 
-    Returns ``{"mode": <off|on|cycle|auto|vpd>, "control": <plain string>,
+    Returns ``{"mode": <off|on|cycle|auto|vpd|unknown>, "control": <plain string>,
     "direction": <on_below|on_above|both|None>}``. This is the single source of truth for
     read-back and the exact mirror of ``build_groups_payload``'s encoder.
+
+    ``controller_type`` is REQUIRED: Groups ``currentMode`` uses different numbering per
+    controller class, and the classes invert on/off (#326, #328). There is deliberately no
+    default — a missing class must be a TypeError at authoring time, never a silent decode
+    against the wrong table.
 
     Additive multi-clause: for Auto/VPD every active (non-rail) target or trigger across all
     sensors is collected into a sensor-labeled clause, joined by "; ", then speed-range and
     schedule and buffer/transition modifiers are appended. A value AT its rail is NEVER a
     clause, so a Target rule's rail-parked triggers (switches=1) are correctly ignored.
     """
-    # Groups (Advance Automation) currentMode: Off/On/Auto/VPD/Cycle = 2/1/4/6/3. This is a
-    # DIFFERENT enum from the legacy per-port `atType` (getdevModeSettingList): atType OFF=1,
-    # ON=2, AUTO=3, TIMER=4/5, CYCLE=6, SCHEDULE=7, VPD=8. Do not conflate the two. Any
-    # currentMode not in {1,2,3,4,6} decodes gracefully to "unknown" (no KeyError/crash) so a
-    # future firmware value (e.g. 5 or 7) can't break read-back.
-    current_mode = entry.get("currentMode")
+    # Mode is resolved from the class-keyed table in controller.py; no currentMode integer
+    # literal appears below. An unrecognised value decodes gracefully to "unknown" so a
+    # future firmware value cannot break read-back.
+    mode = groups_mode_name(controller_type, entry.get("currentMode"))
 
-    if current_mode == 2:
+    if mode == "off":
         return {"mode": "off", "control": "off", "direction": None}
 
-    if current_mode == 1:
+    if mode == "on":
         clauses: list[str] = ["runs at set speed"]
         direction: str | None = None
-        mode = "on"
-    elif current_mode == 3:
+    elif mode == "cycle":
         # cycleOn/cycleOff are stored in SECONDS; the app shows minutes = seconds/60.
         on_min = int(entry.get("cycleOn") or 0) // 60
         off_min = int(entry.get("cycleOff") or 0) // 60
         clauses = [f"cycle {on_min} min on / {off_min} min off"]
         direction = None
-        mode = "cycle"
-    elif current_mode == 4:
+    elif mode == "auto":
         clauses, direction = _decode_auto_clauses(entry)
         if not clauses:
-            clauses = ["auto (no rule set)"]
-        mode = "auto"
-    elif current_mode == 6:
+            clauses = [_no_rule_clause("auto", entry, controller_type)]
+    elif mode == "vpd":
         clauses, direction = _decode_vpd_clauses(entry)
         if not clauses:
-            clauses = ["VPD (no rule set)"]
-        mode = "vpd"
+            clauses = [_no_rule_clause("VPD", entry, controller_type)]
     else:
-        return {"mode": "unknown", "control": "unrecognized rule", "direction": None}
+        return {"mode": "unknown", "control": UNRECOGNIZED_RULE, "direction": None}
 
     parts = list(clauses)
-    parts.extend(_decode_modifiers(entry))
+    parts.extend(_decode_modifiers(entry, mode))
     schedule = _decode_schedule(entry)
     if schedule:
         parts.append(schedule)
     return {"mode": mode, "control": "; ".join(parts), "direction": direction}
 
 
-def _group_automations(raw_entries: list[dict]) -> list[dict]:
+def _group_automations(
+    raw_entries: list[dict], *, controller_type: ControllerType
+) -> list[dict]:
     """Group flat getGroups entries by advName into user-visible automations.
 
     One user-visible automation = multiple entries sharing the same advName
@@ -311,9 +357,14 @@ def _group_automations(raw_entries: list[dict]) -> list[dict]:
                     "begin_time": e.get("beginTime"),
                     "end_time": e.get("endTime"),
                     "switch_time": e.get("switchTime"),
+                    # Per-rule, NOT per-automation: 'Clone Transplant' in the golden
+                    # capture has this set on one of its five rules and clear on the other
+                    # four. Reading it from entries[0] and applying it to every rule
+                    # reported four scheduled ports as running 24/7 (#329).
+                    "on_time_switch": e.get("onTimeSwitch", 0),
                     "run_state": bool(e.get("runState", 0)),
                     "current_mode": e.get("currentMode"),
-                    "rule": _decode_rule(e),
+                    "rule": _decode_rule(e, controller_type=controller_type),
                 }
                 for e in entries
             ],
@@ -376,7 +427,8 @@ def _is_port_not_powered(port_data: dict | None, device: dict | None) -> bool:
 async def _build_advance_conflict_response(
     client: ACInfinityClient,
     device_id: str, dev_id: object, port: int, port_name: str,
-    *, device: dict | None = None, requested_speed: int | None = None,
+    *, controller_type: ControllerType,
+    device: dict | None = None, requested_speed: int | None = None,
 ) -> str:
     """Build a structured ADVANCE_AUTOMATION conflict response for write tools.
 
@@ -420,7 +472,7 @@ async def _build_advance_conflict_response(
     governing = None
     try:
         raw = await asyncio.to_thread(client.get_advance_automations, str(dev_id))
-        automations = _group_automations(raw)
+        automations = _group_automations(raw, controller_type=controller_type)
         governing = _find_governing_automation(automations, port)
         active_automations = [
             {"name": a["name"], "automation_id": a["automation_id"]}

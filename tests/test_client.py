@@ -8,6 +8,7 @@ from ac_infinity_mcp.client import (
     build_groups_payload,
     resolve_port_type,
 )
+from ac_infinity_mcp.controller import ControllerType
 
 _REPRESENTATIVE_KWARGS = dict(
     dev_id="ABC123",
@@ -23,7 +24,9 @@ _REPRESENTATIVE_KWARGS = dict(
 
 
 def test_build_add_groups_payload_required_fields():
-    payload = build_add_groups_payload(**_REPRESENTATIVE_KWARGS)
+    payload = build_add_groups_payload(
+        **_REPRESENTATIVE_KWARGS, controller_type=ControllerType.LEGACY,
+    )
     assert payload["advName"] == "Night Cycle"
     assert payload["onSpeed"] == 7
     assert payload["beginTime"] == 1320
@@ -32,18 +35,23 @@ def test_build_add_groups_payload_required_fields():
 
 
 def test_build_add_groups_payload_field_count():
-    payload = build_add_groups_payload(**_REPRESENTATIVE_KWARGS)
+    payload = build_add_groups_payload(
+        **_REPRESENTATIVE_KWARGS, controller_type=ControllerType.LEGACY,
+    )
     assert len(payload) >= 45
 
 
 def test_build_add_groups_payload_returns_dict():
-    assert isinstance(build_add_groups_payload(**_REPRESENTATIVE_KWARGS), dict)
+    assert isinstance(build_add_groups_payload(
+        **_REPRESENTATIVE_KWARGS, controller_type=ControllerType.LEGACY,
+    ), dict)
 
 
 def test_build_add_groups_payload_port_bitmask():
     for port in range(1, 9):
         payload = build_add_groups_payload(
             dev_id="X", port=port, clean_name="Test", on_speed=5, begin_time=0, end_time=1439,
+        controller_type=ControllerType.LEGACY,
         )
         assert payload["grouptDevType"] == 2 ** (port - 1)
 
@@ -51,17 +59,22 @@ def test_build_add_groups_payload_port_bitmask():
 def test_build_add_groups_payload_schedule_always_active_sentinel():
     payload = build_add_groups_payload(
         dev_id="X", port=1, clean_name="Always On", on_speed=5, begin_time=255, end_time=255,
+    controller_type=ControllerType.LEGACY,
     )
     assert payload["beginTime"] == 0
     assert payload["endTime"] == 1439
 
 
 def test_build_add_groups_payload_devid_not_in_payload():
-    assert "devId" not in build_add_groups_payload(**_REPRESENTATIVE_KWARGS)
+    assert "devId" not in build_add_groups_payload(
+        **_REPRESENTATIVE_KWARGS, controller_type=ControllerType.LEGACY,
+    )
 
 
 def test_build_add_groups_payload_switchtime_is_127():
-    assert build_add_groups_payload(**_REPRESENTATIVE_KWARGS)["switchTime"] == 127
+    assert build_add_groups_payload(
+        **_REPRESENTATIVE_KWARGS, controller_type=ControllerType.LEGACY,
+    )["switchTime"] == 127
 
 
 @pytest.mark.parametrize("port", [1, 4, 8])
@@ -70,10 +83,12 @@ def test_build_groups_payload_byte_identical_to_shim_on_mode(port):
     legacy single-port On-mode builder — pins the single→list bitmask invariant."""
     legacy = build_add_groups_payload(
         dev_id="X", port=port, clean_name="Test", on_speed=5, begin_time=0, end_time=1439,
+    controller_type=ControllerType.LEGACY,
     )
     new = build_groups_payload(
         dev_id="X", ports=[port], clean_name="Test", begin_time=0, end_time=1439,
         mode="on", on_speed=5, adv_id=None,
+    controller_type=ControllerType.LEGACY,
     )
     assert new == legacy
     assert new["grouptDevType"] == 2 ** (port - 1)
@@ -83,6 +98,7 @@ def test_build_groups_payload_multi_port_bitmask():
     payload = build_groups_payload(
         dev_id="X", ports=[5, 6], clean_name="Fans", begin_time=0, end_time=1439,
         mode="on", on_speed=3,
+    controller_type=ControllerType.LEGACY,
     )
     assert payload["grouptDevType"] == 48  # 2^4 + 2^5
 
@@ -91,11 +107,13 @@ def test_build_groups_payload_adv_id_only_when_set():
     no_id = build_groups_payload(
         dev_id="X", ports=[1], clean_name="T", begin_time=0, end_time=1439,
         mode="on", on_speed=1,
+    controller_type=ControllerType.LEGACY,
     )
     assert "advId" not in no_id
     with_id = build_groups_payload(
         dev_id="X", ports=[1], clean_name="T", begin_time=0, end_time=1439,
         mode="on", on_speed=1, adv_id=12345,
+    controller_type=ControllerType.LEGACY,
     )
     assert with_id["advId"] == 12345
 
@@ -105,6 +123,7 @@ def test_build_groups_payload_no_caller_param_spread():
     payload = build_groups_payload(
         dev_id="X", ports=[1], clean_name="T", begin_time=0, end_time=1439, mode="on",
         max_level=4,
+    controller_type=ControllerType.LEGACY,
     )
     assert "max_level" not in payload
     assert "mode" not in payload
@@ -117,6 +136,7 @@ def test_build_groups_payload_port_type_default_zero():
     """Default port_type keeps portType=0 (byte-identity for fans / golden payloads)."""
     payload = build_groups_payload(
         dev_id="X", ports=[1], clean_name="T", begin_time=0, end_time=1439, mode="on", on_speed=1,
+    controller_type=ControllerType.LEGACY,
     )
     assert payload["portType"] == 0
 
@@ -126,6 +146,7 @@ def test_build_groups_payload_port_type_passed_through():
     payload = build_groups_payload(
         dev_id="X", ports=[2], clean_name="T", begin_time=0, end_time=1439, mode="on",
         on_speed=1, port_type=1,
+    controller_type=ControllerType.LEGACY,
     )
     assert payload["portType"] == 1
 
@@ -215,6 +236,7 @@ def test_golden_auto_trigger_combined_temp_humidity():
         mode="auto", control_style="trigger",
         temp_high_f=85, temp_low_f=60, humidity_high=70, humidity_low=50,
         min_level=2, max_level=8, temp_buffer=3, humidity_buffer=5, switch_time=127,
+    controller_type=ControllerType.LEGACY,
     )
     assert _sig(p) == {
         "currentMode": 4, "setSelect": 1, "settingMode": 0,
@@ -238,6 +260,7 @@ def test_golden_auto_target_humidity():
         dev_id="X", ports=[1], clean_name="Seedling", begin_time=540, end_time=1020,
         mode="auto", control_style="target", humidity_target=65,
         min_level=1, max_level=10, temp_transition=2, humidity_transition=4, switch_time=255,
+    controller_type=ControllerType.LEGACY,
     )
     assert _sig(p) == {
         "currentMode": 4, "setSelect": 0, "settingMode": 1,
@@ -262,6 +285,7 @@ def test_golden_vpd_target():
     p = build_groups_payload(
         dev_id="X", ports=[1], clean_name="V", begin_time=0, end_time=1439,
         mode="vpd", control_style="target", vpd_target=1.2,
+    controller_type=ControllerType.LEGACY,
     )
     assert p["currentMode"] == 6
     assert p["settingMode"] == 1
@@ -283,6 +307,7 @@ def test_golden_vpd_trigger():
     p = build_groups_payload(
         dev_id="X", ports=[1], clean_name="V", begin_time=0, end_time=1439,
         mode="vpd", control_style="trigger", vpd_high=1.5, vpd_low=0.8,
+    controller_type=ControllerType.LEGACY,
     )
     assert p["currentMode"] == 6
     assert p["settingMode"] == 0
@@ -297,6 +322,7 @@ def test_golden_off():
     """Off rule: currentMode=2; the port is forced off."""
     p = build_groups_payload(
         dev_id="X", ports=[1], clean_name="O", begin_time=0, end_time=1439, mode="off",
+    controller_type=ControllerType.LEGACY,
     )
     assert p["currentMode"] == 2
 
@@ -305,6 +331,7 @@ def test_golden_cycle():
     p = build_groups_payload(
         dev_id="X", ports=[4], clean_name="C", begin_time=540, end_time=1020,
         mode="cycle", cycle_on_minutes=60, cycle_off_minutes=120,
+    controller_type=ControllerType.LEGACY,
     )
     assert p["currentMode"] == 3
     # cycleOn/cycleOff are stored in SECONDS (minutes × 60); verified live.
@@ -333,6 +360,7 @@ def test_auto_trigger_single_sensor_directions(kwargs, expect):
     p = build_groups_payload(
         dev_id="X", ports=[1], clean_name="T", begin_time=0, end_time=1439,
         mode="auto", control_style="trigger", **kwargs,
+    controller_type=ControllerType.LEGACY,
     )
     for k, v in expect.items():
         assert p[k] == v, f"{k}={p[k]} expected {v}"
@@ -343,6 +371,7 @@ def test_auto_target_temp_passthrough():
     p = build_groups_payload(
         dev_id="X", ports=[1], clean_name="T", begin_time=0, end_time=1439,
         mode="auto", control_style="target", temp_target_f=72,
+    controller_type=ControllerType.LEGACY,
     )
     assert p["targetTempF"] == 72
     assert p["settingMode"] == 1
@@ -361,6 +390,7 @@ def test_auto_buffer_transition_fields(kwargs, field, val):
     p = build_groups_payload(
         dev_id="X", ports=[1], clean_name="T", begin_time=0, end_time=1439,
         mode="auto", control_style="trigger", temp_high_f=80, **kwargs,
+    controller_type=ControllerType.LEGACY,
     )
     assert p[field] == val
 
@@ -370,6 +400,7 @@ def test_vpd_buffer_golden():
     p = build_groups_payload(
         dev_id="X", ports=[1], clean_name="V", begin_time=0, end_time=1439,
         mode="vpd", control_style="target", vpd_target=1.2, vpd_buffer=0.3,
+    controller_type=ControllerType.LEGACY,
     )
     assert p["vpdBuff"] == 3
     assert p["vpdTrans"] == 0
@@ -379,6 +410,7 @@ def test_vpd_transition_golden():
     p = build_groups_payload(
         dev_id="X", ports=[1], clean_name="V", begin_time=0, end_time=1439,
         mode="vpd", control_style="trigger", vpd_high=1.5, vpd_transition=0.4,
+    controller_type=ControllerType.LEGACY,
     )
     assert p["vpdTrans"] == 4
     assert p["vpdBuff"] == 0
@@ -400,16 +432,18 @@ def test_buffer_transition_control_string_round_trip(kwargs, frag):
     """Buffer/transition modifiers render in the decoded control string for every sensor."""
     p = build_groups_payload(
         dev_id="X", ports=[1], clean_name="BT", begin_time=0, end_time=1439, **kwargs,
+    controller_type=ControllerType.LEGACY,
     )
-    assert frag in _decode_rule(p)["control"]
+    assert frag in _decode_rule(p, controller_type=ControllerType.LEGACY)["control"]
 
 
 def test_vpd_buffer_round_trip():
     p = build_groups_payload(
         dev_id="X", ports=[1], clean_name="V", begin_time=0, end_time=1439,
         mode="vpd", control_style="target", vpd_target=1.2, vpd_buffer=0.3,
+    controller_type=ControllerType.LEGACY,
     )
-    decoded = _decode_rule(p)
+    decoded = _decode_rule(p, controller_type=ControllerType.LEGACY)
     assert decoded["mode"] == "vpd"
     assert "VPD: hold at 1.2 kPa" in decoded["control"]
     assert "VPD buffer 0.3 kPa" in decoded["control"]
@@ -420,8 +454,9 @@ def test_vpd_trigger_on_below_only_round_trip():
     p = build_groups_payload(
         dev_id="X", ports=[1], clean_name="V", begin_time=0, end_time=1439,
         mode="vpd", control_style="trigger", vpd_low=0.8,
+    controller_type=ControllerType.LEGACY,
     )
-    decoded = _decode_rule(p)
+    decoded = _decode_rule(p, controller_type=ControllerType.LEGACY)
     assert decoded["mode"] == "vpd"
     assert "VPD: on below 0.8 kPa" in decoded["control"]
     assert decoded["direction"] == "on_below"
@@ -454,8 +489,9 @@ def test_build_then_decode_round_trip(mode, kwargs, expected_mode, must_contain,
     payload = build_groups_payload(
         dev_id="X", ports=[1], clean_name="RT", begin_time=0, end_time=1439,
         mode=mode, **kwargs,
+    controller_type=ControllerType.LEGACY,
     )
-    decoded = _decode_rule(payload)
+    decoded = _decode_rule(payload, controller_type=ControllerType.LEGACY)
     assert decoded["mode"] == expected_mode
     for frag in must_contain:
         assert frag in decoded["control"], f"'{frag}' not in '{decoded['control']}'"
@@ -467,25 +503,32 @@ def test_round_trip_continuous_255():
     p = build_groups_payload(
         dev_id="X", ports=[1], clean_name="C", begin_time=540, end_time=1020,
         mode="on", on_speed=5, switch_time=255,
+    controller_type=ControllerType.LEGACY,
     )
-    assert "runs continuously" in _decode_rule(p)["control"]
-    assert "09:00" not in _decode_rule(p)["control"]
+    assert "runs continuously" in _decode_rule(p, controller_type=ControllerType.LEGACY)["control"]
+    assert "09:00" not in _decode_rule(p, controller_type=ControllerType.LEGACY)["control"]
 
 
 def test_round_trip_all_days_127():
     p = build_groups_payload(
         dev_id="X", ports=[1], clean_name="C", begin_time=540, end_time=1020,
         mode="on", on_speed=5, switch_time=127,
+    controller_type=ControllerType.LEGACY,
     )
-    assert "every day 09:00–17:00" in _decode_rule(p)["control"]
+    assert "every day 09:00–17:00" in _decode_rule(
+        p, controller_type=ControllerType.LEGACY,
+    )["control"]
 
 
 def test_round_trip_weekdays_31():
     p = build_groups_payload(
         dev_id="X", ports=[1], clean_name="C", begin_time=540, end_time=1020,
         mode="on", on_speed=5, switch_time=31,
+    controller_type=ControllerType.LEGACY,
     )
-    assert "Mon–Fri 09:00–17:00" in _decode_rule(p)["control"]
+    assert "Mon–Fri 09:00–17:00" in _decode_rule(
+        p, controller_type=ControllerType.LEGACY,
+    )["control"]
 
 
 def test_round_trip_wrap_around_window_no_negative_duration():
@@ -493,8 +536,9 @@ def test_round_trip_wrap_around_window_no_negative_duration():
     p = build_groups_payload(
         dev_id="X", ports=[1], clean_name="C", begin_time=540, end_time=180,
         mode="on", on_speed=5, switch_time=127,
+    controller_type=ControllerType.LEGACY,
     )
-    assert "09:00–03:00" in _decode_rule(p)["control"]
+    assert "09:00–03:00" in _decode_rule(p, controller_type=ControllerType.LEGACY)["control"]
 
 
 # ============ isFlag / program-slot gating (Issue #284 append fix) ============
@@ -505,6 +549,7 @@ def test_build_groups_payload_default_is_new_program():
     p = build_groups_payload(
         dev_id="X", ports=[1], clean_name="P", begin_time=0, end_time=1439,
         mode="on", on_speed=5,
+    controller_type=ControllerType.LEGACY,
     )
     assert p["isFlag"] == 1
     assert p["subNumber"] == 0
@@ -518,6 +563,7 @@ def test_build_groups_payload_append_honors_slot_and_subnumber():
     p = build_groups_payload(
         dev_id="X", ports=[2], clean_name="0624", begin_time=0, end_time=1439,
         mode="on", on_speed=5, is_flag=0, group_nums=1, sort_type=6, sub_number=2,
+    controller_type=ControllerType.LEGACY,
     )
     assert p["isFlag"] == 0
     assert p["groupNums"] == 1
@@ -532,7 +578,9 @@ def test_build_groups_payload_append_honors_slot_and_subnumber():
 @pytest.mark.parametrize("mode", [5, 7])
 def test_decode_unknown_current_mode_is_graceful(mode):
     """A currentMode the decoder doesn't handle returns 'unknown' — no KeyError/crash."""
-    decoded = _decode_rule({"currentMode": mode})
+    decoded = _decode_rule({"currentMode": mode}, controller_type=ControllerType.LEGACY)
     assert decoded["mode"] == "unknown"
-    assert decoded["control"] == "unrecognized rule"
+    assert decoded["control"] == (
+        "a rule type I don't recognize yet — check this one in the AC Infinity app"
+    )
     assert decoded["direction"] is None

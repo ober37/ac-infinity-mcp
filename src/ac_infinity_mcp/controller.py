@@ -34,6 +34,72 @@ def detect_controller_type(device_data: dict[str, Any]) -> ControllerType:
     return ControllerType.LEGACY
 
 
+# Groups (Advance Automation) `currentMode` codes, keyed by controller class.
+#
+# The two classes use DIFFERENT numbering for the same five modes, and the overlap is
+# actively dangerous: value 6 is VPD on legacy and CYCLE on new-framework, and 1/2 are
+# on/off INVERTED between them. A single table cannot serve both — see Issues #326
+# (writes: `mode="off"` energized a grow light) and #328 (reads: every new-framework
+# automation decoded wrong).
+#
+# Every value below is observed on live hardware, none inferred:
+#   legacy 11/18 — 1 on, 3 cycle, 4 auto, 6 vpd across 31 app-created rules whose
+#     payloads are internally consistent (cycle rules carry cycle timings, auto rules
+#     carry temperature triggers, VPD rules carry VPD targets); 2 off confirmed
+#     2026-09-05 by an app-created Off Mode rule on a devType 11.
+#   new-framework 20/22 — 2 on and 6 cycle from app-created rules on a devType 22;
+#     1 off and 2 on write-tested on a devType 20; 3 auto and 8 vpd from app-created
+#     rules on a devType 20.
+#
+# New-framework numbering matches the legacy per-port `atType` enum. That is a
+# coincidence of the firmware, not a shared definition — do not merge the two.
+_GROUPS_MODE_CODES: dict[ControllerType, dict[str, int]] = {
+    ControllerType.LEGACY: {"on": 1, "off": 2, "cycle": 3, "auto": 4, "vpd": 6},
+    ControllerType.NEW_FRAMEWORK: {"on": 2, "off": 1, "cycle": 6, "auto": 3, "vpd": 8},
+}
+
+# Reverse maps are DERIVED, never hand-written. Two hand-maintained twin tables is
+# exactly how #326/#328 arose.
+_GROUPS_MODE_NAMES: dict[ControllerType, dict[int, str]] = {
+    ctype: {code: name for name, code in modes.items()}
+    for ctype, modes in _GROUPS_MODE_CODES.items()
+}
+
+
+def groups_mode_code(controller_type: ControllerType, mode: str) -> int:
+    """Return the Groups `currentMode` wire value for ``mode`` on this controller class.
+
+    Raises:
+        ValueError: on a mode this class cannot express. Unreachable from the tool
+            surface — `_validate_rule_inputs` rejects unknown modes first — but the
+            encoder must never fall through to a default that energizes a port.
+    """
+    try:
+        return _GROUPS_MODE_CODES[controller_type][mode]
+    except KeyError:  # pragma: no cover — guarded upstream by _validate_rule_inputs
+        raise ValueError(
+            f"no Groups currentMode for mode={mode!r} on {controller_type.value}"
+        ) from None
+
+
+def groups_mode_name(controller_type: ControllerType, code: object) -> str | None:
+    """Return the mode name for a Groups `currentMode` wire value, or None if unknown.
+
+    None means "this class does not define that code" — the caller renders it as an
+    unrecognised rule rather than guessing.
+
+    Matching is strict: only a real `int` resolves. The API sends this field as an integer,
+    and pre-#328 the decoder compared it with `==` against int literals — so a *string*
+    already read as unrecognised, and this keeps that. It also tightens two cases that the
+    old `==` accepted by accident: `2.0 == 2` and `True == 1` both matched, so a float or a
+    bool used to decode as a real mode. Failing closed is the right bias on the field that
+    decides whether a grower is told their equipment is running.
+    """
+    if type(code) is not int:
+        return None
+    return _GROUPS_MODE_NAMES[controller_type].get(code)
+
+
 def build_write_payload(
     current_settings: dict[str, Any],
     updates: dict[str, Any],

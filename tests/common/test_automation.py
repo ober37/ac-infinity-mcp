@@ -13,6 +13,7 @@ from ac_infinity_mcp.automation import (
     _is_port_not_powered,
     _sanitize_api_string,
 )
+from ac_infinity_mcp.controller import ControllerType
 from ac_infinity_mcp.schema import ACInfinityAPIError, ACInfinityAuthError
 from tests.fixtures.advance_automation_fixtures import (
     MOCK_RULE_HUMIDITY_SETPOINT,
@@ -64,14 +65,14 @@ def test_sanitize_all_control_chars_returns_unnamed():
 
 
 def test_group_automations_empty_list():
-    assert _group_automations([]) == []
+    assert _group_automations([], controller_type=ControllerType.LEGACY) == []
 
 
 def test_group_automations_single_entry():
     raw = [{"advId": 100, "advName": "Night Cycle", "isOn": 1,
             "onSpeed": 5, "grouptDevType": 1, "runState": 1,
             "beginTime": 0, "endTime": 1439, "onTimeSwitch": 0}]
-    result = _group_automations(raw)
+    result = _group_automations(raw, controller_type=ControllerType.LEGACY)
     assert len(result) == 1
     g = result[0]
     assert g["automation_id"] == 100
@@ -90,7 +91,7 @@ def test_group_automations_same_name_merged():
         {"advId": 200, "advName": "Cycle A", "isOn": 1, "onSpeed": 7,
          "grouptDevType": 2, "runState": 1, "beginTime": 0, "endTime": 1439, "onTimeSwitch": 0},
     ]
-    result = _group_automations(raw)
+    result = _group_automations(raw, controller_type=ControllerType.LEGACY)
     assert len(result) == 1
     g = result[0]
     assert g["automation_id"] == 100  # first entry's advId is canonical
@@ -105,7 +106,7 @@ def test_group_automations_different_names_separate_groups_insertion_order():
         {"advId": 2, "advName": "Beta", "isOn": 0, "onSpeed": 4,
          "grouptDevType": 2, "runState": 0, "beginTime": 0, "endTime": 1439, "onTimeSwitch": 0},
     ]
-    result = _group_automations(raw)
+    result = _group_automations(raw, controller_type=ControllerType.LEGACY)
     assert len(result) == 2
     # Insertion order preserved
     assert result[0]["name"] == "Alpha"
@@ -116,13 +117,15 @@ def test_group_automations_different_names_separate_groups_insertion_order():
 
 
 def test_decode_rule_off_mode():
-    assert _decode_rule({"currentMode": 2}) == {
+    assert _decode_rule({"currentMode": 2}, controller_type=ControllerType.LEGACY) == {
         "mode": "off", "control": "off", "direction": None,
     }
 
 
 def test_decode_rule_on_mode():
-    decoded = _decode_rule({"currentMode": 1, "onSpeed": 7, "offSpeed": 0})
+    decoded = _decode_rule(
+        {"currentMode": 1, "onSpeed": 7, "offSpeed": 0}, controller_type=ControllerType.LEGACY,
+    )
     assert decoded["mode"] == "on"
     assert decoded["direction"] is None
     assert "runs at set speed" in decoded["control"]
@@ -131,7 +134,7 @@ def test_decode_rule_on_mode():
 def test_decode_rule_cycle_mode():
     # cycleOn/cycleOff are SECONDS on the device; decoder shows minutes = seconds/60.
     decoded = _decode_rule({"currentMode": 3, "cycleOn": 3600, "cycleOff": 7200,
-                            "onSpeed": 5, "offSpeed": 0})
+                            "onSpeed": 5, "offSpeed": 0}, controller_type=ControllerType.LEGACY)
     assert decoded["mode"] == "cycle"
     assert "cycle 60 min on / 120 min off" in decoded["control"]
 
@@ -139,7 +142,7 @@ def test_decode_rule_cycle_mode():
 def test_decode_rule_vpd_target_div10():
     """Live VPD-target rule (targetVpd=9, currentMode=6) decodes to 0.9 kPa despite the
     rail VPD-trigger family (highVpd=99 / switch=1)."""
-    decoded = _decode_rule(copy.deepcopy(MOCK_RULE_VPD))
+    decoded = _decode_rule(copy.deepcopy(MOCK_RULE_VPD), controller_type=ControllerType.LEGACY)
     assert decoded["mode"] == "vpd"
     assert "VPD: hold at 0.9 kPa" in decoded["control"]
     assert decoded["direction"] is None
@@ -148,7 +151,9 @@ def test_decode_rule_vpd_target_div10():
 def test_decode_rule_auto_target_humidity_wins_over_rail_triggers():
     """currentMode=4 + settingMode=1 + targetHumi>0 decodes as a humidity hold; the
     rail-parked trigger families (switches=1) are correctly ignored (rail-sentinel rule)."""
-    decoded = _decode_rule(copy.deepcopy(MOCK_RULE_HUMIDITY_SETPOINT))
+    decoded = _decode_rule(
+        copy.deepcopy(MOCK_RULE_HUMIDITY_SETPOINT), controller_type=ControllerType.LEGACY,
+    )
     assert decoded["mode"] == "auto"
     assert "humidity: hold at 65%" in decoded["control"]
     # The rail-parked temperature trigger must NOT produce a clause.
@@ -159,7 +164,9 @@ def test_decode_rule_auto_target_humidity_wins_over_rail_triggers():
 def test_decode_rule_auto_trigger_on_below_rail_aware():
     """autoLowTempF=76 + switch=1 is active; autoHighTempF=194 (rail) is NOT. Decodes to a
     single on-below temperature trigger clause."""
-    decoded = _decode_rule(copy.deepcopy(MOCK_RULE_TEMPERATURE_TRIGGER))
+    decoded = _decode_rule(
+        copy.deepcopy(MOCK_RULE_TEMPERATURE_TRIGGER), controller_type=ControllerType.LEGACY,
+    )
     assert decoded["mode"] == "auto"
     assert decoded["direction"] == "on_below"
     assert "temperature: on below 76°F" in decoded["control"]
@@ -171,7 +178,7 @@ def test_decode_rule_auto_trigger_on_above_single_sensor():
     entry["autoHighTempF"] = 85
     entry["autoHighTempSwitch"] = 1
     entry["autoLowTempF"] = 32        # park the low trigger at its rail (inactive)
-    decoded = _decode_rule(entry)
+    decoded = _decode_rule(entry, controller_type=ControllerType.LEGACY)
     assert decoded["direction"] == "on_above"
     assert "temperature: on above 85°F" in decoded["control"]
 
@@ -184,7 +191,7 @@ def test_decode_rule_auto_no_rule_set_fallback():
     entry["autoLowTempF"] = 32
     entry["autoHighHumi"] = 100
     entry["autoLowHumi"] = 0
-    decoded = _decode_rule(entry)
+    decoded = _decode_rule(entry, controller_type=ControllerType.LEGACY)
     assert decoded["mode"] == "auto"
     assert "auto (no rule set)" in decoded["control"]
 
@@ -195,13 +202,13 @@ def test_decode_rule_vpd_no_rule_set_fallback():
     entry["settingMode"] = 0
     entry["highVpd"] = 99
     entry["lowVpd"] = 0
-    decoded = _decode_rule(entry)
+    decoded = _decode_rule(entry, controller_type=ControllerType.LEGACY)
     assert decoded["mode"] == "vpd"
     assert "VPD (no rule set)" in decoded["control"]
 
 
 def test_decode_rule_unknown_mode():
-    decoded = _decode_rule({"currentMode": 99})
+    decoded = _decode_rule({"currentMode": 99}, controller_type=ControllerType.LEGACY)
     assert decoded["mode"] == "unknown"
 
 
@@ -211,7 +218,9 @@ def test_decode_rule_unknown_mode():
 def test_group_automations_two_window_per_rule_decode():
     """A 2-entry same-advName program with different windows + modes decodes into two
     distinct per-rule descriptions (the pattern that collapsed before #284)."""
-    grouped = _group_automations(copy.deepcopy(MOCK_TWO_WINDOW_PROGRAM))
+    grouped = _group_automations(
+        copy.deepcopy(MOCK_TWO_WINDOW_PROGRAM), controller_type=ControllerType.LEGACY,
+    )
     assert len(grouped) == 1
     pgs = grouped[0]["port_groups"]
     assert len(pgs) == 2
@@ -235,7 +244,7 @@ def test_group_automations_additive_keys_do_not_disturb_program_or_old_per_eleme
     raw = [{"advId": 100, "advName": "Night Cycle", "isOn": 1, "onSpeed": 5,
             "grouptDevType": 1, "runState": 1, "beginTime": 0, "endTime": 1439,
             "currentMode": 1, "onTimeSwitch": 0}]
-    grouped = _group_automations(copy.deepcopy(raw))[0]
+    grouped = _group_automations(copy.deepcopy(raw), controller_type=ControllerType.LEGACY)[0]
     # Program-level keys unchanged.
     assert grouped["automation_id"] == 100
     assert grouped["name"] == "Night Cycle"
@@ -386,7 +395,9 @@ async def test_build_conflict_sub_path_a_has_expected_options():
     """Port covered by bitmask → 1_break_out + 2_disable_automation in options."""
     raw = [_make_raw_entry(101, "Night Cycle", is_on=1, run_state=1, bitmask=1)]
     client = _make_mock_client(raw)
-    result = await _build_advance_conflict_response(client, "C58ZA", 123456, 1, "Filter")
+    result = await _build_advance_conflict_response(
+        client, "C58ZA", 123456, 1, "Filter", controller_type=ControllerType.LEGACY,
+    )
     data = json.loads(result)
     assert data["conflict"] == "ADVANCE_AUTOMATION"
     assert "1_break_out" in data["options"]
@@ -400,7 +411,9 @@ async def test_build_conflict_sub_path_a_human_summary_explains_learning():
     arbitrary obstruction (and won't try to force repeated manual overrides)."""
     raw = [_make_raw_entry(101, "Night Cycle", is_on=1, run_state=1, bitmask=1)]
     client = _make_mock_client(raw)
-    result = await _build_advance_conflict_response(client, "C58ZA", 123456, 1, "Filter")
+    result = await _build_advance_conflict_response(
+        client, "C58ZA", 123456, 1, "Filter", controller_type=ControllerType.LEGACY,
+    )
     data = json.loads(result)
     assert "pattern the controller is learning" in data["human_summary"]
 
@@ -410,7 +423,8 @@ async def test_build_conflict_sub_path_a_with_requested_speed_has_update_option(
     raw = [_make_raw_entry(101, "Night Cycle", is_on=1, run_state=1, bitmask=1)]
     client = _make_mock_client(raw)
     result = await _build_advance_conflict_response(
-        client, "C58ZA", 123456, 1, "Filter", requested_speed=5
+        client, "C58ZA", 123456, 1, "Filter", requested_speed=5,
+    controller_type=ControllerType.LEGACY,
     )
     data = json.loads(result)
     assert "0_update_speed" in data["options"]
@@ -422,7 +436,9 @@ async def test_build_conflict_sub_path_b_port_not_in_bitmask():
     # bitmask=2 → Port 2 only
     raw = [_make_raw_entry(101, "Night Cycle", is_on=1, run_state=1, bitmask=2)]
     client = _make_mock_client(raw)
-    result = await _build_advance_conflict_response(client, "C58ZA", 123456, 1, "Filter")
+    result = await _build_advance_conflict_response(
+        client, "C58ZA", 123456, 1, "Filter", controller_type=ControllerType.LEGACY,
+    )
     data = json.loads(result)
     assert "1_disable_automation" in data["options"]
     assert "1_break_out" not in data["options"]
@@ -432,7 +448,9 @@ async def test_build_conflict_all_disabled_path():
     """All automations disabled → 1_re_disable_to_clear option."""
     raw = [_make_raw_entry(101, "Night Cycle", is_on=0, run_state=0, bitmask=1)]
     client = _make_mock_client(raw)
-    result = await _build_advance_conflict_response(client, "C58ZA", 123456, 1, "Filter")
+    result = await _build_advance_conflict_response(
+        client, "C58ZA", 123456, 1, "Filter", controller_type=ControllerType.LEGACY,
+    )
     data = json.loads(result)
     assert "1_re_disable_to_clear" in data["options"]
 
@@ -440,7 +458,9 @@ async def test_build_conflict_all_disabled_path():
 async def test_build_conflict_degraded_api_error():
     """API raises ACInfinityAPIError → degraded path with 1_find_and_disable."""
     client = _make_mock_client(side_effect=ACInfinityAPIError("fail"))
-    result = await _build_advance_conflict_response(client, "C58ZA", 123456, 1, "Filter")
+    result = await _build_advance_conflict_response(
+        client, "C58ZA", 123456, 1, "Filter", controller_type=ControllerType.LEGACY,
+    )
     data = json.loads(result)
     assert data["conflict"] == "ADVANCE_AUTOMATION"
     assert "1_find_and_disable" in data["options"]
@@ -449,7 +469,9 @@ async def test_build_conflict_degraded_api_error():
 async def test_build_conflict_auth_error_returns_error():
     """API raises ACInfinityAuthError → auth error JSON, no conflict key."""
     client = _make_mock_client(side_effect=ACInfinityAuthError("auth"))
-    result = await _build_advance_conflict_response(client, "C58ZA", 123456, 1, "Filter")
+    result = await _build_advance_conflict_response(
+        client, "C58ZA", 123456, 1, "Filter", controller_type=ControllerType.LEGACY,
+    )
     data = json.loads(result)
     assert "error" in data
     assert "conflict" not in data
@@ -470,7 +492,7 @@ def test_decode_rule_string_valued_buffer_transition_no_raise():
         # string-valued (defensive): must coerce, not crash
         "vpdBuff": "3", "temperatureFBuff": "2", "humidityTrans": "4",
     }
-    decoded = _decode_rule(entry)  # must not raise
+    decoded = _decode_rule(entry, controller_type=ControllerType.LEGACY)  # must not raise
     assert decoded["mode"] == "vpd"
     assert "VPD buffer 0.3 kPa" in decoded["control"]
     assert "temperature buffer 2°F" in decoded["control"]

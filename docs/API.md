@@ -510,7 +510,7 @@ devId=REDACTED_DEV_ID&externalPort=1&onSpead=5&modeType=2&offSpead=0&...
 
 ---
 
-## All 34 Known API Quirks
+## All 35 Known API Quirks
 
 ### Quirk 1 — Auth typo: `appPasswordl`
 
@@ -1027,22 +1027,40 @@ zero-value filter alone is insufficient for devType=22.
 
 ---
 
-### Quirk 21 — `onTimeSwitch` field controls schedule mode
+### Quirk 21 — four independent signals mean "runs 24/7", and none implies another
 
-The Advance Automation API returns an `onTimeSwitch` field per group entry. It maps to the
-**"Continuous 24 Hours / 7 Days"** toggle in the AC Infinity app:
+`onTimeSwitch` is returned per group entry and maps to the **"Continuous 24 Hours / 7 Days"**
+toggle in the AC Infinity app:
 
-- `onTimeSwitch = 0` — toggle **OFF**: the time window applies. The automation is scheduled
-  and only active between `beginTime` and `endTime`. Both values must be real (non-sentinel)
-  for the schedule to be shown; if either is `255` (sentinel), treat as continuous.
-- `onTimeSwitch = 1` — toggle **ON**: runs 24/7 regardless of `beginTime`/`endTime` values.
-  Always treated as continuous.
-- Missing field defaults to `0` (scheduled if real times present, else continuous).
-- Values other than `0` and `1` are treated as continuous (safe fallback).
+- `onTimeSwitch = 0` — toggle **OFF**: the time window applies.
+- `onTimeSwitch = 1` — toggle **ON**: runs 24/7 regardless of `beginTime`/`endTime`.
+- Missing field defaults to `0`.
+- Any other value is treated as continuous (safe fallback — a schedule the device may not be
+  keeping is worse than none).
+
+**`onTimeSwitch` is not the only signal, and reading it alone is a defect.** Three others say
+the same thing, and real data has each of them set while the others are clear:
+
+| Signal | Meaning | Evidence |
+|---|---|---|
+| `onTimeSwitch` non-zero | app Continuous toggle | `'Clone Transplant'` — set on **one** of its five rules |
+| `switchTime` bit 7 (128) | the schedule's own continuous flag | 7 of the 31 captured entries, **with real begin/end times** — the shape every continuous rule this server writes takes |
+| `beginTime == endTime` | zero-length window | `_rule_window_str` has always called this "always active" |
+| sentinel times (`255` / `65535`) | no readable window | `_fmt_hhmm` renders `65535` as a fabricated `12:15` if not guarded |
+
+**`onTimeSwitch` is per RULE, not per automation.** `_group_automations` also surfaces the
+first entry's value at automation level for the `schedule` block, which describes that same
+first rule — but each rule's own value governs its own `window` and `control`. Applying rule
+0's toggle to every rule reported four correctly-scheduled ports as running 24/7.
+
+`_rule_is_continuous()` in `server.py` is the implementation `get_advance_automation` uses;
+`schedule`, `rules[].window`, `rules[].control` and `human_summary` all derive from it. See
+Issue #329 — reconciling those fields one at a time reproduced the same contradiction four
+times over. `_resolve_rule`, which builds the rule lists for `update_automation_rule` and
+`delete_automation_rule`, does **not** yet use it and still reads `switchTime` alone (#342).
 
 **Important:** The mapping is the opposite of what the field name implies. A value of `0`
-(switch "off") means the time-window restriction is in effect (scheduled). See
-`_group_automations()` — `on_time_switch` key.
+(switch "off") means the time-window restriction is in effect (scheduled).
 
 ### Quirk 22 — Ghost port filtering and toggle-device data quality in `get_port_activity_report`
 
@@ -1464,15 +1482,26 @@ verified **two-window pattern** is two complementary rules on the same port (e.g
 and a lights-off window). This quirk documents how each rule's behavior is encoded, discovered
 via live probing on device 8T4TC (devType=18, legacy) on 2026-06-24 (Issue #284).
 
-**`currentMode` map (the rule's behavior type):**
+**`currentMode` map (the rule's behavior type) — the wire integer is DEVICE-CLASS
+DEPENDENT.** Legacy controllers (devType 11/18) and new-framework controllers
+(devType ≥ 20) number the same five modes **differently**, and `1`/`2` are *inverted*
+between them. **Quirk 35 is the authoritative statement of both tables** and of the
+`6` collision (VPD on legacy, Cycle on new-framework); the columns below repeat it for
+convenience. Everywhere else in this quirk a bare `currentMode=N` means the **legacy**
+number, because that is the hardware this quirk was probed on.
 
-| `currentMode` | Mode (tool `mode`) | Notes |
-|---|---|---|
-| `1` | **On** (`on`) — fixed speed | No control fields beyond name/ports/schedule/speed (optional `onTime` ramp) |
-| `2` | **Off** (`off`) | Port forced off during the window. All trigger/target fields are don't-care (app leaves base defaults). Captured live (program "0624", Rule 4) — this is a real, supported rule type, not the "no rule" pseudo-state described in earlier revisions |
-| `3` | **Cycle** (`cycle`) | `cycleOn` / `cycleOff` stored in **seconds** — see "Cycle units" below |
-| `4` | **Auto** (`auto`) — temperature/humidity, target or trigger | Sub-mode resolved by `settingMode`/`setSelect` (see below) |
-| `6` | **VPD** (`vpd`) — target or trigger | `settingMode=1` + `targetVpd` (target), or `settingMode=0` + `highVpd`/`lowVpd` (trigger) |
+| Mode (tool `mode`) | Legacy `currentMode` (devType 11/18) | New-framework `currentMode` (devType ≥ 20) | Notes |
+|---|---|---|---|
+| **On** (`on`) — fixed speed | `1` | `2` | No control fields beyond name/ports/schedule/speed (optional `onTime` ramp) |
+| **Off** (`off`) | `2` | `1` | Port forced off during the window. All trigger/target fields are don't-care (app leaves base defaults). Captured live (program "0624", Rule 4) — this is a real, supported rule type, not the "no rule" pseudo-state described in earlier revisions |
+| **Cycle** (`cycle`) | `3` | `6` | `cycleOn` / `cycleOff` stored in **seconds** — see "Cycle units" below |
+| **Auto** (`auto`) — temperature/humidity, target or trigger | `4` | `3` | Sub-mode resolved by `settingMode`/`setSelect` (see below) |
+| **VPD** (`vpd`) — target or trigger | `6` | `8` | `settingMode=1` + `targetVpd` (target), or `settingMode=0` + `highVpd`/`lowVpd` (trigger) |
+
+Never hardcode either column. Both live in one class-keyed table in `controller.py`
+(`groups_mode_code` / `groups_mode_name`), the reverse map is *derived* from the forward
+one, and every encoder and decoder call site takes a required keyword-only
+`controller_type` so a missed site is a type error, not a silently wrong write (#326, #328).
 
 **Compositional surface — how the tools map to the encoding.** The rule-write tools expose a
 *compositional* surface (`mode` + `control_style` + sensor params) rather than the discrete
@@ -1496,11 +1525,17 @@ supposed to be a clean target/VPD rule. The fix: when writing one mode, zero the
 belong to the other mode (value 0/rail **and** switch 0). The verified per-mode signatures
 (`client.py` `_apply_vpd` / `_apply_auto`):
 
+The signatures are keyed on the **mode**, never on a `currentMode` integer — the wire
+integer differs by device class (Quirk 35), and the encoder resolves it once before the
+payload is built. These signatures were ground-truthed on **legacy** hardware (devType 18);
+they are applied unchanged on new-framework controllers, which is untested against an
+app-made new-framework Auto/VPD rule.
+
 | Mode | Active families (switch=1) | Zeroed families (value 0/rail, switch=0) |
 |---|---|---|
-| **VPD-target** (`currentMode=6`, `settingMode=1`) | `targetVpd`=kPa×10 (`targetVpdSwitch=1`); `highVpd`=same kPa×10 (`highVpdSwitch=1`); `lowVpd`=0 (`lowVpdSwitch=0`) | All auto temp/humidity (`autoHigh/LowTempF/C`, `autoHigh/LowHumi`); both temp/humidity targets (`targetTempF`, `targetHumi`) |
-| **VPD-trigger** (`currentMode=6`, `settingMode=0`) | `highVpd`/`lowVpd`=kPa×10 with matching switch; unused direction parked, switch=0; `targetVpd=0`, `targetVpdSwitch=0` | Same auto + temp/humidity-target families as above |
-| **Auto** (`currentMode=4`, target or trigger) | The relevant temp/humidity target or trigger families (see compositional list above) | The **entire VPD family** — `highVpd`/`lowVpd`/`targetVpd` all 0 with all VPD switches 0 |
+| **VPD-target** (`vpd`, `settingMode=1`) | `targetVpd`=kPa×10 (`targetVpdSwitch=1`); `highVpd`=same kPa×10 (`highVpdSwitch=1`); `lowVpd`=0 (`lowVpdSwitch=0`) | All auto temp/humidity (`autoHigh/LowTempF/C`, `autoHigh/LowHumi`); both temp/humidity targets (`targetTempF`, `targetHumi`) |
+| **VPD-trigger** (`vpd`, `settingMode=0`) | `highVpd`/`lowVpd`=kPa×10 with matching switch; unused direction parked, switch=0; `targetVpd=0`, `targetVpdSwitch=0` | Same auto + temp/humidity-target families as above |
+| **Auto** (`auto`, target or trigger) | The relevant temp/humidity target or trigger families (see compositional list above) | The **entire VPD family** — `highVpd`/`lowVpd`/`targetVpd` all 0 with all VPD switches 0 |
 
 Key points: (1) VPD-target **mirrors** the setpoint into both `targetVpd` and `highVpd` (with
 `highVpdSwitch=1`) while `lowVpd` stays off — this is the app's own signature, not an arbitrary
@@ -1668,16 +1703,28 @@ round-trip described above:
   forms (day names, `"all"`, `"weekdays"`, `"weekends"`) — an empty schedule would silently
   disable the rule.
 
-> **Behavior-verification status (Gate 5 passed 2026-06-27):** The `currentMode` map, the
-> per-mode field signatures (as corrected by #288 above), the `currentMode=4` setpoint-vs-trigger
-> authority (the `settingMode` vs `setSelect` distinction), and the `targetVpd ÷10` factor were
-> originally **storage-verified** (read-back of a write to a throwaway **disabled** rule) and are
-> now **behavior-verified**: the VPD-target and Auto signatures were diffed against the user's own
-> app-made rules via live read-back, the cross-mode-switch phantom-trigger leak was fixed, and the
-> full live battery (A1/A2/B/C1/C2/D1/D2/E) passed. Newer fields returned by `getGroups`
-> (`sensorModeData`, `triggerSwitch`, `triggerValue`, `targetSwitch`, `targetValue`, `fanLevel`,
-> `minLevel`) are `0`/`None` on all legacy entries — purpose unknown, likely AI+/newer-firmware
-> only. `currentMode=2` (Off) and a CO2 target field were not located on this device.
+> **Behavior-verification status (Gate 5 passed 2026-06-27) — LEGACY HARDWARE ONLY.** Every
+> claim in this banner was established on device 8T4TC (devType=18, legacy) and applies to the
+> **legacy** column of the `currentMode` map only. The original wording asserted the map as an
+> unscoped general fact; it never covered new-framework controllers, whose numbering is
+> different (Quirk 35) and whose Auto/VPD signatures remain unverified against an app-made rule.
+>
+> On legacy: the `currentMode` map, the per-mode field signatures (as corrected by #288 above),
+> the Auto setpoint-vs-trigger authority (the `settingMode` vs `setSelect` distinction), and the
+> `targetVpd ÷10` factor were originally **storage-verified** (read-back of a write to a
+> throwaway **disabled** rule) and are now **behavior-verified**: the VPD-target and Auto
+> signatures were diffed against the user's own app-made rules via live read-back, the
+> cross-mode-switch phantom-trigger leak was fixed, and the full live battery
+> (A1/A2/B/C1/C2/D1/D2/E) passed. The 31 legacy rules in
+> `tests/fixtures/captures/getgroups-legacy-2026-09-06.json` pin the decoded output of that
+> hardware byte-for-byte, so the legacy column cannot drift.
+>
+> Newer fields returned by `getGroups` (`sensorModeData`, `triggerSwitch`, `triggerValue`,
+> `targetSwitch`, `targetValue`, `fanLevel`, `minLevel`) are `0`/`None` on all legacy entries —
+> purpose unknown, and on new-framework controllers `sensorModeData` is where an app-made
+> Auto/VPD rule actually keeps its thresholds (Quirk 35). Legacy Off (`currentMode=2`) was not
+> located on 8T4TC at the time of this Gate 5; it was confirmed separately on a devType 11
+> on 2026-09-05. A CO2 target field was not located on this device.
 
 ### Quirk 34 — `portType` is a per-port device-identity field exposed by NO read endpoint; resolve it from existing rules, never hardcode
 
@@ -1759,6 +1806,115 @@ code, so write-path 403s (rate-limit `"Data saving failed"`, field-validation er
 misclassified — writes pass `session_refreshable=False` and are unaffected. A real expiry thus
 self-heals through the existing one-shot transparent re-auth (Quirk 31); the misleading Bug-1
 403 does not, which is why removing the headers is the actual fix and this is defense only.
+
+---
+
+### Quirk 35 — Groups `currentMode` is TWO enums, not one: legacy and new-framework number the same five modes differently, and On/Off are INVERTED
+
+**The highest-severity quirk in this document.** Getting it wrong does not produce a wrong
+string — it energizes equipment. Before #326 the encoder wrote the legacy integer on every
+controller, so on a new-framework device `mode="off"` emitted `currentMode=2`; that class
+reads `2` as **On**. An automation a grower created to hold a grow light off ran it at full
+power instead. The same table read backwards (#328) meant every new-framework Advance
+Automation was reported to the grower as some other mode entirely.
+
+**The two tables.** Both are fully observed on live hardware — no value below is inferred:
+
+| Mode (tool `mode`) | Legacy — devType 11, 18 | New-framework — devType ≥ 20, or `newFrameworkDevice=true` |
+|---|---|---|
+| `on` | `1` | `2` |
+| `off` | `2` | `1` |
+| `cycle` | `3` | `6` |
+| `auto` | `4` | `3` |
+| `vpd` | `6` | `8` |
+
+Two properties make a single table impossible and a mistake dangerous:
+
+- **`1` and `2` are inverted.** The two most consequential modes — the one that runs
+  equipment and the one that stops it — swap places between classes. There is no partial
+  failure here: using the wrong table for `off` means `on`.
+- **`6` collides.** It is **VPD** on legacy and **Cycle** on new-framework. No widened or
+  merged table can serve both classes, so the device-class gate is mandatory rather than an
+  optimization.
+
+**New-framework Groups numbering coincides with the legacy per-port `atType` enum**
+(`getdevModeSettingList`: OFF=1, ON=2, AUTO=3, TIMER=4/5, CYCLE=6, SCHEDULE=7, VPD=8) —
+identical for all five modes the Groups surface uses. Treat that as a coincidence of
+firmware lineage, **not** a shared definition: the two surfaces are different endpoints with
+different field names, and Quirk 32's "do not conflate the two" warning still applies to the
+legacy table.
+
+**Evidence provenance:**
+
+| Value | Class | How it was established |
+|---|---|---|
+| `1` on, `3` cycle, `4` auto, `6` vpd | legacy | 31 app-created rules across devType 11 and 18, internally consistent (cycle rules carry cycle timings, auto rules temperature triggers, VPD rules VPD targets). Pinned in `tests/fixtures/captures/getgroups-legacy-2026-09-06.json` |
+| `2` off | legacy | App-created Off Mode rule on a devType 11, confirmed 2026-09-05 |
+| `2` on, `6` cycle | new-framework | App-created rules on a devType 22 |
+| `1` off, `2` on | new-framework | Write-tested on a devType 20 by a contributor — this is the #326 repro |
+| `3` auto, `8` vpd | new-framework | App-created rules on a devType 20 |
+
+**Both directions matter, and the decoder is also a write path.** `updateGroupsById` is
+read-before-write (Quirk 13/32): the edit path decodes the live rule to learn its current
+mode, then overlays that mode's signature fields. Decoding a devType-20 Auto rule
+(`currentMode=3`) against the legacy table yielded "cycle", so an in-place edit wrote
+`cycleOn`/`cycleOff` onto a temperature automation and POSTed it. That is a second silent
+actuating defect, fixed by the same change.
+
+**How this is enforced in code.** Both tables live in one class-keyed structure in
+`controller.py`; `groups_mode_code()` encodes and `groups_mode_name()` decodes, and the
+reverse map is **derived** from the forward one so the two directions cannot drift — twin
+hand-maintained tables are precisely how #326/#328 arose. `controller_type` is a **required
+keyword-only** argument on `build_groups_payload`, `build_add_groups_payload`, `_decode_rule`,
+`_group_automations` and `_build_advance_conflict_response`, so a call site that forgets to
+thread the class fails type-checking rather than silently decoding against the wrong table.
+No `currentMode` integer literal survives in `client.py` or `automation.py`. The class comes
+from `detect_controller_type()`, which covers both `devType >= 20` and the
+`newFrameworkDevice` flag, so devType 21 (#290) resolves correctly without a second list.
+
+**An unrecognized value never guesses.** `groups_mode_name` matches strictly on a real `int`
+(a `bool` or a float that happens to compare equal is rejected) and returns nothing for a
+code the class does not define; the rule renders as *"a rule type I don't recognize yet —
+check this one in the AC Infinity app"*. Values `4`, `5` and `7` have never been observed in
+a new-framework `getGroups` entry and are deliberately left unmapped rather than guessed.
+
+**New-framework Auto/VPD rules keep their thresholds in `sensorModeData`.** The three
+new-framework Auto/VPD rules ever observed (all on a devType 20) carry their real
+configuration in `sensorModeData`, which this project does not decode, leaving the legacy
+threshold fields parked at their rails. Reporting "no rule set" for a heater that is actively
+holding 80 °F is a confident false statement, so the decoder distinguishes the two cases by
+the plain `sensorModeDataNum` count: an explicit `0` earns *"(no rule set)"*, and any other
+value — **including an absent key** — renders *"(rule set in the AC Infinity app — I can't
+read its details yet)"*. Missing takes the cautious branch deliberately: defaulting an
+undocumented field to `0` would produce exactly the false reassurance this guards against.
+
+**Audit trail.** Every Groups write logs one INFO line naming the tool, the device, the
+resolved controller class, the mode and the emitted `currentMode`. #326 had to be diagnosed
+on live hardware by a human watching a light fixture, because nothing recorded which integer
+was actually sent.
+
+**Known gaps (do not read this quirk as fully closed):**
+
+- **devType 20 ↔ 22 agreement is confirmed for `on`, `off` and `cycle`; assumed for `auto`
+  and `vpd`.** Gate 5 on 2026-09-06 read back three app-created rules on a devType 22
+  (Q0KT4, empty outlet) and all three decoded correctly: `off=1`, `on=2`, `cycle=6`. `off=1`
+  had previously been observed only on devType 20, so that half of the assumption is now
+  evidence. `auto=3` and `vpd=8` remain devType-20-only — `detect_controller_type` buckets
+  the two devTypes together, so this table still changes what gets written for those two
+  modes on devType 22 with no devType-22 evidence, and an outlet strip's app cannot create
+  such a rule to check against.
+- **Day bitmask order is confirmed.** The same Gate 5 pass set Mon/Wed/Fri and
+  Sun/Tue/Thu/Sat rules and both read back with the correct day sets, pinning bit 0 = Monday
+  through bit 6 = Sunday. None of the 31 captured legacy entries uses a day subset — they are
+  all `127` or `255` — so this ordering had never been exercised against real data before.
+- **`auto` and `vpd` are read-confirmed, not write-confirmed** on new-framework. The app
+  *stores* `3` and `8`; no project-written `3` has been observed to actuate as Auto.
+- **Existing automations are not migrated.** A new-framework automation created by this
+  server *before* this fix is stored on the device with the inverted value and keeps behaving
+  that way. It must be deleted and recreated (or fixed in the AC Infinity app).
+
+Issues #326 (encoder) and #328 (decoder). See Quirk 32 for everything else about the Groups
+rule encoding, and Quirk 13 for the read-before-write pattern the edit path depends on.
 
 ---
 
@@ -2971,27 +3127,30 @@ Get full detail for a single Advance Automation.
     "begin_time": "09:00",
     "end_time": "17:00"
   },
-  "human_summary": "'Moderate Airflow' runs at speed 5 from 09:00 to 17:00, currently enabled."
+  "human_summary": "'Moderate Airflow' runs at speed 5 every day 09:00–17:00 (America/Chicago), currently enabled."
 }
 ```
 
-**Scheduled mode selected but no time window set:**
+**No readable time window** (both sentinels, no continuous flag) — reported as continuous,
+because a schedule the device is not keeping is worse than none:
 ```json
 {
   "schedule": {
-    "mode": "scheduled",
+    "mode": "continuous",
     "begin_time": null,
     "end_time": null,
-    "schedule_note": "scheduled mode selected but no time window is configured"
+    "timezone": "America/Chicago"
   },
-  "human_summary": "'Moderate Airflow' runs at speed 5 on a schedule (no time window set), currently enabled."
+  "human_summary": "'Moderate Airflow' runs continuously at speed 5, currently enabled."
 }
 ```
+(Before #329 this returned `"mode": "scheduled"` with null times and a `schedule_note` key.
+Neither the key nor that wording exists any more: `schedule.mode` is `"scheduled"` only when
+both times are real AND nothing claims 24/7.)
 
 **Field notes:**
-- `schedule.mode` — `"scheduled"` when `onTimeSwitch=0` AND real `begin_time`/`end_time` values are present (the "Continuous 24H/7D" app toggle is OFF, so the time window applies); `"continuous"` when `onTimeSwitch=1` (toggle ON, runs 24/7) or when times are sentinel values (255). See Quirk 21.
-- `schedule.begin_time` / `schedule.end_time` — `null` for continuous mode; `"HH:MM"` for scheduled mode with a time window; `null` for scheduled mode with no window configured
-- `schedule.schedule_note` — present only in scheduled mode with no time window; value: `"scheduled mode selected but no time window is configured"`
+- `schedule.mode` — **this block describes the automation's FIRST rule**, which is where its `begin_time`, `end_time` and 24/7 flag all come from. A later rule in the same program can be on a different schedule, so `rules[]` is the full picture — `'Clone Transplant'` in the capture returns `"scheduled"` while three of its five rules run 24/7. `"scheduled"` requires that first rule to have a real window and none of the **four** signals in Quirk 21 marking it 24/7: the app's Continuous toggle (any non-zero value, including unrecognised ones, which fail safe), `switchTime` bit 7, a zero-length window (`begin == end`), or sentinel times. Reading a subset of the four is what let one response call the same automation both continuous and scheduled (#329).
+- `schedule.begin_time` / `schedule.end_time` — `"HH:MM"` for scheduled mode; `null` for continuous mode. There is no third state: if the times are unreadable the mode is `"continuous"`, not `"scheduled"` with nulls.
 - `port_groups` — each group has its own speed settings; `device_type` lists the actual port names governed by that group, resolved from the `grouptDevType` bitmask (e.g. `"Left Fan (Port 5), Right Fan (Port 6)"`). Each port is formatted as `"Name (Port N)"`. When the bitmask covers no ports, `"Unknown"` is returned. Port names are sourced from `deviceInfo.ports` via the same `port_name_map` used for `governed_ports`.
 - `governed_ports` — list of `{"port": N, "port_name": "Name (Port N)"}` objects identifying which ports this automation controls; decoded from the `grouptDevType` bitmask of each of the automation's port groups (Port N = bit N-1); port names sourced from `deviceInfo.ports` (Quirk 18)
 - `port_resolution` — one of:
@@ -2999,15 +3158,21 @@ Get full detail for a single Advance Automation.
   - `"error"` — an exception occurred while decoding bitmasks; `governed_ports` is empty
 - `rules` — per-rule read parity (one entry per port group / `advId`), decoded so the wording matches exactly what the rule-write tools emit. Each entry is `{"ports", "control", "speed", "window", "running", "_mode"}`:
   - `ports` — name+number port label (e.g. `"Humidifier (Port 1)"`)
-  - `control` — grower-readable behavior string, e.g. `"runs at speed 5"`, `"cycle 30 min on / 30 min off"`, `"hold humidity at 65%"`, `"hold VPD at 0.9 kPa"`, `"run when temp rises above 82°F"`, `"run when humidity drops below 50%"`
-  - `window` — `"HH:MM–HH:MM (timezone)"`; wrap-around windows (begin > end) display as-is for the two-window pattern
+  - `control` — grower-readable behavior string, e.g. `"runs at speed 5"`, `"cycle 30 min on / 30 min off"`, `"hold humidity at 65%"`, `"hold VPD at 0.9 kPa"`, `"run when temp rises above 82°F"`, `"run when humidity drops below 50%"`. An Auto/VPD rule whose thresholds live in `sensorModeData` reads `"auto (rule set in the AC Infinity app — I can't read its details yet)"`, and a `currentMode` the class does not define reads `"a rule type I don't recognize yet — check this one in the AC Infinity app"` (Quirk 35)
+  - `window` — `"HH:MM–HH:MM (timezone)"`, or `"runs continuously"` when this rule is 24/7 by any of the four signals in Quirk 21; wrap-around windows (begin > end) display as-is for the two-window pattern
   - `running` — per-rule run state (`run_state`); different rules in one program may have different run states (e.g. complementary lights-on / lights-off windows)
-  - `_mode` — internal round-trip key (`off`/`on`/`cycle`/`auto`/`vpd`); underscore-prefixed = not surfaced to the grower; Claude reads `control` + `window` (see Quirk 32)
-- `human_summary` — natural-language description; adapts to mode and group configuration:
-  - Continuous, single group: `"'Name' runs continuously at speed N, currently enabled."`
-  - Scheduled with times, single group: `"'Name' runs at speed N from HH:MM to HH:MM, currently enabled."`
-  - Scheduled, no time window, single group: `"'Name' runs at speed N on a schedule (no time window set), currently enabled."`
-  - Multi-group: `"'Name' controls Port N Name, Port M Name at varying speeds. Currently enabled."`
+  - `_mode` — internal round-trip key (`off`/`on`/`cycle`/`auto`/`vpd`, or `unknown` for a `currentMode` this controller class does not define); underscore-prefixed = not surfaced to the grower; Claude reads `control` + `window` (see Quirk 32, and Quirk 35 for the class-dependent mode integers)
+- `human_summary` — natural-language description; for a **single** port group it now states the rule, not just the speed (#328 — a cycle, auto or VPD rule was previously summarized as "runs at speed N", hiding the trigger entirely):
+  - `_mode` `"on"`, continuous: `"'Name' runs continuously at speed N, currently enabled."` (unchanged)
+  - `_mode` `"on"`, scheduled with times: `"'Name' runs at speed N every day HH:MM–HH:MM (timezone), currently enabled."` — the day mask is stated (`Mon–Fri`, `Mon, Wed, Sat`, a single day), which the pre-#328 wording dropped entirely, so a weekday lights schedule read back as if it ran weekends
+  - `_mode` `"off"`: `"'Name' holds Intake (Port 1), Heater (Port 2) off every day HH:MM–HH:MM (timezone). Currently enabled."` — the ports are named, not "its ports", and the phrase comes from the same day-mask decoder `control` uses for cycle/auto/VPD rules. An Off rule's `control` is the bare word `off` and carries no schedule at all, which is why the mask has to reach `window` and `human_summary` directly, so `Mon–Fri` survives. `"...off around the clock."` when the rule is 24/7 or its window is unreadable or degenerate (begin == end), and `"'Name' holds its ports off, but I couldn't read which ports it covers — check it in the AC Infinity app."` when the bitmask resolved to nothing. The bare decoded control for an Off rule is the single word `"off"`, which would compose to `"'Name' off, currently enabled."` — two words contradicting each other in one sentence, on the exact rule type #326 was about. The window is never dropped: an Off rule leaves the port free outside it
+  - `_mode` `"cycle"` / `"auto"` / `"vpd"`: `"'Name' — <control>. Currently enabled."`, where `<control>` is the same decoded string the `rules` array carries (it already includes the speed and the day/time window; the timezone qualifier is re-attached)
+  - `_mode` `"unknown"`: `"'Name' uses a rule type I don't recognize yet — check this one in the AC Infinity app. It runs every day HH:MM–HH:MM (timezone). Currently enabled."` (or `"It runs around the clock."`) — never falls through to speed wording, which would confidently assert a behavior in the same response whose `rules` array says the rule can't be read
+  - Multi-group: `"'Name' controls Port N Name, Port M Name at varying speeds. Currently enabled."` (unchanged — N rules with N controls needs a stated tie-break first; deferred to #341)
+
+  **Four signals claim "runs 24/7", and real data has each of them set while the others are clear** (Quirk 21 has the table and the evidence). All four fields that answer "when does this run?" — `schedule`, `rules[].window`, `rules[].control` and `human_summary` — derive from one function, `_rule_is_continuous()`, evaluated **per rule**. `onTimeSwitch` is itself per-rule, so a program can hold one port continuously and another on a window; applying the first rule's toggle to all of them reported four correctly-scheduled ports as running 24/7. The stale clock window the entry still carries is suppressed. `rules[].control` is reconciled in the tool's own output rather than in `_decode_rule`, whose result is pinned byte-for-byte by the legacy golden capture — leaving `control` alone while reconciling `window` only moved the contradiction inside a single rule object. Reporting a 24/7 cycle as stopping at 17:00 leads a grower to add a second rule and double up equipment that was already running.
+
+  **Still outstanding — #342.** `update_automation_rule` and `delete_automation_rule` render their `existing_rules` / `matching_rules` lists through `_resolve_rule`, which derives 24/7 from `switchTime` alone, so those lists can disagree with `get_advance_automation` about the same rule. Not a regression — on `main` both rule lists disagreed with `schedule` too — but #329 is not fully closed until they share this function
 
 ---
 
@@ -3137,11 +3302,30 @@ The optional `mode` parameter sets the behavior of the automation's **first rule
   "begin_time": "22:00",
   "end_time": "06:00",
   "schedule_summary": "Active 10:00 PM – 6:00 AM",
+  "rule": {
+    "ports": "Intake Fan (Port 3)",
+    "control": "runs at set speed; speed 3; every day 22:00–06:00",
+    "_mode": "on"
+  },
+  "payload": { "...": "the full addGroups wire dict, including currentMode" },
   "dry_run": true,
   "sent": false,
   "note": "Preview only — nothing sent to your device yet. Confirm to create this automation."
 }
 ```
+
+`rule` and `payload` are **preview-only** — neither appears in the live response. `rule`
+mirrors the shape `add_automation_rule` already emits (minus `window`, which
+`schedule_summary` already states): `ports` is the name+number port label, `control` is the
+decoded behavior string, and `_mode` is the underscore-prefixed internal round-trip key.
+`payload` is the wire dict that *would* be sent — a verification aid, never read back to the
+grower. Its `currentMode` is the **only non-circular** evidence that the correct
+controller-class table was used (Quirk 35): `_mode` merely echoes the caller's `mode`
+argument and `control` is decoded from what was just encoded, so both read `"off"` whether
+the table is right or wrong — which is exactly how #326 stayed hidden. The preview payload
+is built with `port_type=0` and therefore differs from the sent payload in **`portType`
+alone**; `portType` is resolved on the live path only (Quirk 34), so the preview stays
+read-free and adds no failure surface.
 
 **Response (live, dry_run=False):**
 ```json
@@ -3186,6 +3370,8 @@ The optional `mode` parameter sets the behavior of the automation's **first rule
 - `automation_id` — server-assigned `advId`; present in live response for programmatic chaining only — do not surface to the user; reference the automation by `name` instead
 - `automation_id_note` — in-band reminder that `automation_id` is internal
 - `note` — present in dry_run response only; prompts user to confirm before creating
+- `rule` — preview only; `{"ports", "control", "_mode"}`, decoded from the payload that would be sent so the preview wording matches read-back exactly
+- `payload` — preview only; the full `addGroups` wire dict. Diagnostic, not grower-facing. Its `currentMode` is the device-class-resolved mode integer (Quirk 35) and is the field to assert against when verifying a write; differs from the sent payload in `portType` alone
 - `switchTime` — `255` (Continuous, all-days bits + continuous bit) when no schedule is given (continuous-default, #287); otherwise `127` (all 7 days, binary `01111111`) for a windowed rule (see Quirk 18 / Quirk 32)
 
 **Validation:** `on_speed` 1–10; `off_speed` 0–10; when a window is given, `begin_time` and `end_time` each 0–1439 or both 255 (both must be 255 or neither); omit both for a continuous 24/7 rule (#287); wrap-around windows (`begin_time > end_time`) are allowed; `name` must not be empty or all control characters. A `target` rule is rejected if the port reports `modeTye == 0` (#288, Quirk 32).

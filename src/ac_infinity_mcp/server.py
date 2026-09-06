@@ -33,19 +33,23 @@ from ac_infinity_mcp.automation import (
     _RAIL_TEMP_LOW_F,
     _RAIL_VPD_HIGH,
     _RAIL_VPD_LOW,
+    UNRECOGNIZED_RULE,
     _build_advance_conflict_response,
     _decode_rule,  # noqa: F401 — re-exported for test compatibility
+    _decode_schedule,
     _find_governing_automation,
     _find_governing_port_group,
     _group_automations,
     _is_port_not_powered,  # noqa: F401 — re-exported for test compatibility
     _sanitize_api_string,
+    days_label,
 )
 from ac_infinity_mcp.client import (
     ACInfinityClient,
     build_groups_payload,
     resolve_port_type,
 )
+from ac_infinity_mcp.controller import ControllerType, detect_controller_type
 from ac_infinity_mcp.formatting import (
     _effective_tz,
     _effective_unit,
@@ -292,6 +296,101 @@ def _ports_bitmask(ports: list[int]) -> int:
 _MODETYE_NO_TARGET = 0
 
 
+def _ctype(device: dict | None, context: str = "") -> ControllerType:
+    """Resolve the controller class for the Groups mode tables (#326, #328).
+
+    Every live caller holds a full devInfoListAll entry from `_get_device`.
+    `detect_controller_type` covers both `devType >= 20` and the `newFrameworkDevice`
+    flag, so devType 21 resolves correctly without a second list.
+
+    `device` is Optional only for the eight ADVANCE-conflict handlers, which bind it to
+    None before their `try` so mypy cannot see the `assert device is not None` inside.
+    A genuine None means the device fetch itself failed, so LEGACY is a guess — it is
+    logged, with ``context`` naming the caller, rather than applied silently. Guessing
+    this class in silence is the shape of #326, and these paths render text a grower
+    acts on.
+    """
+    if device is None:
+        # Named so an operator can tell which write this affected — every neighbouring
+        # warning in this file carries the device, and eight handlers can reach here.
+        logger.warning(
+            "Controller class unresolved for %s (no device); assuming legacy", context or "?"
+        )
+        return ControllerType.LEGACY
+    return detect_controller_type(device)
+
+
+def _rule_is_continuous(pg: dict) -> bool:
+    """Whether one Groups rule runs 24/7, from every signal that can say so.
+
+    FOUR things can mean "no clock window applies", and none implies another
+    (Quirk 21):
+
+    * ``onTimeSwitch`` non-zero — the app's Continuous 24H/7D toggle. Any unrecognised
+      value counts: a schedule the device may not be keeping is worse than none.
+    * ``switchTime`` bit 7 — the schedule's own continuous flag. Seven of the 31 entries
+      in the golden capture set this *with real begin/end times*, which is the shape
+      every continuous rule this server writes takes.
+    * ``begin == end`` — a zero-length window, which `_rule_window_str` has always called
+      "always active".
+    * an unreadable window — the 255/65535 sentinels, which format to nothing.
+
+    Every field that answers "when does this run" derives from this one function, per
+    rule. Reconciling them one at a time is what produced #329 and then reproduced it
+    three more times: fix the summary and `schedule` disagrees, fix `schedule` and
+    `rules[].window` disagrees, fix that and `control` disagrees with its own window.
+    """
+    try:
+        toggle = int(pg.get("on_time_switch") or 0)
+    except (TypeError, ValueError):
+        return True  # unreadable toggle -> 24/7, per this function's own contract
+    if toggle != 0:
+        return True
+    if int(pg.get("switch_time") or 0) & _SWITCHTIME_CONTINUOUS_BIT:
+        return True
+    begin, end = pg.get("begin_time"), pg.get("end_time")
+    if begin == end:
+        return True
+    return _format_schedule_time(begin) is None or _format_schedule_time(end) is None
+
+
+def _reconciled_control(rule: dict, pg: dict) -> str:
+    """The rule's decoded control, with a clock window that does not apply replaced by
+    "runs continuously".
+
+    `_decode_rule` reads only `switchTime`, so on a rule whose 24/7 state comes from any
+    of the other three signals it appends a window that does not apply. Both strings in
+    the rule object are read aloud, so they must not disagree with each other (#329).
+    Rewritten here rather than in `_decode_rule`, whose output the legacy golden capture
+    pins byte-for-byte (#326).
+    """
+    control = rule.get("control", UNRECOGNIZED_RULE)
+    if not _rule_is_continuous(pg):
+        return control
+    stale = _decode_schedule({
+        "switchTime": int(pg.get("switch_time") or 0),
+        "beginTime": pg.get("begin_time"),
+        "endTime": pg.get("end_time"),
+    })
+    if not stale or not control.endswith(f"; {stale}"):
+        return control
+    return f"{control.removesuffix(f'; {stale}')}; runs continuously"
+
+
+def _log_groups_write(tool: str, device_id: str, device: dict, mode: str, payload: dict) -> None:
+    """Record which class table produced which wire value, once per Groups write.
+
+    #326 had to be diagnosed on live hardware by a human looking at a light fixture,
+    because nothing recorded the `currentMode` actually sent. Three scalars plus a mode
+    string already validated against `_RULE_MODES` — never the payload dict itself, which
+    carries device identifiers.
+    """
+    logger.info(
+        "%s: device=%s class=%s mode=%s currentMode=%s",
+        tool, device_id, _ctype(device).value, mode, payload.get("currentMode"),
+    )
+
+
 def _ports_without_target_support(device: dict, ports: list[int]) -> list[int]:
     """Return the subset of ``ports`` whose ``modeTye`` marks them as not target-capable."""
     info_ports: dict[int, object] = {}
@@ -395,12 +494,18 @@ def _rule_window_str(
     tz_label: str,
     switch_time: int | None = None,
 ) -> str:
-    """Format a rule window as 'HH:MM–HH:MM (tz)'. Falls back gracefully for sentinels.
+    """Format a rule window as 'Mon–Fri HH:MM–HH:MM (tz)'. Falls back for sentinels.
 
     When ``switch_time``'s continuous bit (0x80) is set the rule runs 24/7, so the window
     reads "runs continuously" — agreeing with the ``control`` field instead of showing a
     contradictory clock range. A degenerate zero-length window (begin==end) renders
     "always active" rather than "00:00–00:00".
+
+    The DAY MASK is included whenever it is a real subset of the week. Without it, an Off
+    rule — whose decoded ``control`` is the bare word "off" and carries no schedule at all
+    — had its "Mon–Fri" appear in no field a grower reads, so a weekday heater rule looked
+    like a nightly one. "every day" is left implicit, since that is the default and saying
+    it would move every existing window string for no gain.
     """
     if switch_time is not None and switch_time & _SWITCHTIME_CONTINUOUS_BIT:
         return "runs continuously"
@@ -410,7 +515,12 @@ def _rule_window_str(
         return "always active"
     if begin_time == end_time:
         return "always active"
-    return f"{begin_s}–{end_s} ({tz_label})"
+    days_mask = (switch_time or 0) & 0x7F
+    day_prefix = ""
+    _days = days_label(days_mask)
+    if _days is not None and _days != "every day":
+        day_prefix = f"{_days} "
+    return f"{day_prefix}{begin_s}–{end_s} ({tz_label})"
 
 
 def _err(msg: str) -> str:
@@ -717,6 +827,8 @@ def _resolve_rule(
     end_time: int | None,
     port_name_map: dict[int, str],
     tz_label: str,
+    *,
+    controller_type: ControllerType,
 ) -> tuple[dict | None, list[dict], list[dict], str | None]:
     """Resolve a single rule within one program by name + port bitmask + window.
 
@@ -739,7 +851,7 @@ def _resolve_rule(
     ]
 
     def _rule_view(e: dict) -> dict:
-        decoded = _decode_rule(e)
+        decoded = _decode_rule(e, controller_type=controller_type)
         _bm = int(e.get("grouptDevType") or 0)
         _ports = [bit + 1 for bit in range(8) if _bm & (1 << bit)]
         return {
@@ -2120,7 +2232,9 @@ async def get_port_status(device_id: str, port: int) -> str:
         if mode_str == "ADVANCE" and dev_id:
             try:
                 raw_adv = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
-                governing = _find_governing_automation(_group_automations(raw_adv), port)
+                governing = _find_governing_automation(
+                    _group_automations(raw_adv, controller_type=_ctype(device)), port
+                )
                 automation_name = governing["name"] if governing else None
             except ACInfinityAuthError:
                 raise
@@ -2287,7 +2401,7 @@ async def get_port_settings(device_id: str, port: int) -> str:
             adv_grouped: list[dict] = []
             try:
                 raw_adv = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
-                adv_grouped = _group_automations(raw_adv)
+                adv_grouped = _group_automations(raw_adv, controller_type=_ctype(device))
                 governing = _find_governing_automation(adv_grouped, port)
             except ACInfinityAuthError:
                 # ACInfinityAuthError must precede Exception — auth must propagate, not degrade.
@@ -2606,7 +2720,8 @@ async def set_port_speed(
         port_name = _get_port_name_from_device(device, port)
         dev_id = device.get("devId") if device else None
         return await _build_advance_conflict_response(
-            _client(), device_id, dev_id, port, port_name, device=device, requested_speed=speed
+            _client(), device_id, dev_id, port, port_name,
+            controller_type=_ctype(device, "set_port_speed"), device=device, requested_speed=speed
         )
     except ACInfinityDeviceError as e:
         logger.warning("Device error in set_port_speed (device=%s port=%s): %s", device_id, port, e)
@@ -2693,7 +2808,8 @@ async def set_port_on(
         port_name = _get_port_name_from_device(device, port)
         dev_id = device.get("devId") if device else None
         return await _build_advance_conflict_response(
-            _client(), device_id, dev_id, port, port_name, device=device
+            _client(), device_id, dev_id, port, port_name,
+            controller_type=_ctype(device, "set_port_on"), device=device
         )
     except ACInfinityDeviceError as e:
         logger.warning("Device error in set_port_on (device=%s port=%s): %s", device_id, port, e)
@@ -2781,7 +2897,8 @@ async def set_port_off(
         port_name = _get_port_name_from_device(device, port)
         dev_id = device.get("devId") if device else None
         return await _build_advance_conflict_response(
-            _client(), device_id, dev_id, port, port_name, device=device
+            _client(), device_id, dev_id, port, port_name,
+            controller_type=_ctype(device, "set_port_off"), device=device
         )
     except ACInfinityDeviceError as e:
         logger.warning("Device error in set_port_off (device=%s port=%s): %s", device_id, port, e)
@@ -2910,7 +3027,8 @@ async def set_vpd_automation(
         port_name = _get_port_name_from_device(device, port)
         dev_id = device.get("devId") if device else None
         return await _build_advance_conflict_response(
-            _client(), device_id, dev_id, port, port_name, device=device
+            _client(), device_id, dev_id, port, port_name,
+            controller_type=_ctype(device, "set_vpd_automation"), device=device
         )
     except ACInfinityDeviceError as e:
         logger.warning(
@@ -3058,7 +3176,8 @@ async def set_temperature_automation(
         port_name = _get_port_name_from_device(device, port)
         dev_id = device.get("devId") if device else None
         return await _build_advance_conflict_response(
-            _client(), device_id, dev_id, port, port_name, device=device
+            _client(), device_id, dev_id, port, port_name,
+            controller_type=_ctype(device, "set_temperature_automation"), device=device
         )
     except ACInfinityDeviceError as e:
         logger.warning(
@@ -3169,7 +3288,8 @@ async def set_humidity_automation(
         port_name = _get_port_name_from_device(device, port)
         dev_id = device.get("devId") if device else None
         return await _build_advance_conflict_response(
-            _client(), device_id, dev_id, port, port_name, device=device
+            _client(), device_id, dev_id, port, port_name,
+            controller_type=_ctype(device, "set_humidity_automation"), device=device
         )
     except ACInfinityDeviceError as e:
         logger.warning(
@@ -3333,7 +3453,8 @@ async def set_port_mode(
         port_name = _get_port_name_from_device(device, port)
         dev_id = device.get("devId") if device else None
         return await _build_advance_conflict_response(
-            _client(), device_id, dev_id, port, port_name, device=device
+            _client(), device_id, dev_id, port, port_name,
+            controller_type=_ctype(device, "set_port_mode"), device=device
         )
     except ACInfinityDeviceError as e:
         logger.warning("Device error in set_port_mode (device=%s port=%s): %s", device_id, port, e)
@@ -3475,7 +3596,8 @@ async def apply_grow_stage_template(
         port_name = _get_port_name_from_device(device, port)
         dev_id = device.get("devId") if device else None
         return await _build_advance_conflict_response(
-            _client(), device_id, dev_id, port, port_name, device=device
+            _client(), device_id, dev_id, port, port_name,
+            controller_type=_ctype(device, "apply_grow_stage_template"), device=device
         )
     except ACInfinityDeviceError as e:
         logger.warning(
@@ -3549,7 +3671,7 @@ async def list_advance_automations(device_id: str) -> str:
             return json.dumps({"error": f"Device {device_id} is missing devId"})
 
         raw = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
-        grouped = _group_automations(raw)
+        grouped = _group_automations(raw, controller_type=_ctype(device))
 
         automations = [
             {
@@ -3589,10 +3711,22 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
         automation_id: The automation_id from list_advance_automations.
 
     Returns:
-        JSON with automation detail including name, enabled status, schedule
-        (with ``mode``: ``"continuous"`` or ``"scheduled"`` per Quirk 21;
-        ``begin_time``/``end_time`` as ``"HH:MM"`` or ``null``; optional
-        ``schedule_note`` when scheduled mode has no time window configured),
+        JSON with device_id, automation_id, name, enabled, currently_running, schedule
+        (this block describes the automation's FIRST rule, which is where its
+        ``begin_time``, ``end_time`` and 24/7 flag all come from — a later rule in the same
+        program can run on a different schedule, so read ``rules`` for the full picture.
+        ``mode`` is ``"scheduled"`` only when that first rule has a real window and
+        nothing marks it 24/7, else ``"continuous"``; four separate things can mark a rule
+        24/7 and any one of them wins, including an unreadable schedule flag;
+        ``begin_time``/``end_time`` are ``"HH:MM"`` when scheduled and ``null`` when
+        continuous; ``timezone`` is the device's zone, or ``"unknown"``),
+        rules (one entry per port group — each answers for ITSELF, so a program can hold
+        one port continuously and another on a window. Each has ``ports``, ``control`` —
+        the rule in the same wording the rule-writing tools use — ``speed``, ``window``
+        (``"Mon–Fri HH:MM–HH:MM (zone)"``, with the days shown only when they are a subset
+        of the week, or ``"runs continuously"``), ``running``, and the internal ``_mode``.
+        ``control`` and ``window`` never contradict each other on whether the rule runs
+        24/7),
         port_groups (each entry has ``device_type`` listing the actual port names
         governed by that group, resolved from the ``grouptDevType`` bitmask —
         e.g. ``"Left Fan (Port 5), Right Fan (Port 6)"``, formatted as
@@ -3600,7 +3734,11 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
         governed_ports (list of ports this automation controls, decoded from
         the automation's port_group bitmasks), port_resolution status
         ("resolved" or "error"), and
-        human_summary (adapts to continuous/scheduled/no-window variants).
+        human_summary (a sentence stating what the rule actually does and when — the
+        cycle timings, the temperature/humidity threshold, the VPD target, or that the
+        ports are held off; a plain single-speed rule keeps the speed wording, and a
+        rule type this controller does not report is named as unreadable rather than
+        guessed).
         On failure returns ``{"error": "..."}``.
     """
     try:
@@ -3618,7 +3756,7 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
             return json.dumps({"error": f"Device {device_id} is missing devId"})
 
         raw = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
-        grouped = _group_automations(raw)
+        grouped = _group_automations(raw, controller_type=_ctype(device))
 
         found = next((g for g in grouped if g["automation_id"] == adv_id_int), None)
         if found is None:
@@ -3692,12 +3830,27 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
         # onTimeSwitch=0 means the "Continuous 24H/7D" toggle is OFF — the time window
         # applies when real begin/end times are present.
         # onTimeSwitch=1 means the toggle is ON — runs 24/7 regardless of time values.
-        on_time_switch = found.get("on_time_switch", 0)
         begin_str = _format_schedule_time(found.get("begin_time"))
         end_str = _format_schedule_time(found.get("end_time"))
 
-        # Scheduled only when toggle is OFF (0) and both formatted times are real values.
-        is_scheduled = on_time_switch == 0 and bool(begin_str) and bool(end_str)
+        # ---- One schedule truth for the whole response (#329) ----
+        # `_rule_is_continuous` is the single answer to "when does this run", and every
+        # field derives from it: this block, each rule's `window` and `control`, and the
+        # summary below. Reconciling them one at a time is what produced #329 and then
+        # reproduced it three more times over — fix the summary and `schedule` disagrees,
+        # fix `schedule` and `rules[].window` disagrees, fix that and `control` disagrees
+        # with its own window.
+        #
+        # The program's schedule block describes its FIRST rule — `begin_time`, `end_time`
+        # and `on_time_switch` all come from `entries[0]` — so the 24/7 answer comes from
+        # that same rule. Not `any()` across every group: a multi-rule program pairs a
+        # continuous sub-rule with several clocked ones, and 'Flower' in the golden capture
+        # is a 12/12 photoperiod (seven windowed sub-rules plus one 24/7) that `any()`
+        # reported as running around the clock with no times at all.
+        runs_247 = _rule_is_continuous(port_groups[0]) if port_groups else True
+        # `_rule_is_continuous` already covers unreadable and zero-length windows, so
+        # "scheduled" is simply its complement.
+        is_scheduled = not runs_247
         if not is_scheduled:
             begin_str = None
             end_str = None
@@ -3711,10 +3864,96 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
 
         if len(port_groups) == 1:
             speed = port_groups[0]["on_speed"]
-            if is_scheduled and begin_str and end_str:
+            # #328: for anything but a plain On rule the speed-only wording states the wrong
+            # thing — a cycle, auto or VPD rule was summarised as "runs at speed N", hiding
+            # the trigger entirely. Substitute the decoded control, which carries its own
+            # speed and window. On rules keep the existing wording byte-for-byte. The
+            # multi-group branch below is unchanged: N rules with N controls needs a stated
+            # tie-break first (#341).
+            _pg0 = port_groups[0]
+            _rule0 = _pg0.get("rule") or {}
+            _mode0 = _rule0.get("mode")
+            _control0 = _rule0.get("control")
+
+            _sw0 = int(_pg0.get("switch_time") or 0)
+            # `_when` is the schedule phrase for the two branches that do not inherit one
+            # from the decoded control. It comes from `_decode_schedule`, not the raw clock
+            # pair, so the DAY MASK survives: an Off rule written for weekdays was read back
+            # as "from 22:00 to 06:00", telling a grower their heater is held off every
+            # night when it runs Saturday and Sunday. A degenerate begin == end window is
+            # "around the clock", matching what `_rule_window_str` already calls
+            # "always active".
+            _sched_clause = (
+                _decode_schedule({
+                    "switchTime": _sw0,
+                    "beginTime": _pg0.get("begin_time"),
+                    "endTime": _pg0.get("end_time"),
+                })
+                if is_scheduled and _pg0.get("begin_time") != _pg0.get("end_time")
+                else None
+            )
+            # A zero or missing day mask leaves `_decode_schedule` with no day word, so the
+            # clause starts on a digit — "holds Port 1 off 22:00–06:00". "during" restores
+            # the preposition without claiming which days, which is the one thing the wire
+            # does not tell us.
+            if _sched_clause is None:
+                _when = " around the clock"
+            elif _sched_clause[0].isdigit():
+                _when = f" during {_sched_clause}{_tz_suffix}"
+            else:
+                _when = f" {_sched_clause}{_tz_suffix}"
+            # `_decode_schedule` renders its window with no timezone, so the qualifier the
+            # replaced branches carried has to be re-attached — this is the one line Claude
+            # reads aloud. Never onto a 24/7 rule, which has no clock time to qualify.
+            _control_tz = _tz_suffix if is_scheduled else ""
+
+            if _mode0 == "off":
+                # _decode_rule's control for an Off rule is the bare word "off", which
+                # composes to "'X' off, currently enabled." — two words that contradict each
+                # other in one sentence, on the exact rule type that started #326. State
+                # what the rule enforces, on which ports, and for how long: an Off rule with
+                # a window leaves the port free outside it, and dropping the window tells a
+                # grower their heater is held off when it runs sixteen hours a day.
+                if not governed_ports:
+                    # The ports are unknown; the schedule is not. Withholding the window
+                    # too would drop information the response already carries.
+                    human_summary = (
+                        f"'{name}' holds its ports off{_when}, but I couldn't read which"
+                        f" ports it covers — check it in the AC Infinity app."
+                        f" Currently {state_str}."
+                    )
+                else:
+                    _held = ", ".join(gp["port_name"] for gp in governed_ports)
+                    human_summary = (
+                        f"'{name}' holds {_held} off{_when}. Currently {state_str}."
+                    )
+            elif _mode0 == "unknown":
+                # Never fall through to the speed wording here: it would assert
+                # "runs continuously at speed N" in the same response whose rule list says
+                # the rule cannot be read. Confidently wrong is what #328 was about. The
+                # schedule is still knowable even when the mode is not, so state it.
                 human_summary = (
-                    f"'{name}' runs at speed {speed} from {begin_str} to {end_str}"
-                    f"{_tz_suffix}, currently {state_str}."
+                    f"'{name}' uses {UNRECOGNIZED_RULE}. It runs{_when}."
+                    f" Currently {state_str}."
+                )
+            elif _mode0 not in (None, "on") and _control0:
+                # The same reconciliation the rule list applies, from the same helper:
+                # a second copy of this strip is how the two came to disagree before.
+                human_summary = (
+                    f"'{name}' — {_reconciled_control(_rule0, _pg0)}{_control_tz}."
+                    f" Currently {state_str}."
+                )
+            elif is_scheduled:
+                # Uses the same `_when` phrase as the Off and unknown branches, so the day
+                # mask survives here too: "from 09:00 to 17:00" omitted it entirely, and a
+                # grower with a Mon–Fri lights rule believed the lights ran weekends. This
+                # is the one sentence in the block that was byte-identical to pre-#328
+                # behaviour; keeping it that way once the siblings were fixed would have
+                # left the summary contradicting the `control` string beside it, which
+                # already said "Mon–Fri". `is_scheduled` implies both times are real —
+                # they are nulled together above.
+                human_summary = (
+                    f"'{name}' runs at speed {speed}{_when}, currently {state_str}."
                 )
             else:
                 human_summary = (
@@ -3733,8 +3972,12 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
                 else ""
             )
             speed_phrase = " at varying speeds" if governed_ports else ""
+            # Period AFTER the schedule suffix, not before it: `.{suffix}` read aloud as
+            # "…at varying speeds. from 09:00 to 03:00 (America/Chicago) Currently
+            # disabled." — two sentences fused at a lowercase "from". This shape is what a
+            # grower hears for four of the six automations in the golden capture.
             human_summary = (
-                f"'{name}' controls {port_list_str}{speed_phrase}.{schedule_suffix}"
+                f"'{name}' controls {port_list_str}{speed_phrase}{schedule_suffix}."
                 f" Currently {state_str}."
             )
 
@@ -3759,11 +4002,20 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
                                  _pg_ports)
                     if _pg_ports else "Unknown"
                 ),
-                "control": _rule.get("control", "unknown rule type"),
+                # Both of this object's grower-facing strings answer "when does this run"
+                # and both are read aloud, so both derive from the same per-rule answer.
+                # Per-RULE, not the program's: onTimeSwitch is set on one of
+                # 'Clone Transplant''s five rules and clear on the other four, so
+                # applying the first rule's toggle to all of them reported four
+                # scheduled ports as running 24/7.
+                "control": _reconciled_control(_rule, pg),
                 "speed": pg.get("on_speed"),
-                "window": _rule_window_str(
-                    pg.get("begin_time"), pg.get("end_time"), _tz_label,
-                    pg.get("switch_time"),
+                "window": (
+                    "runs continuously" if _rule_is_continuous(pg)
+                    else _rule_window_str(
+                        pg.get("begin_time"), pg.get("end_time"), _tz_label,
+                        pg.get("switch_time"),
+                    )
                 ),
                 "running": pg.get("run_state", False),
                 "_mode": _rule.get("mode", "unknown"),
@@ -3839,7 +4091,7 @@ async def enable_advance_automation(
             return json.dumps({"error": f"Device {device_id} is missing devId"})
 
         raw = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
-        grouped = _group_automations(raw)
+        grouped = _group_automations(raw, controller_type=_ctype(device))
 
         found = next((g for g in grouped if g["automation_id"] == adv_id_int), None)
         if found is None:
@@ -3937,7 +4189,7 @@ async def disable_advance_automation(
             return json.dumps({"error": f"Device {device_id} is missing devId"})
 
         raw = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
-        grouped = _group_automations(raw)
+        grouped = _group_automations(raw, controller_type=_ctype(device))
 
         found = next((g for g in grouped if g["automation_id"] == adv_id_int), None)
         if found is None:
@@ -4100,9 +4352,15 @@ async def create_advance_automation(
     Returns:
         JSON with action, name, port, port_name, on_speed, min_speed (the port's
         configured minimum speed — used when the automation is inactive), begin_time,
-        end_time, schedule_summary, dry_run, sent. Live responses also include
-        automation_id (for programmatic chaining — do not surface to the user; use
-        ``name`` instead). On failure returns ``{"error": "..."}``.
+        end_time, schedule_summary, dry_run, sent. Preview responses also include
+        ``rule`` (the decoded rule as the grower will hear it: ports, control, _mode) and
+        ``payload`` — the wire dict that would be sent, for verification only, never to be
+        read back to the user. Its ``currentMode`` is the one field that proves the right
+        controller-class table was used; ``mode`` and ``control`` cannot, because one
+        echoes the caller and the other is decoded from what was just encoded.
+        The preview payload differs from the sent one in ``portType`` alone. Live
+        responses also include automation_id (for programmatic chaining — do not surface
+        to the user; use ``name`` instead). On failure returns ``{"error": "..."}``.
         When the specified port does not exist on the device, returns
         ``{"error": "Port N not found on device X", "available_ports": [{"port": N,
         "name": "..."}], "suggested_reply": "..."}``. Port names absent or empty in
@@ -4224,7 +4482,35 @@ async def create_advance_automation(
             disp_begin = _format_schedule_time(begin_time)
             disp_end = _format_schedule_time(end_time)
 
+        # #287: continuous → switch_time 255 (the 24/7 toggle), else the default day schedule.
+        build_extra = {k: v for k, v in rule_kwargs.items() if k not in ("min_level", "max_level")}
+        if create_continuous:
+            build_extra["switch_time"] = _days_to_switchtime(None, True)
+
         if dry_run:
+            # #326: the preview must show the wire value, not just the mode the caller asked
+            # for. `mode` echoes the input and `control` is decoded from what we just encoded
+            # — both read "off" whether the class table is right or wrong, which is how the
+            # off-writes-ON bug stayed hidden. `payload.currentMode` is the only field that
+            # is not circular, so it is what the Gate-5 write check asserts against.
+            #
+            # Built with port_type=0: portType is resolved on the live path only (see the
+            # #300 note below), and it cannot affect currentMode. The preview payload
+            # therefore differs from the sent payload in portType alone, which keeps the
+            # preview read-free — no extra API call, no new failure surface.
+            preview = build_groups_payload(
+                dev_id=str(dev_id),
+                ports=[port],
+                clean_name=clean_name,
+                begin_time=begin_time,
+                end_time=end_time,
+                on_speed=on_speed,
+                min_level=off_speed,
+                port_type=0,
+                controller_type=_ctype(device),
+                **build_extra,
+            )
+            preview_decoded = _decode_rule(preview, controller_type=_ctype(device))
             return json.dumps({
                 "action": "create",
                 "name": clean_name,
@@ -4235,6 +4521,14 @@ async def create_advance_automation(
                 "begin_time": disp_begin,
                 "end_time": disp_end,
                 "schedule_summary": schedule_summary,
+                "rule": {
+                    "ports": _port_label_for(_build_port_name_map(device), port),
+                    "control": preview_decoded["control"],
+                    "_mode": preview_decoded["mode"],
+                },
+                # The full wire dict, matching what every other dry-run write tool returns
+                # under this key. `currentMode` is the field the class fix is about.
+                "payload": preview,
                 "dry_run": True,
                 "sent": False,
                 "note": (
@@ -4247,8 +4541,9 @@ async def create_advance_automation(
         # outlet/power-adaptor rule (portType=1) isn't written as a fan rule (portType=0, phantom
         # MIN/MAX speed). Only the fetch is guarded — a getGroups read failure must never block
         # creation (best-effort, fall back to 0), while a resolver bug stays visible. Resolved
-        # on the live path only: the dry-run preview does not surface portType, so it needs no
-        # read (and gains no new failure surface).
+        # on the live path only: the dry-run preview above builds its payload with portType=0
+        # — portType cannot affect the fields the preview surfaces, so the preview needs no
+        # read (and gains no new failure surface). The two payloads differ in portType alone.
         port_type = 0
         port_type_degraded = False
         try:
@@ -4267,10 +4562,6 @@ async def create_advance_automation(
 
         # Live path: build full addGroups payload via client helper. mode="on" reproduces
         # the original single-port On-mode payload byte-for-byte (on_speed passed directly).
-        # #287: continuous → switch_time 255 (the 24/7 toggle), else the default day schedule.
-        build_extra = {k: v for k, v in rule_kwargs.items() if k not in ("min_level", "max_level")}
-        if create_continuous:
-            build_extra["switch_time"] = _days_to_switchtime(None, True)
         payload = build_groups_payload(
             dev_id=str(dev_id),
             ports=[port],
@@ -4280,9 +4571,11 @@ async def create_advance_automation(
             on_speed=on_speed,
             min_level=off_speed,
             port_type=port_type,
+            controller_type=_ctype(device),
             **build_extra,
         )
 
+        _log_groups_write("create_advance_automation", device_id, device, mode, payload)
         result = await asyncio.to_thread(_client().create_advance_automation, str(dev_id), payload)
         adv_id = result.get("advId")
         if not adv_id:
@@ -4378,7 +4671,7 @@ async def delete_advance_automation(
             return json.dumps({"error": f"Device {device_id} is missing devId"})
 
         raw = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
-        grouped = _group_automations(raw)
+        grouped = _group_automations(raw, controller_type=_ctype(device))
 
         found = next((g for g in grouped if g["automation_id"] == adv_id_int), None)
         if found is None:
@@ -4704,9 +4997,10 @@ async def add_automation_rule(
             begin_time=begin_time, end_time=end_time,
             is_flag=0, group_nums=group_nums, sort_type=sort_type, sub_number=next_sub,
             port_type=port_type,
+            controller_type=_ctype(device),
             **kwargs,
         )
-        decoded = _decode_rule(payload)
+        decoded = _decode_rule(payload, controller_type=_ctype(device))
         rule_view = {
             "ports": _ports_label(port_name_map, ports),
             "control": decoded["control"],
@@ -4726,6 +5020,7 @@ async def add_automation_rule(
                 "note": "Preview only — nothing sent yet. Confirm to add this rule.",
             })
 
+        _log_groups_write("add_automation_rule", device_id, device, decoded["mode"], payload)
         try:
             await asyncio.to_thread(_client().create_advance_automation, str(dev_id), payload)
         except ACInfinityAPIError as e:
@@ -5001,7 +5296,8 @@ async def update_automation_rule(
 
         raw = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
         match, disambig, program_rules, ambiguous_program = _resolve_rule(
-            raw, program_name, ports, begin_time, end_time, port_name_map, tz_label
+            raw, program_name, ports, begin_time, end_time, port_name_map, tz_label,
+            controller_type=_ctype(device),
         )
         clean_program = _sanitize_api_string(program_name, 64)
 
@@ -5033,7 +5329,7 @@ async def update_automation_rule(
             })
 
         # Determine effective mode for validation: explicit mode, else the rule's current mode.
-        current_decoded = _decode_rule(match)
+        current_decoded = _decode_rule(match, controller_type=_ctype(device))
         effective_mode = mode if mode is not None else current_decoded["mode"]
 
         # Same-mode edit (mode/control_style both omitted): resolve the rule's effective style
@@ -5117,6 +5413,7 @@ async def update_automation_rule(
                 **{k: v for k, v in build_kwargs.items()
                    if k not in ("mode", "min_level", "max_level")},
                 mode=mode,
+                controller_type=_ctype(device),
             )
             for key in _signature_keys_for(mode):
                 body[key] = rebuilt[key]
@@ -5135,7 +5432,7 @@ async def update_automation_rule(
                 control_style=control_style,
             )
 
-        new_decoded = _decode_rule(body)
+        new_decoded = _decode_rule(body, controller_type=_ctype(device))
         rule_view = {
             "ports": _ports_label(port_name_map, ports),
             "control": new_decoded["control"],
@@ -5159,7 +5456,8 @@ async def update_automation_rule(
         # Stale-advId guard: re-resolve from a fresh getGroups at write time.
         raw_now = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
         match_now, _d, _r, _e = _resolve_rule(
-            raw_now, program_name, ports, begin_time, end_time, port_name_map, tz_label
+            raw_now, program_name, ports, begin_time, end_time, port_name_map, tz_label,
+            controller_type=_ctype(device),
         )
         if match_now is None:
             return json.dumps({
@@ -5169,6 +5467,7 @@ async def update_automation_rule(
                 ),
             })
         body["advId"] = match_now.get("advId")
+        _log_groups_write("update_automation_rule", device_id, device, effective_mode, body)
         try:
             await asyncio.to_thread(_client().update_advance_automation, str(dev_id), body)
         except ACInfinityAPIError as e:
@@ -5254,7 +5553,8 @@ async def delete_automation_rule(
 
         raw = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
         match, disambig, program_rules, ambiguous_program = _resolve_rule(
-            raw, program_name, ports, begin_time, end_time, port_name_map, tz_label
+            raw, program_name, ports, begin_time, end_time, port_name_map, tz_label,
+            controller_type=_ctype(device),
         )
         clean_program = _sanitize_api_string(program_name, 64)
 
@@ -5285,7 +5585,7 @@ async def delete_automation_rule(
                 "existing_rules": program_rules,
             })
 
-        decoded = _decode_rule(match)
+        decoded = _decode_rule(match, controller_type=_ctype(device))
         rule_view = {
             "ports": _ports_label(port_name_map, ports),
             "control": decoded["control"],
@@ -5308,7 +5608,8 @@ async def delete_automation_rule(
         # Stale-advId guard: re-resolve from a fresh getGroups at write time.
         raw_now = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
         match_now, _d, _r, _e = _resolve_rule(
-            raw_now, program_name, ports, begin_time, end_time, port_name_map, tz_label
+            raw_now, program_name, ports, begin_time, end_time, port_name_map, tz_label,
+            controller_type=_ctype(device),
         )
         if match_now is None:
             return json.dumps({
@@ -5434,7 +5735,7 @@ async def break_out_of_automation(
         raw_automations = await asyncio.to_thread(
             _client().get_advance_automations, str(dev_id)
         )
-        grouped = _group_automations(raw_automations)
+        grouped = _group_automations(raw_automations, controller_type=_ctype(device))
 
         # Find the automation whose bitmask covers the target port.
         automation = _find_governing_automation(grouped, port)

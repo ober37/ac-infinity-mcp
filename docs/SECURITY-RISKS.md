@@ -105,6 +105,40 @@ a vulnerability.
 
 ---
 
+## Residual risk after the Groups `currentMode` fix (#326, #328)
+
+The Advance Automation (Groups) `currentMode` enum is **device-class dependent**: legacy
+(devType 11/18) and new-framework (devType ≥ 20) controllers number the same five modes
+differently, and `1`/`2` are inverted between them. Before the fix, a `mode="off"`
+automation written to a new-framework controller emitted the legacy `2`, which that class
+reads as **On** — an automation created to hold a grow light off ran it at full power. The
+same wrong table read backwards also made the read-before-write edit path overlay
+cycle timings onto a temperature automation. Both directions are fixed (see `docs/API.md`
+Quirk 35), and no new endpoint or input surface was added. Three residuals are
+**documented, not mitigated**:
+
+- **Automations created before the fix are not migrated.** A new-framework Advance
+  Automation this server wrote prior to the fix is stored on the device with the inverted
+  value and keeps behaving that way. The server cannot detect or rewrite it — the stored
+  rule is indistinguishable from a correct one of the opposite mode. Growers on devType ≥ 20
+  should re-check any automation this server created and, if it is wrong, delete and
+  recreate it (or fix it in the AC Infinity app).
+- **devType 20 ↔ 22 agreement is assumed.** `on` is the only mode observed on both
+  new-framework device types; `auto` and `vpd` are evidenced on devType 20 only, and are
+  read-confirmed rather than write-confirmed. Writing either mode on a devType 22 is
+  therefore a first-time write against an unverified integer.
+- **Audit, not prevention.** Every Groups write now logs one INFO line naming the tool, the
+  device, the resolved controller class, the mode and the emitted `currentMode` (three
+  scalars and a validated mode string — never the payload dict, which carries device
+  identifiers). This exists because #326 had to be diagnosed on live hardware by a human
+  watching a light fixture; it makes a future mis-write attributable, it does not stop one.
+
+Unchanged and verified preserved by this fix: the ADVANCE pre-write guard (Quirk 25), the
+1.5 s inter-write rate limit, `dry_run=True` on every write tool, and the
+`ConnectionError`-only retry policy on writes.
+
+---
+
 ## PYSEC-2025-183 — `mcp` package — RESOLVED (Issue #313, 2026-08-28)
 
 - **Package:** `mcp` (Model Context Protocol Python SDK; a direct dependency)
