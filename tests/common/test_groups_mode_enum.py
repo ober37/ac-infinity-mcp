@@ -829,9 +829,10 @@ async def test_off_rule_with_unreadable_ports_does_not_claim_ports(ai_plus_clien
     ]
     data = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
     assert data["governed_ports"] == []
+    # The ports are unknown; the schedule is not, and the response already carries it.
     assert data["human_summary"] == (
-        "'Lights' holds its ports off, but I couldn't read which ports it covers"
-        " — check it in the AC Infinity app. Currently enabled."
+        "'Lights' holds its ports off around the clock, but I couldn't read which ports"
+        " it covers — check it in the AC Infinity app. Currently enabled."
     )
 
 
@@ -1117,6 +1118,7 @@ async def test_a_wholly_continuous_program_is_still_continuous(ai_plus_client):
     data = json.loads(await get_advance_automation(AI_PLUS_CODE, "7000"))
     assert data["schedule"]["mode"] == "continuous"
     assert data["schedule"]["begin_time"] is None
+    assert len(data["rules"]) == 3
     assert all(r["window"] == "runs continuously" for r in data["rules"])
 
 
@@ -1229,6 +1231,7 @@ async def test_multi_group_control_is_reconciled_per_rule(ai_plus_client):
         e["cycleOn"], e["cycleOff"] = 600, 1200
     ai_plus_client.get_advance_automations.return_value = entries
     data = json.loads(await get_advance_automation(AI_PLUS_CODE, "7000"))
+    assert len(data["rules"]) == 2
     for i, rule in enumerate(data["rules"]):
         assert rule["window"] == "runs continuously", f"rule {i}"
         assert rule["control"] == (
@@ -1260,3 +1263,93 @@ async def test_unreadable_window_is_continuous_everywhere(ai_plus_client, begin,
     assert data["rules"][0]["control"].endswith("runs continuously")
     assert ghost not in data["human_summary"]
     assert ghost not in data["rules"][0]["control"]
+
+
+# ============ Signal × consumer: every signal checked on every field ============
+#
+# QA walked the four signals against the three consumers and found exactly one hole: the
+# zero-length window was never asserted on `rules[].control`. Removing that signal from
+# `_reconciled_control` alone passed all 1726 tests, because the only degenerate-window test
+# used an Off rule — whose control is the bare word "off", so there is no clause to
+# contradict. A signal covered on one consumer is not covered on the others.
+
+
+@pytest.mark.parametrize("mode,expect_prefix", [
+    (6, "cycle 10 min on / 20 min off; speed 0 (off)–7; "),
+    (2, "runs at set speed; speed 7; "),
+])
+async def test_degenerate_window_reconciles_control_too(ai_plus_client, mode, expect_prefix):
+    """A rule whose control DOES carry a schedule clause. Off rules cannot see this."""
+    ai_plus_client.get_advance_automations.return_value = [
+        _ai_plus_entry(currentMode=mode, cycleOn=600, cycleOff=1200,
+                       beginTime=720, endTime=720, switchTime=127, onTimeSwitch=0)
+    ]
+    data = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
+    assert data["rules"][0]["control"] == f"{expect_prefix}runs continuously"
+    assert "12:00" not in data["rules"][0]["control"]
+    assert data["rules"][0]["window"] == "runs continuously"
+    assert data["schedule"]["mode"] == "continuous"
+
+
+@pytest.mark.parametrize("mode", [1, 99])
+async def test_off_and_unknown_control_survive_reconciliation(ai_plus_client, mode):
+    """`_reconciled_control`'s suffix guard is what stops it mangling a control that has no
+    schedule clause. Neither Off ("off") nor unknown was asserted, so dropping the guard
+    changed twelve outputs and failed nothing."""
+    ai_plus_client.get_advance_automations.return_value = [
+        _ai_plus_entry(currentMode=mode, beginTime=540, endTime=1020,
+                       switchTime=127, onTimeSwitch=1)
+    ]
+    control = json.loads(
+        await get_advance_automation(AI_PLUS_CODE, "9001")
+    )["rules"][0]["control"]
+    expected = "off" if mode == 1 else _UNRECOGNIZED
+    assert control == expected, "a control with no schedule clause must be left alone"
+
+
+# ---- the day mask has to reach a field Claude is told to read ----
+
+
+async def test_window_carries_the_day_mask(ai_plus_client):
+    """For an Off rule the decoded `control` is the bare word "off", so `window` is the only
+    rule-level field that can carry a schedule. Without the day prefix, "Mon–Fri" existed in
+    exactly one field of the whole response — and the docs tell Claude to read
+    `control` + `window`, the two that lacked it."""
+    ai_plus_client.get_advance_automations.return_value = [_scheduled_off(switchTime=31)]
+    rule = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))["rules"][0]
+    assert rule["control"] == "off"
+    assert rule["window"] == f"Mon–Fri 22:00–06:00{_TZ}"
+
+
+@pytest.mark.parametrize("mask,expected", [
+    (127, "22:00–06:00"),            # every day stays implicit — the default
+    (31, "Mon–Fri 22:00–06:00"),
+    (37, "Mon, Wed, Sat 22:00–06:00"),
+    (64, "Sun 22:00–06:00"),
+    (0, "22:00–06:00"),              # no days named: say nothing rather than guess
+])
+async def test_window_day_prefix(ai_plus_client, mask, expected):
+    ai_plus_client.get_advance_automations.return_value = [_scheduled_off(switchTime=mask)]
+    rule = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))["rules"][0]
+    assert rule["window"] == f"{expected}{_TZ}"
+
+
+async def test_a_window_with_no_named_days_keeps_its_preposition(ai_plus_client):
+    """A zero or missing day mask leaves the clause starting on a digit. "during" restores
+    the preposition without asserting which days the rule runs."""
+    ai_plus_client.get_advance_automations.return_value = [_scheduled_off(switchTime=0)]
+    data = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
+    assert data["human_summary"] == (
+        f"'Lights' holds Fan Port (Port 1) off during 22:00–06:00{_TZ}. Currently enabled."
+    )
+
+
+async def test_multi_group_summary_is_one_sentence(ai_plus_client):
+    """The period sat before the schedule suffix, so it read as two sentences fused at a
+    lowercase "from" — which is what a grower hears for four of the six real automations."""
+    ai_plus_client.get_advance_automations.return_value = _program([127, 127])
+    summary = json.loads(await get_advance_automation(AI_PLUS_CODE, "7000"))["human_summary"]
+    assert summary == (
+        "'Flower' controls Fan Port (Port 1), Light (Port 2) at varying speeds"
+        f" from 09:00 to 21:00{_TZ}. Currently enabled."
+    )

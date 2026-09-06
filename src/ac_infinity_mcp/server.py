@@ -42,6 +42,7 @@ from ac_infinity_mcp.automation import (
     _group_automations,
     _is_port_not_powered,  # noqa: F401 — re-exported for test compatibility
     _sanitize_api_string,
+    days_label,
 )
 from ac_infinity_mcp.client import (
     ACInfinityClient,
@@ -339,7 +340,11 @@ def _rule_is_continuous(pg: dict) -> bool:
     three more times: fix the summary and `schedule` disagrees, fix `schedule` and
     `rules[].window` disagrees, fix that and `control` disagrees with its own window.
     """
-    if int(pg.get("on_time_switch") or 0) != 0:
+    try:
+        toggle = int(pg.get("on_time_switch") or 0)
+    except (TypeError, ValueError):
+        return True  # unreadable toggle -> 24/7, per this function's own contract
+    if toggle != 0:
         return True
     if int(pg.get("switch_time") or 0) & _SWITCHTIME_CONTINUOUS_BIT:
         return True
@@ -489,12 +494,18 @@ def _rule_window_str(
     tz_label: str,
     switch_time: int | None = None,
 ) -> str:
-    """Format a rule window as 'HH:MM–HH:MM (tz)'. Falls back gracefully for sentinels.
+    """Format a rule window as 'Mon–Fri HH:MM–HH:MM (tz)'. Falls back for sentinels.
 
     When ``switch_time``'s continuous bit (0x80) is set the rule runs 24/7, so the window
     reads "runs continuously" — agreeing with the ``control`` field instead of showing a
     contradictory clock range. A degenerate zero-length window (begin==end) renders
     "always active" rather than "00:00–00:00".
+
+    The DAY MASK is included whenever it is a real subset of the week. Without it, an Off
+    rule — whose decoded ``control`` is the bare word "off" and carries no schedule at all
+    — had its "Mon–Fri" appear in no field a grower reads, so a weekday heater rule looked
+    like a nightly one. "every day" is left implicit, since that is the default and saying
+    it would move every existing window string for no gain.
     """
     if switch_time is not None and switch_time & _SWITCHTIME_CONTINUOUS_BIT:
         return "runs continuously"
@@ -504,7 +515,12 @@ def _rule_window_str(
         return "always active"
     if begin_time == end_time:
         return "always active"
-    return f"{begin_s}–{end_s} ({tz_label})"
+    days_mask = (switch_time or 0) & 0x7F
+    day_prefix = ""
+    _days = days_label(days_mask)
+    if _days is not None and _days != "every day":
+        day_prefix = f"{_days} "
+    return f"{day_prefix}{begin_s}–{end_s} ({tz_label})"
 
 
 def _err(msg: str) -> str:
@@ -3696,16 +3712,21 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
 
     Returns:
         JSON with device_id, automation_id, name, enabled, currently_running, schedule
-        (``mode`` is ``"scheduled"`` only when nothing claims 24/7 and both times are
-        real, else ``"continuous"`` — the app's Continuous toggle and the schedule's own
-        24/7 flag are separate signals and either one wins, and an unreadable toggle
-        value is treated as 24/7; ``begin_time``/``end_time`` are ``"HH:MM"`` when
-        scheduled and ``null`` when continuous; ``timezone`` is the device's zone, or
-        ``"unknown"``),
-        rules (one entry per port group, each with ``ports``, ``control`` — the rule in
-        the same wording the rule-writing tools use — ``speed``, ``window``
-        (``"HH:MM–HH:MM (zone)"``, ``"runs continuously"`` or ``"always active"``),
-        ``running``, and the internal ``_mode``; ``control`` and ``window`` always agree),
+        (this block describes the automation's FIRST rule, which is where its
+        ``begin_time``, ``end_time`` and 24/7 flag all come from — a later rule in the same
+        program can run on a different schedule, so read ``rules`` for the full picture.
+        ``mode`` is ``"scheduled"`` only when that first rule has a real window and
+        nothing marks it 24/7, else ``"continuous"``; four separate things can mark a rule
+        24/7 and any one of them wins, including an unreadable schedule flag;
+        ``begin_time``/``end_time`` are ``"HH:MM"`` when scheduled and ``null`` when
+        continuous; ``timezone`` is the device's zone, or ``"unknown"``),
+        rules (one entry per port group — each answers for ITSELF, so a program can hold
+        one port continuously and another on a window. Each has ``ports``, ``control`` —
+        the rule in the same wording the rule-writing tools use — ``speed``, ``window``
+        (``"Mon–Fri HH:MM–HH:MM (zone)"``, with the days shown only when they are a subset
+        of the week, or ``"runs continuously"``), ``running``, and the internal ``_mode``.
+        ``control`` and ``window`` never contradict each other on whether the rule runs
+        24/7),
         port_groups (each entry has ``device_type`` listing the actual port names
         governed by that group, resolved from the ``grouptDevType`` bitmask —
         e.g. ``"Left Fan (Port 5), Right Fan (Port 6)"``, formatted as
@@ -3871,7 +3892,16 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
                 if is_scheduled and _pg0.get("begin_time") != _pg0.get("end_time")
                 else None
             )
-            _when = f" {_sched_clause}{_tz_suffix}" if _sched_clause else " around the clock"
+            # A zero or missing day mask leaves `_decode_schedule` with no day word, so the
+            # clause starts on a digit — "holds Port 1 off 22:00–06:00". "during" restores
+            # the preposition without claiming which days, which is the one thing the wire
+            # does not tell us.
+            if _sched_clause is None:
+                _when = " around the clock"
+            elif _sched_clause[0].isdigit():
+                _when = f" during {_sched_clause}{_tz_suffix}"
+            else:
+                _when = f" {_sched_clause}{_tz_suffix}"
             # `_decode_schedule` renders its window with no timezone, so the qualifier the
             # replaced branches carried has to be re-attached — this is the one line Claude
             # reads aloud. Never onto a 24/7 rule, which has no clock time to qualify.
@@ -3885,9 +3915,11 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
                 # a window leaves the port free outside it, and dropping the window tells a
                 # grower their heater is held off when it runs sixteen hours a day.
                 if not governed_ports:
+                    # The ports are unknown; the schedule is not. Withholding the window
+                    # too would drop information the response already carries.
                     human_summary = (
-                        f"'{name}' holds its ports off, but I couldn't read which ports it"
-                        f" covers — check it in the AC Infinity app."
+                        f"'{name}' holds its ports off{_when}, but I couldn't read which"
+                        f" ports it covers — check it in the AC Infinity app."
                         f" Currently {state_str}."
                     )
                 else:
@@ -3905,28 +3937,12 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
                     f" Currently {state_str}."
                 )
             elif _mode0 not in (None, "on") and _control0:
-                if runs_247 and not _sw0 & _SWITCHTIME_CONTINUOUS_BIT:
-                    # The Continuous toggle overrides a clock window the entry still
-                    # carries, and the decoded control repeats that stale window. Drop the
-                    # clause and state the truth — otherwise a grower whose 24/7 cycle is
-                    # reported as stopping at 17:00 adds a second rule and doubles up the
-                    # equipment that was already running.
-                    _stale = _decode_schedule({
-                        "switchTime": _sw0,
-                        "beginTime": _pg0.get("begin_time"),
-                        "endTime": _pg0.get("end_time"),
-                    })
-                    # Both sides call _decode_schedule with the same inputs and the clause
-                    # is always the last "; "-joined element, so the suffix matches; the
-                    # unstripped fallback is unreachable and only guards a future drift.
-                    _body = _control0.removesuffix(f"; {_stale}") if _stale else _control0
-                    human_summary = (
-                        f"'{name}' — {_body}; runs continuously. Currently {state_str}."
-                    )
-                else:
-                    human_summary = (
-                        f"'{name}' — {_control0}{_control_tz}. Currently {state_str}."
-                    )
+                # The same reconciliation the rule list applies, from the same helper:
+                # a second copy of this strip is how the two came to disagree before.
+                human_summary = (
+                    f"'{name}' — {_reconciled_control(_rule0, _pg0)}{_control_tz}."
+                    f" Currently {state_str}."
+                )
             elif is_scheduled:
                 # Uses the same `_when` phrase as the Off and unknown branches, so the day
                 # mask survives here too: "from 09:00 to 17:00" omitted it entirely, and a
@@ -3956,8 +3972,12 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
                 else ""
             )
             speed_phrase = " at varying speeds" if governed_ports else ""
+            # Period AFTER the schedule suffix, not before it: `.{suffix}` read aloud as
+            # "…at varying speeds. from 09:00 to 03:00 (America/Chicago) Currently
+            # disabled." — two sentences fused at a lowercase "from". This shape is what a
+            # grower hears for four of the six automations in the golden capture.
             human_summary = (
-                f"'{name}' controls {port_list_str}{speed_phrase}.{schedule_suffix}"
+                f"'{name}' controls {port_list_str}{speed_phrase}{schedule_suffix}."
                 f" Currently {state_str}."
             )
 

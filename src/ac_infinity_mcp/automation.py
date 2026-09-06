@@ -64,6 +64,22 @@ def _fmt_hhmm(minutes: int | None) -> str:
     return f"{m // 60:02d}:{m % 60:02d}"
 
 
+def days_label(days_mask: int) -> str | None:
+    """Name a `switchTime` day bitmask, or None when no days are set.
+
+    Public because ``server.py`` renders the same mask into a rule's ``window``. Two
+    implementations of this would drift, and the day mask is the field whose absence made a
+    weekday heater rule read as a nightly one.
+    """
+    if days_mask == _SWITCHTIME_ALL_DAYS:
+        return "every day"
+    if days_mask == _SWITCHTIME_WEEKDAYS:
+        return "Mon–Fri"
+    if days_mask == 0:
+        return None
+    return ", ".join(_DAY_ABBR[i] for i in range(7) if days_mask & (1 << i))
+
+
 def _decode_schedule(entry: dict) -> str | None:
     """Return a human-readable schedule modifier, or None when no window applies.
 
@@ -77,15 +93,7 @@ def _decode_schedule(entry: dict) -> str | None:
 
     begin = entry.get("beginTime")
     end = entry.get("endTime")
-    days_mask = switch_time & 0x7F
-    if days_mask == _SWITCHTIME_ALL_DAYS:
-        day_str = "every day"
-    elif days_mask == _SWITCHTIME_WEEKDAYS:
-        day_str = "Mon–Fri"
-    elif days_mask == 0:
-        day_str = None
-    else:
-        day_str = ", ".join(_DAY_ABBR[i] for i in range(7) if days_mask & (1 << i))
+    day_str = days_label(switch_time & 0x7F)
 
     if begin is None and end is None and day_str is None:
         return None
