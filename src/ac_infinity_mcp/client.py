@@ -7,7 +7,12 @@ from typing import Any
 import requests
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from ac_infinity_mcp.controller import ControllerType, build_write_payload, detect_controller_type
+from ac_infinity_mcp.controller import (
+    ControllerType,
+    build_write_payload,
+    detect_controller_type,
+    groups_mode_code,
+)
 from ac_infinity_mcp.schema import (
     ACInfinityAdvanceConflictError,
     ACInfinityAPIError,
@@ -221,17 +226,8 @@ _RAIL_HUMI_LOW = 0
 _RAIL_VPD_HIGH = 99
 _RAIL_VPD_LOW = 0
 
-# currentMode values for the Groups (Advance Automation) API. Single mode pick, matches
-# the app's Advance Automation screen: Off/On/Auto/VPD/Cycle = 2/1/4/6/3.
-# NOTE: this is a DIFFERENT enum from the legacy per-port `atType` (getdevModeSettingList):
-# atType OFF=1, ON=2, AUTO=3, TIMER=4/5, CYCLE=6, SCHEDULE=7, VPD=8. Do not conflate the two.
-_MODE_ON = 1
-_MODE_OFF = 2
-_MODE_CYCLE = 3
-_MODE_AUTO = 4
-_MODE_VPD = 6
-
-
+# Groups `currentMode` is device-class dependent and lives in controller.py — the two
+# classes invert on/off and disagree on cycle/auto/vpd. See Issues #326 and #328.
 def resolve_port_type(raw_entries: list[dict[str, Any]], ports: list[int]) -> int:
     """Resolve the device-identity ``portType`` for ``ports`` from existing getGroups rules.
 
@@ -262,6 +258,7 @@ def build_groups_payload(
     begin_time: int,
     end_time: int,
     *,
+    controller_type: ControllerType,
     mode: str = "on",
     control_style: str | None = None,
     on_speed: int | None = None,
@@ -330,13 +327,17 @@ def build_groups_payload(
     resolved_on_speed = on_speed if on_speed is not None else max_level
     resolved_off_speed = min_level
 
+    # Resolve the wire value once, before the payload literal, so `currentMode` keeps its
+    # position in the form-encoded body and no branch below can overwrite it (#326).
+    mode_code = groups_mode_code(controller_type, mode)
+
     payload: dict[str, Any] = {
         # devId NOT included here — the inner method injects it.
         # advCode NOT included — absent from addGroups live capture (unlike addAlarms).
         # isFlag (capital F) confirmed for addGroups;
         # isflag (lowercase) for updateGroupsIsOn/delByid.
         "advName": clean_name,
-        "currentMode": _MODE_ON,
+        "currentMode": mode_code,
         "isOn": 1,
         "onSpeed": resolved_on_speed,
         # On mode has no user-settable min; port's own min setting is used.
@@ -424,9 +425,8 @@ def build_groups_payload(
         # Base dict is the verified On-mode signature — leave as-is.
         pass
     elif mode == "off":
-        payload["currentMode"] = _MODE_OFF
+        pass
     elif mode == "cycle":
-        payload["currentMode"] = _MODE_CYCLE
         # cycleOn/cycleOff are stored in SECONDS on the controller (the app shows
         # minutes = seconds/60; verified live: cycleOn=30 rendered as "0 min").
         payload["cycleOn"] = int(cycle_on_minutes or 0) * 60
@@ -484,7 +484,6 @@ def _apply_auto(
     sub-mode (settingMode=1, setSelect=0): rails for the trigger families with switches=1,
     real values in targetHumi / targetTempF.
     """
-    payload["currentMode"] = _MODE_AUTO
 
     # VPD family is inert in Auto mode — the app zeroes it (value 0, switch 0) for BOTH
     # target and trigger sub-modes (verified live against app-made Auto rules). The old code
@@ -581,7 +580,6 @@ def _apply_vpd(
     (highVpdSwitch=1) and leaves lowVpd=0 with lowVpdSwitch=0. Trigger (settingMode=0):
     highVpd/lowVpd = kpa*10 with switch=1; the unused direction parked at its rail/switch=0.
     """
-    payload["currentMode"] = _MODE_VPD
 
     # Zero the auto + temp/humidity-target families (inert in VPD mode; see docstring / #288).
     payload["autoHighHumi"] = 0
@@ -636,6 +634,8 @@ def build_add_groups_payload(
     on_speed: int,
     begin_time: int,
     end_time: int,
+    *,
+    controller_type: ControllerType,
 ) -> dict[str, Any]:
     """Build the addGroups API payload for create_advance_automation (On mode, one port).
 
@@ -648,6 +648,7 @@ def build_add_groups_payload(
         clean_name=clean_name,
         begin_time=begin_time,
         end_time=end_time,
+        controller_type=controller_type,
         mode="on",
         on_speed=on_speed,
     )

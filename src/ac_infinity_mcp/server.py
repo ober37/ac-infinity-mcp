@@ -46,6 +46,7 @@ from ac_infinity_mcp.client import (
     build_groups_payload,
     resolve_port_type,
 )
+from ac_infinity_mcp.controller import ControllerType, detect_controller_type
 from ac_infinity_mcp.formatting import (
     _effective_tz,
     _effective_unit,
@@ -290,6 +291,16 @@ def _ports_bitmask(ports: list[int]) -> int:
 # across its ports — so target must NEVER be gated by devType. A port that does not report
 # the field is treated as capable, so a device that omits it is never false-blocked.
 _MODETYE_NO_TARGET = 0
+
+
+def _ctype(device: dict | None) -> ControllerType:
+    """Resolve the controller class for the Groups mode tables (#326, #328).
+
+    Every caller holds a full devInfoListAll entry from `_get_device`, so this never
+    guesses. `detect_controller_type` covers both `devType >= 20` and the
+    `newFrameworkDevice` flag, so devType 21 resolves correctly without a second list.
+    """
+    return detect_controller_type(device or {})
 
 
 def _ports_without_target_support(device: dict, ports: list[int]) -> list[int]:
@@ -717,6 +728,8 @@ def _resolve_rule(
     end_time: int | None,
     port_name_map: dict[int, str],
     tz_label: str,
+    *,
+    controller_type: ControllerType,
 ) -> tuple[dict | None, list[dict], list[dict], str | None]:
     """Resolve a single rule within one program by name + port bitmask + window.
 
@@ -739,7 +752,7 @@ def _resolve_rule(
     ]
 
     def _rule_view(e: dict) -> dict:
-        decoded = _decode_rule(e)
+        decoded = _decode_rule(e, controller_type=controller_type)
         _bm = int(e.get("grouptDevType") or 0)
         _ports = [bit + 1 for bit in range(8) if _bm & (1 << bit)]
         return {
@@ -2120,7 +2133,9 @@ async def get_port_status(device_id: str, port: int) -> str:
         if mode_str == "ADVANCE" and dev_id:
             try:
                 raw_adv = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
-                governing = _find_governing_automation(_group_automations(raw_adv), port)
+                governing = _find_governing_automation(
+                    _group_automations(raw_adv, controller_type=_ctype(device)), port
+                )
                 automation_name = governing["name"] if governing else None
             except ACInfinityAuthError:
                 raise
@@ -2287,7 +2302,7 @@ async def get_port_settings(device_id: str, port: int) -> str:
             adv_grouped: list[dict] = []
             try:
                 raw_adv = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
-                adv_grouped = _group_automations(raw_adv)
+                adv_grouped = _group_automations(raw_adv, controller_type=_ctype(device))
                 governing = _find_governing_automation(adv_grouped, port)
             except ACInfinityAuthError:
                 # ACInfinityAuthError must precede Exception — auth must propagate, not degrade.
@@ -2606,7 +2621,8 @@ async def set_port_speed(
         port_name = _get_port_name_from_device(device, port)
         dev_id = device.get("devId") if device else None
         return await _build_advance_conflict_response(
-            _client(), device_id, dev_id, port, port_name, device=device, requested_speed=speed
+            _client(), device_id, dev_id, port, port_name,
+            controller_type=_ctype(device), device=device, requested_speed=speed
         )
     except ACInfinityDeviceError as e:
         logger.warning("Device error in set_port_speed (device=%s port=%s): %s", device_id, port, e)
@@ -2693,7 +2709,8 @@ async def set_port_on(
         port_name = _get_port_name_from_device(device, port)
         dev_id = device.get("devId") if device else None
         return await _build_advance_conflict_response(
-            _client(), device_id, dev_id, port, port_name, device=device
+            _client(), device_id, dev_id, port, port_name,
+            controller_type=_ctype(device), device=device
         )
     except ACInfinityDeviceError as e:
         logger.warning("Device error in set_port_on (device=%s port=%s): %s", device_id, port, e)
@@ -2781,7 +2798,8 @@ async def set_port_off(
         port_name = _get_port_name_from_device(device, port)
         dev_id = device.get("devId") if device else None
         return await _build_advance_conflict_response(
-            _client(), device_id, dev_id, port, port_name, device=device
+            _client(), device_id, dev_id, port, port_name,
+            controller_type=_ctype(device), device=device
         )
     except ACInfinityDeviceError as e:
         logger.warning("Device error in set_port_off (device=%s port=%s): %s", device_id, port, e)
@@ -2910,7 +2928,8 @@ async def set_vpd_automation(
         port_name = _get_port_name_from_device(device, port)
         dev_id = device.get("devId") if device else None
         return await _build_advance_conflict_response(
-            _client(), device_id, dev_id, port, port_name, device=device
+            _client(), device_id, dev_id, port, port_name,
+            controller_type=_ctype(device), device=device
         )
     except ACInfinityDeviceError as e:
         logger.warning(
@@ -3058,7 +3077,8 @@ async def set_temperature_automation(
         port_name = _get_port_name_from_device(device, port)
         dev_id = device.get("devId") if device else None
         return await _build_advance_conflict_response(
-            _client(), device_id, dev_id, port, port_name, device=device
+            _client(), device_id, dev_id, port, port_name,
+            controller_type=_ctype(device), device=device
         )
     except ACInfinityDeviceError as e:
         logger.warning(
@@ -3169,7 +3189,8 @@ async def set_humidity_automation(
         port_name = _get_port_name_from_device(device, port)
         dev_id = device.get("devId") if device else None
         return await _build_advance_conflict_response(
-            _client(), device_id, dev_id, port, port_name, device=device
+            _client(), device_id, dev_id, port, port_name,
+            controller_type=_ctype(device), device=device
         )
     except ACInfinityDeviceError as e:
         logger.warning(
@@ -3333,7 +3354,8 @@ async def set_port_mode(
         port_name = _get_port_name_from_device(device, port)
         dev_id = device.get("devId") if device else None
         return await _build_advance_conflict_response(
-            _client(), device_id, dev_id, port, port_name, device=device
+            _client(), device_id, dev_id, port, port_name,
+            controller_type=_ctype(device), device=device
         )
     except ACInfinityDeviceError as e:
         logger.warning("Device error in set_port_mode (device=%s port=%s): %s", device_id, port, e)
@@ -3475,7 +3497,8 @@ async def apply_grow_stage_template(
         port_name = _get_port_name_from_device(device, port)
         dev_id = device.get("devId") if device else None
         return await _build_advance_conflict_response(
-            _client(), device_id, dev_id, port, port_name, device=device
+            _client(), device_id, dev_id, port, port_name,
+            controller_type=_ctype(device), device=device
         )
     except ACInfinityDeviceError as e:
         logger.warning(
@@ -3549,7 +3572,7 @@ async def list_advance_automations(device_id: str) -> str:
             return json.dumps({"error": f"Device {device_id} is missing devId"})
 
         raw = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
-        grouped = _group_automations(raw)
+        grouped = _group_automations(raw, controller_type=_ctype(device))
 
         automations = [
             {
@@ -3618,7 +3641,7 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
             return json.dumps({"error": f"Device {device_id} is missing devId"})
 
         raw = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
-        grouped = _group_automations(raw)
+        grouped = _group_automations(raw, controller_type=_ctype(device))
 
         found = next((g for g in grouped if g["automation_id"] == adv_id_int), None)
         if found is None:
@@ -3839,7 +3862,7 @@ async def enable_advance_automation(
             return json.dumps({"error": f"Device {device_id} is missing devId"})
 
         raw = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
-        grouped = _group_automations(raw)
+        grouped = _group_automations(raw, controller_type=_ctype(device))
 
         found = next((g for g in grouped if g["automation_id"] == adv_id_int), None)
         if found is None:
@@ -3937,7 +3960,7 @@ async def disable_advance_automation(
             return json.dumps({"error": f"Device {device_id} is missing devId"})
 
         raw = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
-        grouped = _group_automations(raw)
+        grouped = _group_automations(raw, controller_type=_ctype(device))
 
         found = next((g for g in grouped if g["automation_id"] == adv_id_int), None)
         if found is None:
@@ -4280,6 +4303,7 @@ async def create_advance_automation(
             on_speed=on_speed,
             min_level=off_speed,
             port_type=port_type,
+            controller_type=_ctype(device),
             **build_extra,
         )
 
@@ -4378,7 +4402,7 @@ async def delete_advance_automation(
             return json.dumps({"error": f"Device {device_id} is missing devId"})
 
         raw = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
-        grouped = _group_automations(raw)
+        grouped = _group_automations(raw, controller_type=_ctype(device))
 
         found = next((g for g in grouped if g["automation_id"] == adv_id_int), None)
         if found is None:
@@ -4704,9 +4728,10 @@ async def add_automation_rule(
             begin_time=begin_time, end_time=end_time,
             is_flag=0, group_nums=group_nums, sort_type=sort_type, sub_number=next_sub,
             port_type=port_type,
+            controller_type=_ctype(device),
             **kwargs,
         )
-        decoded = _decode_rule(payload)
+        decoded = _decode_rule(payload, controller_type=_ctype(device))
         rule_view = {
             "ports": _ports_label(port_name_map, ports),
             "control": decoded["control"],
@@ -5001,7 +5026,8 @@ async def update_automation_rule(
 
         raw = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
         match, disambig, program_rules, ambiguous_program = _resolve_rule(
-            raw, program_name, ports, begin_time, end_time, port_name_map, tz_label
+            raw, program_name, ports, begin_time, end_time, port_name_map, tz_label,
+            controller_type=_ctype(device),
         )
         clean_program = _sanitize_api_string(program_name, 64)
 
@@ -5033,7 +5059,7 @@ async def update_automation_rule(
             })
 
         # Determine effective mode for validation: explicit mode, else the rule's current mode.
-        current_decoded = _decode_rule(match)
+        current_decoded = _decode_rule(match, controller_type=_ctype(device))
         effective_mode = mode if mode is not None else current_decoded["mode"]
 
         # Same-mode edit (mode/control_style both omitted): resolve the rule's effective style
@@ -5117,6 +5143,7 @@ async def update_automation_rule(
                 **{k: v for k, v in build_kwargs.items()
                    if k not in ("mode", "min_level", "max_level")},
                 mode=mode,
+                controller_type=_ctype(device),
             )
             for key in _signature_keys_for(mode):
                 body[key] = rebuilt[key]
@@ -5135,7 +5162,7 @@ async def update_automation_rule(
                 control_style=control_style,
             )
 
-        new_decoded = _decode_rule(body)
+        new_decoded = _decode_rule(body, controller_type=_ctype(device))
         rule_view = {
             "ports": _ports_label(port_name_map, ports),
             "control": new_decoded["control"],
@@ -5159,7 +5186,8 @@ async def update_automation_rule(
         # Stale-advId guard: re-resolve from a fresh getGroups at write time.
         raw_now = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
         match_now, _d, _r, _e = _resolve_rule(
-            raw_now, program_name, ports, begin_time, end_time, port_name_map, tz_label
+            raw_now, program_name, ports, begin_time, end_time, port_name_map, tz_label,
+            controller_type=_ctype(device),
         )
         if match_now is None:
             return json.dumps({
@@ -5254,7 +5282,8 @@ async def delete_automation_rule(
 
         raw = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
         match, disambig, program_rules, ambiguous_program = _resolve_rule(
-            raw, program_name, ports, begin_time, end_time, port_name_map, tz_label
+            raw, program_name, ports, begin_time, end_time, port_name_map, tz_label,
+            controller_type=_ctype(device),
         )
         clean_program = _sanitize_api_string(program_name, 64)
 
@@ -5285,7 +5314,7 @@ async def delete_automation_rule(
                 "existing_rules": program_rules,
             })
 
-        decoded = _decode_rule(match)
+        decoded = _decode_rule(match, controller_type=_ctype(device))
         rule_view = {
             "ports": _ports_label(port_name_map, ports),
             "control": decoded["control"],
@@ -5308,7 +5337,8 @@ async def delete_automation_rule(
         # Stale-advId guard: re-resolve from a fresh getGroups at write time.
         raw_now = await asyncio.to_thread(_client().get_advance_automations, str(dev_id))
         match_now, _d, _r, _e = _resolve_rule(
-            raw_now, program_name, ports, begin_time, end_time, port_name_map, tz_label
+            raw_now, program_name, ports, begin_time, end_time, port_name_map, tz_label,
+            controller_type=_ctype(device),
         )
         if match_now is None:
             return json.dumps({
@@ -5434,7 +5464,7 @@ async def break_out_of_automation(
         raw_automations = await asyncio.to_thread(
             _client().get_advance_automations, str(dev_id)
         )
-        grouped = _group_automations(raw_automations)
+        grouped = _group_automations(raw_automations, controller_type=_ctype(device))
 
         # Find the automation whose bitmask covers the target port.
         automation = _find_governing_automation(grouped, port)

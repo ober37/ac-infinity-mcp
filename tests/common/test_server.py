@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from ac_infinity_mcp.controller import ControllerType
 from ac_infinity_mcp.schema import (
     _ADVANCE_MODE_TYPE,
     ACInfinityAdvanceConflictError,
@@ -5736,7 +5737,9 @@ def test_validate_automation_id_invalid():
 
 def test_group_automations_groups_by_name():
     """Two entries with same advName → one automation with both adv_ids."""
-    grouped = _group_automations(MOCK_ADVANCE_AUTOMATIONS_LIST)
+    grouped = _group_automations(
+        MOCK_ADVANCE_AUTOMATIONS_LIST, controller_type=ControllerType.LEGACY,
+    )
     names = [g["name"] for g in grouped]
     assert "Moderate Airflow" in names
     assert "Pollenation Airflow" in names
@@ -5752,7 +5755,7 @@ def test_group_automations_groups_by_name():
 
 
 def test_group_automations_empty():
-    assert _group_automations([]) == []
+    assert _group_automations([], controller_type=ControllerType.LEGACY) == []
 
 
 # ============ list_advance_automations ============
@@ -6990,7 +6993,7 @@ def test_group_automations_none_advname_groups_together():
         {"advId": 2, "advName": None, "isOn": 0, "runState": 0, "onSpeed": 1, "offSpeed": 0,
          "grouptDevType": 4, "beginTime": 255, "endTime": 255},
     ]
-    grouped = _group_automations(entries)
+    grouped = _group_automations(entries, controller_type=ControllerType.LEGACY)
     assert len(grouped) == 1
     assert grouped[0]["name"] == "(unnamed)"
     assert grouped[0]["automation_id"] == 1  # first entry's advId
@@ -7975,7 +7978,7 @@ def test_find_governing_automation_returns_automation_when_port_in_bitmask():
     automations = _group_automations([
         {"advId": 10, "advName": "Auto A", "isOn": 1, "runState": 1, "onSpeed": 5,
          "offSpeed": 0, "grouptDevType": 8, "beginTime": 255, "endTime": 255},
-    ])
+    ], controller_type=ControllerType.LEGACY)
     # grouptDevType=8 = bit 3 = Port 4
     result = _find_governing_automation(automations, 4)
     assert result is not None
@@ -7987,7 +7990,7 @@ def test_find_governing_automation_returns_none_when_port_not_in_bitmask():
     automations = _group_automations([
         {"advId": 10, "advName": "Auto A", "isOn": 1, "runState": 1, "onSpeed": 5,
          "offSpeed": 0, "grouptDevType": 8, "beginTime": 255, "endTime": 255},
-    ])
+    ], controller_type=ControllerType.LEGACY)
     # grouptDevType=8 covers Port 4 only; Port 1 (bit 0) is not covered
     result = _find_governing_automation(automations, 1)
     assert result is None
@@ -7998,7 +8001,7 @@ def test_find_governing_automation_returns_none_when_automation_disabled():
     automations = _group_automations([
         {"advId": 10, "advName": "Auto A", "isOn": 0, "runState": 0, "onSpeed": 5,
          "offSpeed": 0, "grouptDevType": 8, "beginTime": 255, "endTime": 255},
-    ])
+    ], controller_type=ControllerType.LEGACY)
     result = _find_governing_automation(automations, 4)
     assert result is None
 
@@ -8010,7 +8013,7 @@ def test_find_governing_automation_returns_first_match_when_multiple_cover_port(
          "offSpeed": 0, "grouptDevType": 4, "beginTime": 255, "endTime": 255},
         {"advId": 2, "advName": "Second", "isOn": 1, "runState": 1, "onSpeed": 7,
          "offSpeed": 0, "grouptDevType": 4, "beginTime": 255, "endTime": 255},
-    ])
+    ], controller_type=ControllerType.LEGACY)
     # Both cover Port 3 (bit 2 = 4); first match wins
     result = _find_governing_automation(automations, 3)
     assert result is not None
@@ -10295,7 +10298,7 @@ async def test_update_rule_mode_change_to_on_decodes_as_on(mock_client):
     await update_automation_rule("C58ZA", "Seedling", [2], mode="on", max_level=3, dry_run=False)
     sent = mock_client.update_advance_automation.call_args.args[1]
     assert sent["currentMode"] == 1
-    assert _decode_rule(sent)["mode"] == "on"
+    assert _decode_rule(sent, controller_type=ControllerType.LEGACY)["mode"] == "on"
 
 
 async def test_update_rule_mode_change_auto_trigger_to_target_rebuilds(mock_client):
@@ -10313,7 +10316,7 @@ async def test_update_rule_mode_change_auto_trigger_to_target_rebuilds(mock_clie
     # The stale temp trigger (autoLowTempF=76) is parked back at its rail by the rebuild.
     assert sent["autoLowTempF"] == 32
     assert sent["targetHumi"] == 70
-    decoded = _decode_rule(sent)
+    decoded = _decode_rule(sent, controller_type=ControllerType.LEGACY)
     assert decoded["mode"] == "auto"
     assert "humidity: hold at 70%" in decoded["control"]
 
@@ -10329,7 +10332,9 @@ async def test_update_rule_mode_change_to_vpd_target(mock_client):
     assert sent["currentMode"] == 6
     assert sent["targetVpd"] == 12
     assert sent["highVpd"] == 12       # encoder rebuild mirrors the setpoint into highVpd too
-    assert "VPD: hold at 1.2 kPa" in _decode_rule(sent)["control"]
+    assert "VPD: hold at 1.2 kPa" in _decode_rule(
+        sent, controller_type=ControllerType.LEGACY,
+    )["control"]
 
 
 async def test_update_rule_cross_mode_param_rejected(mock_client):
@@ -10989,7 +10994,9 @@ async def test_update_rule_same_mode_auto_target_humidity(mock_client):
     )
     sent = mock_client.update_advance_automation.call_args.args[1]
     assert sent["targetHumi"] == 72
-    assert "humidity: hold at 72%" in _decode_rule(sent)["control"]
+    assert "humidity: hold at 72%" in _decode_rule(
+        sent, controller_type=ControllerType.LEGACY,
+    )["control"]
 
 
 async def test_update_rule_same_mode_vpd_target(mock_client):
@@ -11004,7 +11011,9 @@ async def test_update_rule_same_mode_vpd_target(mock_client):
     assert sent["highVpdSwitch"] == 1
     assert sent["lowVpdSwitch"] == 0
     assert sent["currentMode"] == 6
-    assert "VPD: hold at 1.3 kPa" in _decode_rule(sent)["control"]
+    assert "VPD: hold at 1.3 kPa" in _decode_rule(
+        sent, controller_type=ControllerType.LEGACY,
+    )["control"]
 
 
 # ============ Issue #284 — auth / API / write-failure error paths ============
