@@ -254,7 +254,8 @@ def _no_rule_clause(label: str, entry: dict, controller_type: ControllerType) ->
         # groups_mode_name applies, and for the same reason: this field decides whether a
         # grower is told a running heater has no rule. A float, a string "0", a bool, an
         # absent key and an unparseable value all take the cautious branch.
-        if type(entry.get("sensorModeDataNum")) is not int or entry["sensorModeDataNum"] != 0:
+        count = entry.get("sensorModeDataNum")
+        if type(count) is not int or count != 0:
             return f"{label} (rule set in the AC Infinity app — I can't read its details yet)"
     return f"{label} (no rule set)"
 

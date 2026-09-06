@@ -321,7 +321,11 @@ def _ai_plus_entry(**over):
 @pytest.fixture
 def ai_plus_client(mock_client):
     """mock_client re-pointed at the devType-20 fixture."""
-    mock_client.get_devices.return_value = [copy.deepcopy(AI_PLUS_DEVICE)]
+    device = copy.deepcopy(AI_PLUS_DEVICE)
+    # The shared fixture carries no zoneId, which renders the "timezone unknown" variant.
+    # Give it a real zone so the schedule assertions exercise the qualifier a grower sees.
+    device["zoneId"] = "America/Chicago"
+    mock_client.get_devices.return_value = [device]
     mock_client.get_advance_automations.return_value = [_ai_plus_entry()]
     return mock_client
 
@@ -398,8 +402,11 @@ async def test_same_mode_edit_on_new_framework_takes_the_auto_overlay(ai_plus_cl
     overlay and emit no cycle keys — under the legacy table this wrote cycleOn/cycleOff
     onto an auto rule."""
     ai_plus_client.get_advance_automations.return_value = [
-        # switchTime 127 (not the base 255): a real window and the 24/7 flag cannot
-        # coexist — the app cannot produce that entry (Quirk 21).
+        # switchTime 127 (not the base 255) so this entry is genuinely scheduled: the
+        # edit path is about the auto overlay, and a continuous flag would make the window
+        # inert. (255 alongside real begin/end times is NOT impossible — 7 of the 31
+        # entries in the golden capture are exactly that; the renderer just treats bit 7
+        # as authoritative.)
         _ai_plus_entry(
             currentMode=3, beginTime=540, endTime=180, switchTime=127, advName="Lights"
         )
@@ -473,8 +480,11 @@ def test_absent_count_takes_the_cautious_branch():
     assert f"auto ({_RULE_SET_ELSEWHERE})" in control
 
 
-@pytest.mark.parametrize("raw", [None, "", "abc", [], {}])
+@pytest.mark.parametrize("raw", [None, "", "abc", [], {}, "0", "00", 0.0, False])
 def test_unparseable_count_takes_the_cautious_branch(raw):
+    """`"0"`, `"00"`, `0.0` and `False` are the values the strictness rewrite actually
+    changed — the old `int()` coercion routed all four to the reassuring "no rule set".
+    Only a real int 0 earns that now, matching groups_mode_name's policy."""
     entry = _inactive_auto(currentMode=groups_mode_code(NEW, "auto"), sensorModeDataNum=raw)
     assert _RULE_SET_ELSEWHERE in _decode_rule(entry, controller_type=NEW)["control"]
 
@@ -528,7 +538,7 @@ async def test_human_summary_for_an_unknown_rule_admits_it(ai_plus_client):
     data = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
     assert data["human_summary"] == (
         "'Lights' uses a rule type I don't recognize yet — check this one in the"
-        " AC Infinity app. Currently enabled."
+        " AC Infinity app. It runs around the clock. Currently enabled."
     )
     assert "speed 7" not in data["human_summary"]
 
@@ -619,8 +629,12 @@ async def test_preview_payload_matches_the_sent_payload(ai_plus_client):
     assert preview["payload"]["currentMode"] == sent["currentMode"] == 1
 
 
+_MISSING = object()
+
+
 def _differing(a: dict, b: dict) -> set:
-    return {k for k in set(a) | set(b) if a.get(k) != b.get(k)}
+    """Keys that differ, counting an absent key as different from a present None."""
+    return {k for k in set(a) | set(b) if a.get(k, _MISSING) != b.get(k, _MISSING)}
 
 
 async def test_preview_diverges_from_the_sent_payload_in_port_type_alone(ai_plus_client):
@@ -651,7 +665,9 @@ async def test_off_rule_human_summary_does_not_say_off_and_enabled(ai_plus_clien
     automation isn't doing anything" switches the port on manually and fights it."""
     ai_plus_client.get_advance_automations.return_value = [_ai_plus_entry(currentMode=1)]
     data = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
-    assert data["human_summary"] == "'Lights' holds its port off. Currently enabled."
+    assert data["human_summary"] == (
+        "'Lights' holds its port off around the clock. Currently enabled."
+    )
 
 
 async def test_legacy_off_rule_human_summary_matches(mock_client):
@@ -661,7 +677,9 @@ async def test_legacy_off_rule_human_summary_matches(mock_client):
         "beginTime": 255, "endTime": 255, "onTimeSwitch": 1, "switchTime": 255,
     }]
     data = json.loads(await get_advance_automation("C58ZA", "6002"))
-    assert data["human_summary"] == "'Kill Switch' holds its port off. Currently enabled."
+    assert data["human_summary"] == (
+        "'Kill Switch' holds its port off around the clock. Currently enabled."
+    )
 
 
 # ---- Port label must not double ----
@@ -685,3 +703,188 @@ async def test_create_preview_keeps_name_and_number_for_a_named_port(ai_plus_cli
         AI_PLUS_CODE, "Lights Off", on_speed=1, port=1, mode="off", dry_run=True,
     ))
     assert data["rule"]["ports"] == "Fan Port (Port 1)"
+
+
+# ============ human_summary keeps the schedule, and reconciles its two sources ============
+#
+# Round 2 found the round-1 fix had thrown the window away on the Off branch and had started
+# repeating a stale one on the others. `human_summary` reads from two independent schedule
+# fields — onTimeSwitch (the app's Continuous toggle) and switchTime bit 7 — and real data
+# disagrees between them in BOTH directions, so each is a false positive for the other's
+# shape. These pin the reconciliation.
+
+_TZ = " (America/Chicago)"
+
+
+def _scheduled_off(**over):
+    """A real captured shape: Off, scheduled 22:00–06:00 every day, toggle off."""
+    base = dict(
+        currentMode=1, beginTime=1320, endTime=360, switchTime=127, onTimeSwitch=0
+    )
+    return _ai_plus_entry(**{**base, **over})
+
+
+async def test_scheduled_off_rule_keeps_its_window(ai_plus_client):
+    """An Off rule with a window leaves the port FREE outside it. Dropping the window told
+    a grower their heater was held off when it runs sixteen hours a day — and the same
+    response's rules[].window carried the hours, so it contradicted itself."""
+    ai_plus_client.get_advance_automations.return_value = [_scheduled_off()]
+    data = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
+    assert data["human_summary"] == (
+        f"'Lights' holds its port off from 22:00 to 06:00{_TZ}. Currently enabled."
+    )
+    # The summary must agree with the rule list beside it.
+    assert data["rules"][0]["window"] == f"22:00–06:00{_TZ}"
+
+
+async def test_scheduled_unknown_rule_keeps_its_window(ai_plus_client):
+    """The schedule is knowable even when the mode is not."""
+    ai_plus_client.get_advance_automations.return_value = [_scheduled_off(currentMode=99)]
+    data = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
+    assert data["human_summary"] == (
+        "'Lights' uses a rule type I don't recognize yet — check this one in the"
+        f" AC Infinity app. It runs from 22:00 to 06:00{_TZ}. Currently enabled."
+    )
+
+
+async def test_continuous_toggle_overrides_a_stale_clock_window(ai_plus_client):
+    """onTimeSwitch=1 with a day bitmask: the entry still carries 09:00–17:00 but the
+    Continuous toggle overrides it. Repeating that window told a grower their 24/7 cycle
+    stopped at 17:00 — they add a second rule and double up equipment already running.
+    This shape is real: 'Clone Transplant' in the golden capture is (127, 1)."""
+    ai_plus_client.get_advance_automations.return_value = [
+        _ai_plus_entry(currentMode=6, cycleOn=900, cycleOff=2700,
+                       beginTime=540, endTime=1020, switchTime=127, onTimeSwitch=1)
+    ]
+    data = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
+    assert data["human_summary"] == (
+        "'Lights' — cycle 15 min on / 45 min off; speed 0 (off)–7; runs continuously."
+        " Currently enabled."
+    )
+    assert "09:00" not in data["human_summary"]
+    # …and it must agree with the schedule block in the same response.
+    assert data["schedule"]["mode"] == "continuous"
+
+
+async def test_no_timezone_is_glued_to_a_continuous_rule(ai_plus_client):
+    """The mirror case: switchTime bit 7 set with real begin/end times, which is what every
+    continuous rule this server writes looks like (7 of 31 golden entries). is_scheduled is
+    a false positive there, so the timezone must not be appended to "runs continuously"."""
+    ai_plus_client.get_advance_automations.return_value = [
+        _ai_plus_entry(currentMode=6, cycleOn=900, cycleOff=2700,
+                       beginTime=540, endTime=1020, switchTime=255, onTimeSwitch=0)
+    ]
+    summary = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))["human_summary"]
+    assert summary.endswith("runs continuously. Currently enabled.")
+    assert "America/Chicago" not in summary
+
+
+async def test_scheduled_cycle_rule_keeps_its_timezone(ai_plus_client):
+    """And the genuinely-scheduled case still gets the qualifier — clock times with no zone
+    are the trap this tool's docstring devotes a paragraph to."""
+    ai_plus_client.get_advance_automations.return_value = [
+        _ai_plus_entry(currentMode=6, cycleOn=900, cycleOff=2700,
+                       beginTime=540, endTime=1020, switchTime=127, onTimeSwitch=0)
+    ]
+    summary = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))["human_summary"]
+    assert summary == (
+        "'Lights' — cycle 15 min on / 45 min off; speed 0 (off)–7;"
+        f" every day 09:00–17:00{_TZ}. Currently enabled."
+    )
+
+
+async def test_on_rule_wording_is_byte_identical_when_scheduled(ai_plus_client):
+    """The one branch that must not move: On rules keep main's exact sentence."""
+    ai_plus_client.get_advance_automations.return_value = [_scheduled_off(currentMode=2)]
+    summary = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))["human_summary"]
+    assert summary == f"'Lights' runs at speed 7 from 22:00 to 06:00{_TZ}, currently enabled."
+
+
+async def test_off_rule_with_unreadable_ports_does_not_claim_ports(ai_plus_client):
+    """grouptDevType=0 → governed_ports is empty. The plural fallback used to assert ports
+    the tool had just failed to identify."""
+    ai_plus_client.get_advance_automations.return_value = [
+        _ai_plus_entry(currentMode=1, grouptDevType=0)
+    ]
+    data = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
+    assert data["governed_ports"] == []
+    assert data["human_summary"] == (
+        "'Lights' holds its ports off, but I couldn't read which ports it covers"
+        " — check it in the AC Infinity app. Currently enabled."
+    )
+
+
+# ============ The audit trail is a plan-§5 control, so it gets a test ============
+
+
+async def test_groups_write_logs_the_class_and_the_wire_code(ai_plus_client, caplog):
+    """#326 was diagnosed on live hardware by a human looking at a light fixture, because
+    nothing recorded the currentMode actually sent. A no-op here failed zero tests."""
+    import logging
+    with caplog.at_level(logging.INFO, logger="ac_infinity_mcp.server"):
+        await create_advance_automation(
+            AI_PLUS_CODE, "Lights Off", on_speed=1, port=1, mode="off", dry_run=False,
+        )
+    line = next(r.getMessage() for r in caplog.records if "currentMode=" in r.getMessage())
+    assert "class=new_framework" in line
+    assert "mode=off" in line
+    assert "currentMode=1" in line
+    assert AI_PLUS_CODE in line
+
+
+async def test_dry_run_does_not_log_a_write(ai_plus_client, caplog):
+    import logging
+    with caplog.at_level(logging.INFO, logger="ac_infinity_mcp.server"):
+        await create_advance_automation(
+            AI_PLUS_CODE, "Lights Off", on_speed=1, port=1, mode="off", dry_run=True,
+        )
+    assert not [r for r in caplog.records if "currentMode=" in r.getMessage()]
+
+
+async def test_legacy_write_logs_the_legacy_class_and_code(mock_client, caplog):
+    import logging
+    with caplog.at_level(logging.INFO, logger="ac_infinity_mcp.server"):
+        await create_advance_automation(
+            "C58ZA", "Lights Off", on_speed=1, port=1, mode="off", dry_run=False,
+        )
+    line = next(r.getMessage() for r in caplog.records if "currentMode=" in r.getMessage())
+    assert "class=legacy" in line
+    assert "currentMode=2" in line
+
+
+def test_the_audit_line_never_carries_the_payload(caplog):
+    """Three scalars, never the dict — it holds advName and every rule field."""
+    import logging
+
+    from ac_infinity_mcp.server import _log_groups_write
+    with caplog.at_level(logging.INFO, logger="ac_infinity_mcp.server"):
+        _log_groups_write(
+            "t", "C58ZA", {"devType": 11},
+            "off", {"currentMode": 2, "advName": "x", "canary": "SHOULD-NOT-APPEAR"},
+        )
+    assert "SHOULD-NOT-APPEAR" not in caplog.text
+    assert "advName" not in caplog.text
+
+
+# ============ The unresolved-class fallback is the only guard against a silent guess ============
+
+
+def test_unresolved_controller_class_warns_and_names_the_caller(caplog):
+    """Flipping this branch's return value failed zero tests. It is the last thing standing
+    between a missing device and a silent LEGACY guess on grower-facing conflict text."""
+    import logging
+
+    from ac_infinity_mcp.server import _ctype
+    with caplog.at_level(logging.WARNING, logger="ac_infinity_mcp.server"):
+        assert _ctype(None, "set_port_speed") is LEGACY
+    assert "set_port_speed" in caplog.text
+    assert "assuming legacy" in caplog.text
+
+
+def test_resolved_controller_class_does_not_warn(caplog):
+    import logging
+
+    from ac_infinity_mcp.server import _ctype
+    with caplog.at_level(logging.WARNING, logger="ac_infinity_mcp.server"):
+        assert _ctype({"devType": 20}) is NEW
+    assert caplog.text == ""

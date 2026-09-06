@@ -36,6 +36,7 @@ from ac_infinity_mcp.automation import (
     UNRECOGNIZED_RULE,
     _build_advance_conflict_response,
     _decode_rule,  # noqa: F401 — re-exported for test compatibility
+    _decode_schedule,
     _find_governing_automation,
     _find_governing_port_group,
     _group_automations,
@@ -294,7 +295,7 @@ def _ports_bitmask(ports: list[int]) -> int:
 _MODETYE_NO_TARGET = 0
 
 
-def _ctype(device: dict | None) -> ControllerType:
+def _ctype(device: dict | None, context: str = "") -> ControllerType:
     """Resolve the controller class for the Groups mode tables (#326, #328).
 
     Every live caller holds a full devInfoListAll entry from `_get_device`.
@@ -304,11 +305,16 @@ def _ctype(device: dict | None) -> ControllerType:
     `device` is Optional only for the eight ADVANCE-conflict handlers, which bind it to
     None before their `try` so mypy cannot see the `assert device is not None` inside.
     A genuine None means the device fetch itself failed, so LEGACY is a guess — it is
-    logged rather than applied silently. Guessing this class in silence is the shape of
-    #326, and these paths render text a grower acts on.
+    logged, with ``context`` naming the caller, rather than applied silently. Guessing
+    this class in silence is the shape of #326, and these paths render text a grower
+    acts on.
     """
     if device is None:
-        logger.warning("Controller class unresolved (no device); assuming legacy")
+        # Named so an operator can tell which write this affected — every neighbouring
+        # warning in this file carries the device, and eight handlers can reach here.
+        logger.warning(
+            "Controller class unresolved for %s (no device); assuming legacy", context or "?"
+        )
         return ControllerType.LEGACY
     return detect_controller_type(device)
 
@@ -2646,7 +2652,7 @@ async def set_port_speed(
         dev_id = device.get("devId") if device else None
         return await _build_advance_conflict_response(
             _client(), device_id, dev_id, port, port_name,
-            controller_type=_ctype(device), device=device, requested_speed=speed
+            controller_type=_ctype(device, "set_port_speed"), device=device, requested_speed=speed
         )
     except ACInfinityDeviceError as e:
         logger.warning("Device error in set_port_speed (device=%s port=%s): %s", device_id, port, e)
@@ -2734,7 +2740,7 @@ async def set_port_on(
         dev_id = device.get("devId") if device else None
         return await _build_advance_conflict_response(
             _client(), device_id, dev_id, port, port_name,
-            controller_type=_ctype(device), device=device
+            controller_type=_ctype(device, "set_port_on"), device=device
         )
     except ACInfinityDeviceError as e:
         logger.warning("Device error in set_port_on (device=%s port=%s): %s", device_id, port, e)
@@ -2823,7 +2829,7 @@ async def set_port_off(
         dev_id = device.get("devId") if device else None
         return await _build_advance_conflict_response(
             _client(), device_id, dev_id, port, port_name,
-            controller_type=_ctype(device), device=device
+            controller_type=_ctype(device, "set_port_off"), device=device
         )
     except ACInfinityDeviceError as e:
         logger.warning("Device error in set_port_off (device=%s port=%s): %s", device_id, port, e)
@@ -2953,7 +2959,7 @@ async def set_vpd_automation(
         dev_id = device.get("devId") if device else None
         return await _build_advance_conflict_response(
             _client(), device_id, dev_id, port, port_name,
-            controller_type=_ctype(device), device=device
+            controller_type=_ctype(device, "set_vpd_automation"), device=device
         )
     except ACInfinityDeviceError as e:
         logger.warning(
@@ -3102,7 +3108,7 @@ async def set_temperature_automation(
         dev_id = device.get("devId") if device else None
         return await _build_advance_conflict_response(
             _client(), device_id, dev_id, port, port_name,
-            controller_type=_ctype(device), device=device
+            controller_type=_ctype(device, "set_temperature_automation"), device=device
         )
     except ACInfinityDeviceError as e:
         logger.warning(
@@ -3214,7 +3220,7 @@ async def set_humidity_automation(
         dev_id = device.get("devId") if device else None
         return await _build_advance_conflict_response(
             _client(), device_id, dev_id, port, port_name,
-            controller_type=_ctype(device), device=device
+            controller_type=_ctype(device, "set_humidity_automation"), device=device
         )
     except ACInfinityDeviceError as e:
         logger.warning(
@@ -3379,7 +3385,7 @@ async def set_port_mode(
         dev_id = device.get("devId") if device else None
         return await _build_advance_conflict_response(
             _client(), device_id, dev_id, port, port_name,
-            controller_type=_ctype(device), device=device
+            controller_type=_ctype(device, "set_port_mode"), device=device
         )
     except ACInfinityDeviceError as e:
         logger.warning("Device error in set_port_mode (device=%s port=%s): %s", device_id, port, e)
@@ -3522,7 +3528,7 @@ async def apply_grow_stage_template(
         dev_id = device.get("devId") if device else None
         return await _build_advance_conflict_response(
             _client(), device_id, dev_id, port, port_name,
-            controller_type=_ctype(device), device=device
+            controller_type=_ctype(device, "apply_grow_stage_template"), device=device
         )
     except ACInfinityDeviceError as e:
         logger.warning(
@@ -3764,32 +3770,90 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
             # speed and window. On rules keep the existing wording byte-for-byte. The
             # multi-group branch below is unchanged: N rules with N controls needs a stated
             # tie-break first (#341).
-            _rule0 = port_groups[0].get("rule") or {}
+            _pg0 = port_groups[0]
+            _rule0 = _pg0.get("rule") or {}
             _mode0 = _rule0.get("mode")
             _control0 = _rule0.get("control")
-            # _decode_schedule renders the window with no timezone, so the qualifier the
-            # replaced branches carried has to be re-attached here — this is the one line
-            # Claude reads aloud.
-            _control_tz = _tz_suffix if is_scheduled else ""
+
+            # Quirk 21: TWO independent fields claim "runs 24/7", and real data disagrees
+            # between them. `onTimeSwitch=1` is the app's Continuous toggle; `switchTime`
+            # bit 7 says the same thing. The golden capture holds 'Clone Transplant' as
+            # (switchTime=127, onTimeSwitch=1), while every rule this server writes as
+            # continuous is (switchTime=255, onTimeSwitch=0) *with real begin/end times* —
+            # so each field is a false positive for the other's shape. `_decode_schedule`
+            # reads only switchTime and `is_scheduled` reads only onTimeSwitch, and mixing
+            # the two unreconciled told a grower their 24/7 cycle stopped at 17:00. Settle
+            # it once, here: the decoder's own output is pinned byte-for-byte by the legacy
+            # golden capture and must not move.
+            _sw0 = int(_pg0.get("switch_time") or 0)
+            _runs_247 = on_time_switch == 1 or bool(_sw0 & _SWITCHTIME_CONTINUOUS_BIT)
+            # The window, stated once, for the branches that do not inherit it from the
+            # decoded control. Empty when the rule is 24/7 — there is no window to state.
+            _window = (
+                f" from {begin_str} to {end_str}{_tz_suffix}"
+                if is_scheduled and begin_str and end_str and not _runs_247
+                else ""
+            )
+            # `_decode_schedule` renders its window with no timezone, so the qualifier the
+            # replaced branches carried has to be re-attached — this is the one line Claude
+            # reads aloud. Never onto a 24/7 rule, which has no clock time to qualify.
+            _control_tz = _tz_suffix if is_scheduled and not _runs_247 else ""
+
             if _mode0 == "off":
                 # _decode_rule's control for an Off rule is the bare word "off", which
                 # composes to "'X' off, currently enabled." — two words that contradict each
-                # other in one sentence, on the exact rule type that started #326. Say what
-                # the rule enforces instead of echoing its mode.
-                _port_word = "port" if len(governed_ports) == 1 else "ports"
-                human_summary = (
-                    f"'{name}' holds its {_port_word} off. Currently {state_str}."
-                )
+                # other in one sentence, on the exact rule type that started #326. State
+                # what the rule enforces, and for how long: an Off rule with a window leaves
+                # the port free outside it, and dropping the window tells a grower their
+                # heater is held off when it runs sixteen hours a day.
+                if not governed_ports:
+                    human_summary = (
+                        f"'{name}' holds its ports off, but I couldn't read which ports it"
+                        f" covers — check it in the AC Infinity app."
+                        f" Currently {state_str}."
+                    )
+                else:
+                    _port_word = "port" if len(governed_ports) == 1 else "ports"
+                    _when = _window or (" around the clock" if _runs_247 else "")
+                    human_summary = (
+                        f"'{name}' holds its {_port_word} off{_when}."
+                        f" Currently {state_str}."
+                    )
             elif _mode0 == "unknown":
                 # Never fall through to the speed wording here: it would assert
                 # "runs continuously at speed N" in the same response whose rule list says
-                # the rule cannot be read. Confidently wrong is what #328 was about.
+                # the rule cannot be read. Confidently wrong is what #328 was about. The
+                # schedule is still knowable even when the mode is not, so state it.
+                _when_sentence = (
+                    f" It runs{_window}." if _window
+                    else (" It runs around the clock." if _runs_247 else "")
+                )
                 human_summary = (
-                    f"'{name}' uses a rule type I don't recognize yet — check this one in"
-                    f" the AC Infinity app. Currently {state_str}."
+                    f"'{name}' uses {UNRECOGNIZED_RULE}.{_when_sentence}"
+                    f" Currently {state_str}."
                 )
             elif _mode0 not in (None, "on") and _control0:
-                human_summary = f"'{name}' — {_control0}{_control_tz}. Currently {state_str}."
+                if _runs_247 and not _sw0 & _SWITCHTIME_CONTINUOUS_BIT:
+                    # The Continuous toggle overrides a clock window the entry still
+                    # carries, and the decoded control repeats that stale window. Drop the
+                    # clause and state the truth — otherwise a grower whose 24/7 cycle is
+                    # reported as stopping at 17:00 adds a second rule and doubles up the
+                    # equipment that was already running.
+                    _stale = _decode_schedule({
+                        "switchTime": _sw0,
+                        "beginTime": _pg0.get("begin_time"),
+                        "endTime": _pg0.get("end_time"),
+                    })
+                    _body = _control0
+                    if _stale and _body.endswith(f"; {_stale}"):
+                        _body = _body[: -len(f"; {_stale}")]
+                    human_summary = (
+                        f"'{name}' — {_body}; runs continuously. Currently {state_str}."
+                    )
+                else:
+                    human_summary = (
+                        f"'{name}' — {_control0}{_control_tz}. Currently {state_str}."
+                    )
             elif is_scheduled and begin_str and end_str:
                 human_summary = (
                     f"'{name}' runs at speed {speed} from {begin_str} to {end_str}"
@@ -4184,7 +4248,7 @@ async def create_advance_automation(
         ``payload`` — the wire dict that would be sent, for verification only, never to be
         read back to the user. Its ``currentMode`` is the one field that proves the right
         controller-class table was used; ``mode`` and ``control`` cannot, because one
-        echoes the caller and the other is decoded from what was just encoded (#326).
+        echoes the caller and the other is decoded from what was just encoded.
         The preview payload differs from the sent one in ``portType`` alone. Live
         responses also include automation_id (for programmatic chaining — do not surface
         to the user; use ``name`` instead). On failure returns ``{"error": "..."}``.
