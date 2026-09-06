@@ -1150,3 +1150,18 @@ async def test_rule_control_is_untouched_when_the_toggle_is_off(ai_plus_client):
         "cycle 10 min on / 20 min off; speed 0 (off)–7; every day 09:00–17:00"
     )
     assert rule["window"] == f"09:00–17:00{_TZ}"
+
+
+async def test_the_programs_own_first_rule_decides_24_7(ai_plus_client):
+    """`schedule` reports begin_time, end_time and the toggle from the FIRST rule, so the
+    24/7 flag has to come from that same rule or the four fields describe different things.
+    `all()` over every group looks equivalent on real data — every captured program that
+    has a 24/7 sub-rule has it in a later position — so this pins the difference
+    explicitly rather than leaving the two interchangeable."""
+    ai_plus_client.get_advance_automations.return_value = _program([255, 127, 127])
+    data = json.loads(await get_advance_automation(AI_PLUS_CODE, "7000"))
+    # First rule is 24/7 → the program's schedule block is continuous, matching the times
+    # it would otherwise have reported from that same rule. `all()` would say "scheduled".
+    assert data["schedule"]["mode"] == "continuous"
+    assert data["schedule"]["begin_time"] is None
+    assert data["rules"][0]["window"] == "runs continuously"
