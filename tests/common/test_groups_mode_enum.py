@@ -1236,16 +1236,27 @@ async def test_multi_group_control_is_reconciled_per_rule(ai_plus_client):
         ), f"rule {i}"
 
 
-async def test_unreadable_window_is_continuous_everywhere(ai_plus_client):
-    """Sentinel times with no continuous flag: `_fmt_hhmm` renders 65535 as a fabricated
-    12:15, which the decoder puts in `control`. Treating an unreadable window as 24/7 keeps
-    that fabricated clock out of the summary and the schedule block."""
+@pytest.mark.parametrize("begin,end,ghost", [
+    (65535, 65535, "12:15"),   # both sentinels — also a zero-length window
+    (540, 65535, "12:15"),     # ONE sentinel: only the unreadable-window signal catches it
+    (255, 1020, "04:15"),      # the other sentinel, on the other end
+])
+async def test_unreadable_window_is_continuous_everywhere(ai_plus_client, begin, end, ghost):
+    """Sentinel times with no continuous flag. `_format_schedule_time` knows 255 and 65535
+    are sentinels; `_fmt_hhmm`, which the decoder uses, does not — it renders 65535 as a
+    fabricated 12:15 and 255 as 04:15. Treating an unreadable window as 24/7 keeps those
+    invented clock times out of every grower-facing string.
+
+    The mismatched cases matter: with both ends equal, the zero-length signal catches it and
+    the unreadable-window check never runs — deleting that check passed all 1724 tests."""
     ai_plus_client.get_advance_automations.return_value = [
         _ai_plus_entry(currentMode=6, cycleOn=600, cycleOff=1200,
-                       beginTime=65535, endTime=65535, switchTime=127, onTimeSwitch=0)
+                       beginTime=begin, endTime=end, switchTime=127, onTimeSwitch=0)
     ]
     data = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
     assert data["schedule"]["mode"] == "continuous"
+    assert data["schedule"]["begin_time"] is None
     assert data["rules"][0]["window"] == "runs continuously"
-    assert "12:15" not in data["human_summary"]
-    assert "12:15" not in data["rules"][0]["control"]
+    assert data["rules"][0]["control"].endswith("runs continuously")
+    assert ghost not in data["human_summary"]
+    assert ghost not in data["rules"][0]["control"]
