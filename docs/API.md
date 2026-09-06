@@ -820,7 +820,12 @@ guard read as protective while being provably inert.
 ### Quirk 36 — On AI+, `addDevMode` returns `200` for fields it silently discards
 
 **A `200` from `addDevMode` does not mean the fields you sent were stored.** On
-AI+, only fields relevant to the port's mode *at the time of the write* persist.
+AI+ a field persists only when it is either:
+
+1. **scoped to the mode carried in the same payload** — defaulting to the port's
+   current mode when the payload sets none; or
+2. **a mode-agnostic port property**, which applies in every mode.
+
 Everything else is accepted and thrown away, with no error and no indication in
 the response.
 
@@ -834,6 +839,7 @@ Demonstrated on live `devType=20` hardware, writing to an idle port
 | `atType=3` (AUTO), humidity triggers active | `devHh`, `devLh` | yes |
 | `atType=3` (AUTO), temp triggers active | `devHtf`, `devHt` | yes |
 | one write carrying `atType=3` **plus** `activeHt/activeLt=1` **plus** the trigger values | all of the above | yes — the mode change lands first |
+| `atType=1` (OFF) | `onSpead` | **yes** — mode-agnostic, see below |
 
 That last row is why the ordinary automation tools work: `set_vpd_automation`,
 `set_humidity_automation` and `set_temperature_automation` each send the mode
@@ -846,9 +852,24 @@ fallback for a mode the port is not in. That is exactly what
 and humidity thresholds "for later"), which is why that tool is held on AI+ (see
 #316) rather than reporting a success the controller did not honour.
 
-A practical consequence when restoring a port: to put a trigger value back you
-must first return the port to the mode that makes it relevant, change it, then
-switch the mode back.
+**Not every field is mode-scoped, and the distinction is not obvious.** `onSpead`
+is the speed the port uses whenever it runs, in *any* mode, so it survives a
+write to a port sitting in OFF — verified on `devType=20`, firmware 12.8.26:
+`onSpead` 0 → 7, read back `7`, `atType` unchanged at `1`.
+
+> An earlier version of this quirk said "only fields relevant to the port's mode
+> at the time of the write persist." That wording predicted the opposite result
+> and was too broad. The line is between **mode-scoped** fields — a mode's
+> trigger values, targets and active flags — and **port-level properties** that
+> have no mode to be irrelevant to.
+
+That is why `set_port_speed`'s "speed was stored" warning is accurate on AI+: a
+speed written to an OFF port really is retained, and really does take effect when
+the port is switched on.
+
+A practical consequence when restoring a port: to put a *mode-scoped* value back
+you must first return the port to the mode that makes it relevant, change it,
+then switch the mode back. Mode-agnostic fields need no such dance.
 
 ---
 
