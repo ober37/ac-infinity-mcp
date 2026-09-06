@@ -1895,11 +1895,18 @@ was actually sent.
 
 **Known gaps (do not read this quirk as fully closed):**
 
-- **devType 20 ↔ 22 agreement is an assumption.** `on` is the only mode observed on *both*
-  new-framework devTypes. `cycle=6` comes from devType 22 only; `off=1`, `auto=3`, `vpd=8`
-  from devType 20 only. `detect_controller_type` buckets them together, so this table changes
-  what gets written for `auto`/`vpd` on devType 22 with no devType-22 evidence — and that
-  hardware's app cannot create such a rule to check against.
+- **devType 20 ↔ 22 agreement is confirmed for `on`, `off` and `cycle`; assumed for `auto`
+  and `vpd`.** Gate 5 on 2026-09-06 read back three app-created rules on a devType 22
+  (Q0KT4, empty outlet) and all three decoded correctly: `off=1`, `on=2`, `cycle=6`. `off=1`
+  had previously been observed only on devType 20, so that half of the assumption is now
+  evidence. `auto=3` and `vpd=8` remain devType-20-only — `detect_controller_type` buckets
+  the two devTypes together, so this table still changes what gets written for those two
+  modes on devType 22 with no devType-22 evidence, and an outlet strip's app cannot create
+  such a rule to check against.
+- **Day bitmask order is confirmed.** The same Gate 5 pass set Mon/Wed/Fri and
+  Sun/Tue/Thu/Sat rules and both read back with the correct day sets, pinning bit 0 = Monday
+  through bit 6 = Sunday. None of the 31 captured legacy entries uses a day subset — they are
+  all `127` or `255` — so this ordering had never been exercised against real data before.
 - **`auto` and `vpd` are read-confirmed, not write-confirmed** on new-framework. The app
   *stores* `3` and `8`; no project-written `3` has been observed to actuate as Auto.
 - **Existing automations are not migrated.** A new-framework automation created by this
