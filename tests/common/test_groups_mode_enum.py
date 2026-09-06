@@ -794,11 +794,31 @@ async def test_scheduled_cycle_rule_keeps_its_timezone(ai_plus_client):
     )
 
 
-async def test_on_rule_wording_is_byte_identical_when_scheduled(ai_plus_client):
-    """The one branch that must not move: On rules keep main's exact sentence."""
+async def test_scheduled_on_rule_states_its_days(ai_plus_client):
+    """On rules were the last branch still omitting the day mask. Keeping this sentence
+    byte-identical to pre-#328 was deliberate while the siblings churned, but once Off and
+    unknown started saying "Mon–Fri" it left the summary contradicting the `control` string
+    in the same response — the defect class this PR exists to remove."""
     ai_plus_client.get_advance_automations.return_value = [_scheduled_off(currentMode=2)]
-    summary = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))["human_summary"]
-    assert summary == f"'Lights' runs at speed 7 from 22:00 to 06:00{_TZ}, currently enabled."
+    data = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
+    assert data["human_summary"] == (
+        f"'Lights' runs at speed 7 every day 22:00–06:00{_TZ}, currently enabled."
+    )
+    # The summary and the rule list must state the same schedule.
+    assert "every day 22:00–06:00" in data["rules"][0]["control"]
+
+
+async def test_scheduled_on_rule_keeps_its_day_mask(ai_plus_client):
+    """A Mon–Fri lights schedule read back as "from 09:00 to 17:00" — a grower believes the
+    lights run weekends."""
+    ai_plus_client.get_advance_automations.return_value = [
+        _scheduled_off(currentMode=2, switchTime=31)
+    ]
+    data = json.loads(await get_advance_automation(AI_PLUS_CODE, "9001"))
+    assert data["human_summary"] == (
+        f"'Lights' runs at speed 7 Mon–Fri 22:00–06:00{_TZ}, currently enabled."
+    )
+    assert "Mon–Fri" in data["rules"][0]["control"]
 
 
 async def test_off_rule_with_unreadable_ports_does_not_claim_ports(ai_plus_client):

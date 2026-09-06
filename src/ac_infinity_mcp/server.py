@@ -3910,10 +3910,17 @@ async def get_advance_automation(device_id: str, automation_id: str) -> str:
                     human_summary = (
                         f"'{name}' — {_control0}{_control_tz}. Currently {state_str}."
                     )
-            elif is_scheduled and begin_str and end_str:
+            elif is_scheduled:
+                # Uses the same `_when` phrase as the Off and unknown branches, so the day
+                # mask survives here too: "from 09:00 to 17:00" omitted it entirely, and a
+                # grower with a Mon–Fri lights rule believed the lights ran weekends. This
+                # is the one sentence in the block that was byte-identical to pre-#328
+                # behaviour; keeping it that way once the siblings were fixed would have
+                # left the summary contradicting the `control` string beside it, which
+                # already said "Mon–Fri". `is_scheduled` implies both times are real —
+                # they are nulled together above.
                 human_summary = (
-                    f"'{name}' runs at speed {speed} from {begin_str} to {end_str}"
-                    f"{_tz_suffix}, currently {state_str}."
+                    f"'{name}' runs at speed {speed}{_when}, currently {state_str}."
                 )
             else:
                 human_summary = (
