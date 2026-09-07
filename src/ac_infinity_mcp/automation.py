@@ -14,6 +14,7 @@ import unicodedata
 from ac_infinity_mcp.analytics import _ZERO_LOAD_DEV_TYPES
 from ac_infinity_mcp.client import ACInfinityClient
 from ac_infinity_mcp.controller import ControllerType, groups_mode_name
+from ac_infinity_mcp.ports import _port_empty_confidence
 from ac_infinity_mcp.schema import _AUTH_ERROR_MSG, ACInfinityAuthError
 
 logger = logging.getLogger(__name__)
@@ -429,6 +430,7 @@ async def _build_advance_conflict_response(
     device_id: str, dev_id: object, port: int, port_name: str,
     *, controller_type: ControllerType,
     device: dict | None = None, requested_speed: int | None = None,
+    conflict_code: int | None = None,
 ) -> str:
     """Build a structured ADVANCE_AUTOMATION conflict response for write tools.
 
@@ -466,6 +468,49 @@ async def _build_advance_conflict_response(
             When not None, adds a ``"0_update_speed"`` option in the normal path.
             Pass ``None`` from set_port_on / set_port_off (no speed option applies).
     """
+    # Empty-port handling, scoped twice — an earlier revision of this was scoped
+    # neither way and caused a regression worth spelling out.
+    #
+    # This function serves four raise sites. Three come from a positive
+    # isOpenAutomation detection (Quirk 19), established BEFORE any POST: the port
+    # provably is under a program, and no empty-port explanation applies. Only the
+    # 999999 API rejection admits one (Quirk 38). conflict_code separates them.
+    #
+    # The second scope is confidence. _is_port_empty falls back, when
+    # portResistance is absent, to a default port name AND (zero load OR a devType
+    # known to report zero load) — which matches any default-named idle port that
+    # does have equipment attached. That is fine for an advisory and far too weak
+    # to redirect a grower away from a real automation conflict, so only the
+    # portResistance sentinel short-circuits. This mirrors the reasoning already
+    # written a file over in client.py, where we deliberately do NOT branch on
+    # portResistance for the legacy reroute.
+    port_display_early = (
+        f"{port_name} (Port {port})" if port_name != f"Port {port}" else port_name
+    )
+    ports = (device or {}).get("deviceInfo", {}).get("ports", [])
+    port_data = next((p for p in ports if p.get("port") == port), None)
+    empty_confidence = (
+        _port_empty_confidence(port_data, port, device) if conflict_code == 999999 else "no"
+    )
+    if empty_confidence == "sentinel":
+        return json.dumps({
+            "conflict": "ADVANCE_AUTOMATION",
+            "likely_cause": "EMPTY_PORT",
+            "device_id": device_id,
+            "port": port,
+            "human_summary": (
+                f"The controller rejected that write, and {port_display_early} reports "
+                "an open circuit — nothing is connected to it. Check the cable first. "
+                "If something is plugged in, then the port is under Advance Automation "
+                "control and needs releasing before it will take a manual change."
+            ),
+            "suggested_reply": (
+                f"That didn't go through. {port_display_early} reads as empty — is "
+                "anything plugged into it? If it is connected, tell me and I'll check "
+                "whether an automation has hold of the port."
+            ),
+        }, indent=2)
+
     api_call_failed = False
     automations: list[dict] = []
     active_automations: list[dict] = []
@@ -496,7 +541,7 @@ async def _build_advance_conflict_response(
 
     has_active = any(a.get("enabled") or a.get("run_state") for a in automations)
 
-    port_display = f"{port_name} (Port {port})" if port_name != f"Port {port}" else port_name
+    port_display = port_display_early
 
     if governing is not None:
         # SUB-PATH A — an enabled/running automation whose bitmask covers this port
@@ -743,4 +788,12 @@ async def _build_advance_conflict_response(
             " ask me to create or update an automation."
         ),
         "options": options_dict,
+        **({
+            "advisory": (
+                f"{port_display} may also simply have nothing connected — it is "
+                "default-named and drawing no load. If the automation options below "
+                "don't apply, check the cable."
+            ),
+            "likely_cause": "EMPTY_PORT_POSSIBLE",
+        } if empty_confidence == "heuristic" else {}),
     }, indent=2)

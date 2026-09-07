@@ -55,7 +55,13 @@ Every write operation — changing a speed, toggling a port, creating an automat
 |---|---|---|
 | UIS Controller 69 Pro | ✅ | ✅ |
 | UIS Controller 69 Pro+ | ✅ | ✅ |
-| UIS Controller 89 AI+ and other AI+ controllers | ✅ | ❌ v1.0 read-only |
+| UIS Controller 89 AI+ and other AI+ controllers | ✅ | ✅ * |
+
+\* Everything you do to a **port** — turn it on or off, set a speed, set a mode, set a
+temperature, humidity or VPD automation — writes normally on AI+. **One-click grow stages**
+and **taking a port out of a shared automation** are deliberately held back pending
+hardware verification. Multi-port **Advance Automations** are only partly verified on AI+.
+See [AI+ controllers](#ai-controllers) in Section 7.
 
 ### A note on network security
 
@@ -337,7 +343,30 @@ Claude will describe the change, tell you what it's changing from, and wait for 
 
 ### AI+ controllers
 
-If you have an AI+ controller (like the 89 AI+), preview mode works fully — Claude will show you exactly what it would do. But when you confirm, Claude will let you know that live writes aren't supported in v1.0. You can read everything; you just can't change settings yet.
+If you have an AI+ controller (like the 89 AI+), reads and previews work exactly as they do
+on a 69 Pro, and so do live changes to any individual port — on/off, speed, mode, and the
+temperature, humidity and VPD automations. AI+ controllers speak a newer protocol, which
+this server handles for you.
+
+Two things are not there yet. Neither one fails quietly — if you ask for either, you get
+told why:
+
+- **Advance Automations** (the named programs governing several ports) are **partly
+  verified** on AI+, and the honest summary is that we do not yet know where the line is.
+  Reading them back works. On the controller this was developed against, *creating* one
+  times out after 10 seconds instead of returning a useful error, and the fix for that is
+  in review (#290). But creates and in-place edits have both been observed to land on
+  another devType-20 controller — that is how #326 was found — so "creating doesn't work
+  on AI+" is too strong a claim to put in front of you. Enabling and disabling have never
+  been exercised on an AI+ at all.
+
+  What that means in practice: set a program up in the AC Infinity app if this server
+  gives you trouble, and check the app afterwards to confirm what actually landed.
+- **One-click grow stages** and **taking a single port out of a shared automation** are
+  held back on purpose (#316). The first would report saving fallback limits that the
+  controller quietly discards; the second switches several ports at once and cannot yet
+  put them back safely if one of those switches fails partway. Previews of both work
+  normally, so you can still see exactly what they would do.
 
 ---
 
@@ -667,7 +696,20 @@ Check the `AC_INFINITY_EMAIL` and `AC_INFINITY_PASSWORD` values in your config f
 Verify your credentials are correct and check that your devices are paired in the AC Infinity app. If you just added a new device, try asking again — it can take a moment to appear.
 
 **AI+ write errors**
-AI+ controllers (like the 89 AI+) are read-only in v1.0. Preview mode works fully — you can see exactly what would happen. Live changes are not yet supported. Write support for AI+ is planned for v2.0.
+AI+ controllers (like the 89 AI+) support live changes to individual ports. If a write
+fails with code `100001`, AC Infinity has changed the server-side gate this server relies
+on — reads and previews keep working. Please open an issue if you hit it.
+
+**"I can't do that on this controller yet" on an AI+**
+That is a deliberate hold, not a failure — the two capabilities it covers are listed under
+[AI+ controllers](#ai-controllers) in Section 7, along with what to do instead. Nothing was
+written to your controller, and previewing the same action still works.
+
+**A new Advance Automation won't save on an AI+**
+On some AI+ controllers, creating one times out after about 10 seconds rather than
+returning a useful error (#290). Create the program in the AC Infinity app instead. This
+server reads programs back reliably; for anything that changes one, check the app
+afterwards to confirm it landed.
 
 **HTTP security note**
 The AC Infinity API doesn't use HTTPS. Your credentials and sensor data travel over the network without encryption. Keep your config file private and avoid running on untrusted networks. This is an upstream limitation of the AC Infinity service. If you need to run on a less-trusted network, see DEPLOYMENT.md for HTTPS reverse-proxy options.

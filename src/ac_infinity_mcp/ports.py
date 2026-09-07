@@ -53,3 +53,26 @@ def _empty_port_advisory(port_label: str) -> str:
         f"{port_label} doesn't appear to have anything connected. "
         "If you meant a different port, let me know which one."
     )
+
+
+def _port_empty_confidence(port_data: dict | None, port: int, device: dict | None) -> str:
+    """Return "sentinel", "heuristic" or "no" for the empty-port signal.
+
+    ``_is_port_empty`` collapses two very different signals into one bool, which is
+    right for an advisory but not for control flow:
+
+    - ``"sentinel"`` — ``portResistance == 65535``, the hardware open-circuit value
+      (Quirk 27). Direct evidence.
+    - ``"heuristic"`` — ``portResistance`` absent, so the old-firmware fallback fired:
+      a default port name AND (zero load OR a devType known to report zero load). That
+      matches plenty of ports that do have equipment attached — notably any
+      default-named port sitting at zero load.
+
+    Only "sentinel" is strong enough to redirect a grower away from an automation
+    conflict; "heuristic" may be added as an advisory alongside one.
+    """
+    if not _is_port_empty(port_data, port, device):
+        return "no"
+    if port_data is not None and port_data.get("portResistance") == _PORT_EMPTY_RESISTANCE:
+        return "sentinel"
+    return "heuristic"
