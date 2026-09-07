@@ -103,6 +103,16 @@ These are spoofed identity strings sent to the upstream API; they contain no use
 no credentials. A regression test locks both values. This is an accepted-behavior note, not
 a vulnerability.
 
+The AI+ write path (`devType >= 20`) sends one additional spoofed header,
+`minversion: 3.5`, and **no** extra `User-Agent` — the table above is complete.
+That header is an opaque server-side gate rather than an app identity: without it
+`addDevMode` returns `100001`, and only the literal string `"3.5"` is accepted
+(see `docs/API.md` Quirk 14 for the ablation). Three further app-identity headers
+were tested and proven unnecessary, so they are deliberately not sent — every
+declared header is surface for the kind of upstream tightening that broke the v2
+endpoints in #298. The exact value is locked by a regression test mirroring the
+#251 lock.
+
 ---
 
 ## Residual risk after the Groups `currentMode` fix (#326, #328)

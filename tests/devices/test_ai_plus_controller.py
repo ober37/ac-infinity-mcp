@@ -1,12 +1,23 @@
 """Tests for AI+ controller behavior (devType 20+, newFrameworkDevice=True)."""
 
+from unittest.mock import patch
+
+import pytest
+
 from ac_infinity_mcp.client import ACInfinityClient
 from ac_infinity_mcp.controller import ControllerType, build_write_payload, detect_controller_type
+from ac_infinity_mcp.schema import (
+    NEW_FRAMEWORK_TOGGLE_LOAD_TYPES,
+    TOGGLE_LOAD_TYPES,
+    ACInfinityAdvanceConflictError,
+    ACInfinityDeviceError,
+)
 from tests.fixtures.ai_plus_device_fixtures import AI_PLUS_HISTORY_RECORD
 from tests.fixtures.mock_mode_settings_ai_plus import (
     MOCK_MODE_SETTINGS_AI_PLUS_PORT1,
     MOCK_MODE_SETTINGS_AI_PLUS_PORT1_FLAT,
 )
+from tests.fixtures.mock_mode_settings_legacy import MOCK_MODE_SETTINGS_LEGACY_PORT1
 
 # ============ detect_controller_type ============
 
@@ -24,6 +35,81 @@ def test_detect_controller_type_devtype_25():
 
 def test_detect_controller_type_ai_plus_fixture(ai_plus_device):
     assert detect_controller_type(ai_plus_device) == ControllerType.NEW_FRAMEWORK
+
+
+# detect_controller_type is deliberately NOT total: a present-but-unreadable devType
+# raises ACInfinityDeviceError rather than guessing a class. Guessing is what makes it
+# dangerous — the function also selects the Groups currentMode table, where LEGACY off
+# == 2 == NEW_FRAMEWORK on, so a wrong guess turns a requested off into an on (#326).
+# The raise is typed precisely because it must survive the gates: apply_grow_stage_
+# template's sits outside its tool's try/except, and the server layer answers it with
+# a grower-readable refusal instead of letting it escape.
+#
+# (An earlier version of this comment said the function was total and that a TypeError
+# would escape. Neither is true now.)
+
+def test_detect_controller_type_numeric_string_devtype():
+    """A stringified devType still classifies — "20" is an AI+, not a legacy fallback."""
+    assert detect_controller_type({"devType": "20"}) == ControllerType.NEW_FRAMEWORK
+    assert detect_controller_type({"devType": "11"}) == ControllerType.LEGACY
+
+
+@pytest.mark.parametrize("bad", [None, "", "20.0", "unknown", [], {}, True, False])
+def test_detect_controller_type_unreadable_devtype_raises(bad):
+    """Present-but-unreadable devType raises rather than guessing a class.
+
+    Guessing is what makes this dangerous: since #348 this function also selects
+    the Groups currentMode table, and LEGACY off == 2 == NEW_FRAMEWORK on. A
+    wrong guess turns a requested off into an on (#326). "20.0" is the case that
+    motivates the rule — int("20.0") raises, so a plausibly-correct value would
+    otherwise misclassify as quietly as obvious garbage does. Bools are in the
+    list because bool subclasses int, so True would coerce to devType 1.
+    """
+    with pytest.raises(ACInfinityDeviceError):
+        detect_controller_type({"devType": bad})
+
+
+def test_detect_controller_type_absent_devtype_is_still_legacy():
+    """Absent is not the same as unreadable — it keeps its long-standing default."""
+    assert detect_controller_type({}) == ControllerType.LEGACY
+
+
+def test_detect_controller_type_real_float_devtype_classifies():
+    """A genuine float is readable, so it classifies rather than raising."""
+    assert detect_controller_type({"devType": 20.0}) == ControllerType.NEW_FRAMEWORK
+    assert detect_controller_type({"devType": 11.0}) == ControllerType.LEGACY
+
+
+@pytest.mark.parametrize("bad_flag", ["false", "true", "0", "1", "", [], {}, 2, -1])
+def test_detect_controller_type_unreadable_newframeworkdevice_raises(bad_flag):
+    """The flag is checked first, so bare truthiness was the softest way in.
+
+    "false" is the case that matters: a non-empty string is truthy, so it would have
+    classified a legacy controller as NEW_FRAMEWORK and selected the wrong Groups
+    table — #326 in the opposite direction, with no raise and no log. This API sends
+    devId as a string (Quirk 7) and devType as "20", so a string-shaped boolean is a
+    shape it has form for.
+    """
+    with pytest.raises(ACInfinityDeviceError):
+        detect_controller_type({"devType": 11, "newFrameworkDevice": bad_flag})
+
+
+@pytest.mark.parametrize("flag,expected", [
+    (True, ControllerType.NEW_FRAMEWORK),
+    (1, ControllerType.NEW_FRAMEWORK),
+    (False, ControllerType.LEGACY),
+    (0, ControllerType.LEGACY),
+])
+def test_detect_controller_type_accepts_unambiguous_flag_values(flag, expected):
+    """Real bools and 0/1 are unambiguous and still classify normally."""
+    assert detect_controller_type({"devType": 11, "newFrameworkDevice": flag}) == expected
+
+
+def test_detect_controller_type_flag_wins_over_unreadable_devtype():
+    """newFrameworkDevice is checked first, so it survives a garbage devType."""
+    assert detect_controller_type(
+        {"devType": None, "newFrameworkDevice": True}
+    ) == ControllerType.NEW_FRAMEWORK
 
 
 # ============ build_write_payload — AI+ path ============
@@ -93,3 +179,514 @@ def test_parse_ai_plus_history_record_decodes_ports():
     assert result["ports"][1]["speed"] == 0
     assert result["ports"][1]["on"] is False
     assert result["temperature_c"] == 23.5
+
+
+# ============ AI+ write path — the minversion gate ============
+#
+# The ENTIRE AI+ write fix is one request header: `minversion: "3.5"`. With the
+# stock okhttp header set the API returns 100001 even given a correct payload;
+# with minversion present the ordinary merged read-before-write payload succeeds
+# for manual control and automation targets alike.
+#
+# Ablated against live devType-20 hardware, no-op write to an idle port. 8 of the
+# 16 header subsets were run; the three minversion-plus-one pairs were not. Full
+# matrix and the reasoning for why that gap is harmless: docs/API.md Quirk 14.
+#
+#   okhttp headers only ................................ 100001
+#   appVersion alone ................................... 100001
+#   iOS User-Agent + phoneType + appVersion, no
+#     minversion ....................................... 100001
+#   minversion="3.5" only .............................. 200
+#   minversion + any two of the other three ............ 200
+#   all four ........................................... 200
+#
+# Despite the name it is not a version comparison: "3.4", "3.6", "3", "3.50",
+# "3.5.0", "" and "99.9" all return 100001. The server matches the literal
+# string, so these tests pin the exact value rather than merely its presence —
+# a typo here would ship green and break every AI+ write in the field.
+
+AI_PLUS_MINVERSION = "3.5"
+
+LEGACY_EXPECTED_HEADERS = {
+    "token": "tok",
+    "Host": "www.acinfinityserver.com",
+    "User-Agent": "okhttp/3.10.0",
+    "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+}
+
+# The real capture, unmodified. An earlier version overrode modeType 15 -> 0 while
+# leaving atType 2, which is a combination Quirk 36 says the hardware cannot
+# produce — atType 2 (ON) reads back modeType 15. The override was also inert:
+# the AI+ branch of the ADVANCE guard ignores modeType entirely and keys on
+# isOpenAutomation. A fixture that cannot occur cannot discriminate, so it goes.
+AI_PLUS_SETTINGS = dict(MOCK_MODE_SETTINGS_AI_PLUS_PORT1)
+
+# Legacy tests DO need the override: on that branch the guard is
+# modeType == 15 AND isOpenAutomation != 0, so the captured 15 would trip it for
+# a reason unrelated to what those tests assert.
+LEGACY_SETTINGS_FROM_AI_PLUS_CAPTURE = {**MOCK_MODE_SETTINGS_AI_PLUS_PORT1, "modeType": 0}
+
+
+class _Resp:
+    """Stand-in addDevMode response; defaults to the success body."""
+
+    status_code = 200
+
+    def __init__(self, code=200, msg="success."):
+        self._code, self._msg = code, msg
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return {"code": self._code, "msg": self._msg}
+
+
+def _capture_write(client, device, updates, settings=None, **kwargs):
+    """Run a live write and capture both the headers and the body actually sent."""
+    captured = {"headers": None, "data": None, "calls": 0}
+
+    def _fake_post(url, data=None, headers=None, timeout=None):
+        captured["headers"] = dict(headers or {})
+        captured["data"] = data
+        captured["calls"] += 1
+        return _Resp()
+
+    settings = dict(settings if settings is not None else AI_PLUS_SETTINGS)
+    with patch.object(client.session, "post", _fake_post), \
+         patch.object(client, "_enforce_write_rate_limit"), \
+         patch.object(client, "get_mode_settings", autospec=True, return_value=settings):
+        captured["result"] = client.set_port_mode(
+            device, port=1, updates=updates, dry_run=False, **kwargs
+        )
+    return captured
+
+
+@pytest.mark.parametrize("dev_type", [20, 22])
+def test_ai_plus_write_sends_exact_minversion(ai_plus_device, dev_type):
+    """AI+ writes must carry minversion with the exact value the server accepts."""
+    ai_plus_device["devType"] = dev_type
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    cap = _capture_write(c, ai_plus_device, {"onSpead": 5})
+    assert cap["headers"]["minversion"] == AI_PLUS_MINVERSION
+
+
+@pytest.mark.parametrize("dev_type", [20, 22])
+def test_ai_plus_write_sends_no_other_app_identity_headers(ai_plus_device, dev_type):
+    """minversion is the whole fix — the ablated headers must not creep back.
+
+    Each header we declare is surface for the kind of server-side tightening that
+    broke the v2 endpoints in #298, and all three were proven unnecessary.
+    """
+    ai_plus_device["devType"] = dev_type
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    cap = _capture_write(c, ai_plus_device, {"onSpead": 5})
+    assert cap["headers"] == {**LEGACY_EXPECTED_HEADERS, "minversion": AI_PLUS_MINVERSION}
+    assert "Alamofire" not in cap["headers"]["User-Agent"]
+
+
+def test_ai_plus_write_sends_the_merged_payload(ai_plus_device):
+    """The body must be the merged read-before-write payload, not a template.
+
+    This is the assertion that defends the central safety claim of the
+    header-only design: stored settings survive a write because the payload
+    carries them.
+    """
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    cap = _capture_write(c, ai_plus_device, {"onSpead": 5})
+    expected = build_write_payload(
+        dict(AI_PLUS_SETTINGS), {"onSpead": 5}, ControllerType.NEW_FRAMEWORK
+    )
+    assert cap["data"] == expected
+    # Spot-check that unrelated stored state rode along untouched.
+    assert cap["data"]["devHtf"] == AI_PLUS_SETTINGS["devHtf"]
+    assert cap["data"]["schedStartTime"] == AI_PLUS_SETTINGS["schedStartTime"]
+
+
+def test_legacy_write_headers_are_untouched(legacy_11_device):
+    """Legacy controllers carry exactly the four stock headers — no minversion."""
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    cap = _capture_write(
+        c, legacy_11_device, {"onSpead": 5},
+        settings={**MOCK_MODE_SETTINGS_LEGACY_PORT1, "modeType": 0},
+    )
+    assert cap["headers"] == LEGACY_EXPECTED_HEADERS
+
+
+def test_ai_plus_dry_run_sends_nothing(ai_plus_device):
+    """dry_run=True must issue zero addDevMode calls."""
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    calls = []
+
+    with patch.object(c.session, "post", lambda *a, **k: calls.append(k) or _Resp()), \
+         patch.object(c, "get_mode_settings", autospec=True,
+                      return_value=dict(AI_PLUS_SETTINGS)):
+        result = c.set_port_mode(ai_plus_device, port=1, updates={"onSpead": 5}, dry_run=True)
+
+    assert calls == []
+    assert result["sent"] is False
+    assert result["dry_run"] is True
+
+
+def test_ai_plus_write_enforces_rate_limit(ai_plus_device):
+    """The 1.5s write spacing must still apply to the newly-enabled device class."""
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+
+    with patch.object(c.session, "post", lambda *a, **k: _Resp()), \
+         patch.object(c, "_enforce_write_rate_limit") as limiter, \
+         patch.object(c, "get_mode_settings", autospec=True,
+                      return_value=dict(AI_PLUS_SETTINGS)):
+        c.set_port_mode(ai_plus_device, port=1, updates={"onSpead": 5}, dry_run=False)
+
+    assert limiter.call_count == 1
+
+
+def test_ai_plus_automation_write_is_not_refused(ai_plus_device):
+    """Automation-target writes on AI+ must send, not be refused at the client layer."""
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    cap = _capture_write(
+        c, ai_plus_device, {"atType": 8, "targetVpd": 12, "targetVpdSwitch": 1}
+    )
+    assert cap["result"]["sent"] is True
+    assert cap["data"]["atType"] == 8
+    assert cap["data"]["targetVpd"] == 12
+
+
+# ============ Toggle-hardware guard ============
+
+
+@pytest.mark.parametrize("load_type", sorted(NEW_FRAMEWORK_TOGGLE_LOAD_TYPES))
+def test_speed_write_refused_on_toggle_hardware(ai_plus_device, load_type):
+    """Every new-framework toggle value must block a speed write before the POST.
+
+    129 and 132 are both live on a devType-22 controller (clone lights, rack
+    lights, heat pads). Before they were in the set, a speed write to one of them
+    reached the API, came back 999999, and was reported to the grower as an
+    Advance Automation conflict that did not exist.
+    """
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    settings = {**AI_PLUS_SETTINGS, "loadType": load_type}
+
+    with patch.object(c.session, "post") as post, \
+         patch.object(c, "_enforce_write_rate_limit"), \
+         patch.object(c, "get_mode_settings", autospec=True, return_value=settings):
+        with pytest.raises(ACInfinityDeviceError, match="on/off device"):
+            c.set_port_mode(ai_plus_device, port=1, updates={"onSpead": 5},
+                            dry_run=False, require_variable_speed=True)
+    post.assert_not_called()
+
+
+_AI_PLUS_ONLY_TOGGLE = sorted(NEW_FRAMEWORK_TOGGLE_LOAD_TYPES - TOGGLE_LOAD_TYPES)
+
+
+@pytest.mark.parametrize("load_type", _AI_PLUS_ONLY_TOGGLE)
+def test_ai_plus_only_toggle_values_do_not_block_on_legacy(load_type):
+    """129 and 132 must NOT refuse a legacy speed write.
+
+    They were observed only on devType 20/22. An earlier revision put them in the
+    single shared set, which applied AI+ evidence to legacy hardware — a legacy
+    port genuinely capable of variable speed would have been refused permanently,
+    and that refusal is unfalsifiable from the write path. This pins the scoping:
+    the values that block on AI+ pass straight through on legacy.
+    """
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    legacy_device = {"devId": "12345", "devCode": "C58ZA", "devType": 11}
+    settings = {**LEGACY_SETTINGS_FROM_AI_PLUS_CAPTURE, "loadType": load_type}
+
+    with (
+        patch.object(c.session, "post", lambda *a, **k: _Resp()),
+        patch.object(c, "_enforce_write_rate_limit"),
+        patch.object(c, "get_mode_settings", autospec=True, return_value=settings),
+    ):
+        result = c.set_port_mode(legacy_device, port=1, updates={"onSpead": 5},
+                                 dry_run=False, require_variable_speed=True)
+
+    assert result["sent"] is True
+    assert result["controller_type"] == "legacy"
+
+
+def test_legacy_historical_toggle_values_still_block(ai_plus_device):
+    """The {4, 128} pair blocks on both classes — this PR did not change legacy there."""
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    legacy_device = {"devId": "12345", "devCode": "C58ZA", "devType": 11}
+    for load_type in sorted(TOGGLE_LOAD_TYPES):
+        settings = {**LEGACY_SETTINGS_FROM_AI_PLUS_CAPTURE, "loadType": load_type}
+        with (
+            patch.object(c.session, "post") as post,
+            patch.object(c, "_enforce_write_rate_limit"),
+            patch.object(c, "get_mode_settings", autospec=True, return_value=settings),
+        ):
+            with pytest.raises(ACInfinityDeviceError, match="on/off device"):
+                c.set_port_mode(legacy_device, port=1, updates={"onSpead": 5},
+                                dry_run=False, require_variable_speed=True)
+        post.assert_not_called()
+
+
+def test_toggle_guard_does_not_block_on_off_writes(ai_plus_device):
+    """set_port_on/off must still work on toggle hardware — the guard is speed-only."""
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    cap = _capture_write(
+        c, ai_plus_device, {"atType": 2},
+        settings={**AI_PLUS_SETTINGS, "loadType": 129},
+    )
+    assert cap["result"]["sent"] is True
+
+
+# ============ AI+ error codes ============
+
+
+def _post_returning(code, msg):
+    return lambda *a, **k: _Resp(code=code, msg=msg)
+
+
+def test_ai_plus_100001_names_the_minversion_gate(ai_plus_device):
+    """100001 on AI+ means the header gate moved — say so, not a bare API error."""
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+
+    with patch.object(c.session, "post", _post_returning(100001, "Something went wrong")), \
+         patch.object(c, "_enforce_write_rate_limit"), \
+         patch.object(c, "get_mode_settings", autospec=True,
+                      return_value=dict(AI_PLUS_SETTINGS)):
+        with pytest.raises(ACInfinityDeviceError) as exc:
+            c.set_port_mode(ai_plus_device, port=1, updates={"onSpead": 5}, dry_run=False)
+
+    assert "100001" in str(exc.value)
+    assert AI_PLUS_MINVERSION in str(exc.value)
+
+
+def test_ai_plus_999999_on_speed_write_reports_hardware_not_automation(ai_plus_device):
+    """999999 is overloaded; on a speed write the on/off reading is the useful one.
+
+    devType-20 reports loadType 0 on every port (Quirk 34), so the pre-write
+    guard cannot catch toggle hardware there — this path is how a grower finds
+    out, and telling them to release a nonexistent automation is a wrong answer.
+    """
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+
+    with patch.object(c.session, "post", _post_returning(999999, "error")), \
+         patch.object(c, "_enforce_write_rate_limit"), \
+         patch.object(c, "get_mode_settings", autospec=True,
+                      return_value={**AI_PLUS_SETTINGS, "loadType": 0}):
+        with pytest.raises(ACInfinityDeviceError) as exc:
+            c.set_port_mode(ai_plus_device, port=1, updates={"onSpead": 5},
+                            dry_run=False, require_variable_speed=True)
+
+    assert "set_port_on" in str(exc.value)
+
+
+def test_ai_plus_999999_on_mode_write_still_reports_automation_conflict(ai_plus_device):
+    """Outside a speed write, 999999 keeps its ADVANCE-conflict meaning."""
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+
+    with patch.object(c.session, "post", _post_returning(999999, "error")), \
+         patch.object(c, "_enforce_write_rate_limit"), \
+         patch.object(c, "get_mode_settings", autospec=True,
+                      return_value=dict(AI_PLUS_SETTINGS)):
+        with pytest.raises(ACInfinityAdvanceConflictError):
+            c.set_port_mode(ai_plus_device, port=1, updates={"atType": 2}, dry_run=False)
+
+
+# ============ AI+ ADVANCE guard (Quirk 36) ============
+
+
+def test_ai_plus_advance_guard_ignores_mode_type(ai_plus_device):
+    """modeType=15 is an AI+ resting value, not an ADVANCE signal — must not block."""
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    cap = _capture_write(
+        c, ai_plus_device, {"onSpead": 5},
+        settings={**MOCK_MODE_SETTINGS_AI_PLUS_PORT1, "modeType": 15, "isOpenAutomation": 0},
+    )
+    assert cap["result"]["sent"] is True
+
+
+@pytest.mark.parametrize("settings_patch", [
+    {"isOpenAutomation": 1},   # explicitly active
+    {},                        # absent entirely — safe-fail treats as active
+])
+def test_ai_plus_advance_guard_fires_on_is_open_automation(ai_plus_device, settings_patch):
+    """On AI+, isOpenAutomation alone gates the write: present-and-0, or refuse."""
+    settings = {k: v for k, v in MOCK_MODE_SETTINGS_AI_PLUS_PORT1.items()
+                if k != "isOpenAutomation"}
+    settings.update(settings_patch)
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+
+    with patch.object(c.session, "post") as post, \
+         patch.object(c, "_enforce_write_rate_limit"), \
+         patch.object(c, "get_mode_settings", autospec=True, return_value=settings):
+        with pytest.raises(ACInfinityAdvanceConflictError):
+            c.set_port_mode(ai_plus_device, port=1, updates={"onSpead": 5}, dry_run=False)
+    post.assert_not_called()
+
+
+def test_legacy_advance_guard_still_requires_mode_type_15(legacy_11_device):
+    """Legacy behaviour is unchanged: modeType=15 AND isOpenAutomation != 0."""
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    cap = _capture_write(
+        c, legacy_11_device, {"onSpead": 5},
+        settings={**MOCK_MODE_SETTINGS_LEGACY_PORT1, "modeType": 0, "isOpenAutomation": 1},
+    )
+    assert cap["result"]["sent"] is True
+
+
+# ============ 999999 scoping (legacy conflict UX must not regress) ============
+#
+# The speed-write reroute is scoped to NEW_FRAMEWORK. 999999 correlates strongly
+# with an empty port (12 no-op writes across devType 11 and 20: every
+# portResistance == 65535 port returned 999999, every connected port 200, on a
+# controller with zero Advance Automations - Quirk 38). We deliberately do not
+# branch on portResistance to say so: per #315 it is a frozen 15800 on devType 22
+# and 65535 on legacy ports that do have equipment attached.
+
+
+def test_999999_speed_write_on_legacy_keeps_advance_conflict(legacy_11_device):
+    """Legacy loadType is dependable, so a cleared guard + 999999 is a real conflict.
+
+    The AI+ reroute exists because loadType is unreliable there (Quirks 24/34).
+    Applying it to legacy would replace an accurate ADVANCE-conflict response
+    with on/off-hardware guidance that does not fit the device.
+    """
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+
+    with patch.object(c.session, "post", _post_returning(999999, "Operation failed")), \
+         patch.object(c, "_enforce_write_rate_limit"), \
+         patch.object(c, "get_mode_settings", autospec=True,
+                      return_value={**MOCK_MODE_SETTINGS_LEGACY_PORT1, "loadType": 0}):
+        with pytest.raises(ACInfinityAdvanceConflictError):
+            c.set_port_mode(legacy_11_device, port=1, updates={"onSpead": 5},
+                            dry_run=False, require_variable_speed=True)
+
+
+def test_999999_speed_write_on_ai_plus_still_reroutes(ai_plus_device):
+    """The counterpart: on NEW_FRAMEWORK the reroute must still fire."""
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+
+    with patch.object(c.session, "post", _post_returning(999999, "Operation failed")), \
+         patch.object(c, "_enforce_write_rate_limit"), \
+         patch.object(c, "get_mode_settings", autospec=True,
+                      return_value={**AI_PLUS_SETTINGS, "loadType": 0}):
+        with pytest.raises(ACInfinityDeviceError) as exc:
+            c.set_port_mode(ai_plus_device, port=1, updates={"onSpead": 5},
+                            dry_run=False, require_variable_speed=True)
+
+    assert "set_port_on" in str(exc.value)
+    assert "on/off hardware" in str(exc.value)
+
+
+# ============ v2 Advance-Automation writes: the minversion gate (#290) ============
+#
+# Quirk 14 covers the v1 write path (addDevMode). It applies to the v2 surface
+# too, and the failure mode there is worse: without `minversion`, addGroups on an
+# AI+ never responds at all. The caller dies on the 10s read timeout, which is
+# what #290 recorded as "AI controllers may not support the Groups API".
+#
+# Measured on live devType-20 hardware, identical payload, one header differing:
+#
+#   no minversion   -> read timeout at 10.0s, nothing created
+#   + minversion    -> 200 success in 0.2s, automation created
+#
+# Legacy is deliberately NOT sent the header: devType 11 already works without
+# it, so adding an unproven header there is risk with no upside.
+
+
+def _client_with_devices(*devices):
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    for dev_id, dev_type in devices:
+        c._dev_types[str(dev_id)] = dev_type
+    return c
+
+
+def test_v2_headers_carry_minversion_for_ai_plus():
+    c = _client_with_devices((999, 20))
+    assert c._v2_headers("999")["minversion"] == AI_PLUS_MINVERSION
+
+
+def test_v2_headers_omit_minversion_for_legacy():
+    """devType 11 works without it — do not send an unproven header there."""
+    c = _client_with_devices((111, 11))
+    assert "minversion" not in c._v2_headers("111")
+
+
+def test_v2_headers_omit_minversion_when_devtype_unknown():
+    """Unknown devType falls back to the legacy header set, not a guess.
+
+    A wrong "legacy" costs an AI+ write and fails loudly; a wrong "AI+" would
+    send an unproven header to hardware that currently works.
+    """
+    c = _client_with_devices()
+    assert "minversion" not in c._v2_headers("not-in-cache")
+    assert "minversion" not in c._v2_headers(None)
+
+
+def test_v2_headers_legacy_set_is_otherwise_unchanged():
+    """The AI+ path adds exactly one key and alters nothing else."""
+    c = _client_with_devices((999, 20), (111, 11))
+    ai, legacy = c._v2_headers("999"), c._v2_headers("111")
+    assert set(ai) - set(legacy) == {"minversion"}
+    assert {k: v for k, v in ai.items() if k != "minversion"} == legacy
+
+
+@pytest.mark.parametrize("dev_type,expected", [(11, False), (18, False), (20, True), (22, True)])
+def test_is_new_framework_threshold(dev_type, expected):
+    c = _client_with_devices((7, dev_type))
+    assert c._is_new_framework("7") is expected
+
+
+def test_get_devices_populates_the_devtype_cache():
+    """The cache is what lets _v2_headers tell the controllers apart."""
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    payload = {"code": 200, "data": [{"devId": 1, "devType": 20}, {"devId": 2, "devType": 11}]}
+
+    class _R:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return payload
+
+    with patch.object(c.session, "post", lambda *a, **k: _R()):
+        c.get_devices()
+    assert c._dev_types == {"1": 20, "2": 11}
+
+
+def test_get_devices_ignores_entries_with_unusable_devtype():
+    """A malformed entry must not poison the cache or raise."""
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    payload = {"code": 200, "data": [
+        {"devId": 1, "devType": 20},
+        {"devId": 2, "devType": "20"},   # string, not int
+        {"devId": 3},                    # missing
+        {"devType": 20},                 # no devId
+    ]}
+
+    class _R:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return payload
+
+    with patch.object(c.session, "post", lambda *a, **k: _R()):
+        c.get_devices()
+    assert c._dev_types == {"1": 20}

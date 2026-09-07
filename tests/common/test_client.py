@@ -2139,17 +2139,41 @@ def test_set_port_mode_does_not_raise_load_type_4_when_variable_speed_not_requir
 
 
 @responses_lib.activate
-def test_set_port_mode_ai_plus_dry_run_false_returns_unsupported(authed_client):
-    """AI+ live write returns ai_plus_write_unsupported=True without calling addDevMode."""
-    # AI+ fixture captured with modeType=15; override to manual so modeType guard doesn't fire.
+def test_set_port_mode_ai_plus_live_write_sends(authed_client):
+    """AI+ live writes now SEND — the minversion header is the whole fix.
+
+    Supersedes an earlier test asserting ai_plus_write_unsupported. That refusal
+    existed because addDevMode returned 100001 under the stock okhttp headers.
+    Adding `minversion: "3.5"` makes the ordinary merged payload succeed, so AI+
+    writes are no longer refused and the request must actually reach addDevMode.
+
+    This is the only test in the suite that drives a real POST through
+    `responses`, so it is where the transmitted header is worth pinning by exact
+    value — the server matches the literal string (see the ablation matrix in
+    tests/devices/test_ai_plus_controller.py).
+    """
+    # modeType=0 mirrors the neighbouring AI+ tests: the fixture's realistic
+    # resting value is 15, and pinning it here keeps this test asserting the
+    # write path rather than the ADVANCE guard.
     ai_plus_manual = {**MOCK_MODE_SETTINGS_AI_PLUS_PORT1, "modeType": 0}
     ai_plus_response = {"code": 200, "msg": "success.", "data": ai_plus_manual}
     responses_lib.add(responses_lib.POST, MODE_SETTINGS_URL, json=ai_plus_response, status=200)
-    result = authed_client.set_port_mode(AI_PLUS_DEVICE_DATA, port=1, updates={}, dry_run=False)
-    assert result.get("ai_plus_write_unsupported") is True
-    assert result["sent"] is False
+    responses_lib.add(responses_lib.POST, ADD_DEV_MODE_URL,
+                      json={"code": 200, "msg": "success."}, status=200)
+    with patch.object(authed_client, "_enforce_write_rate_limit"):
+        result = authed_client.set_port_mode(
+            AI_PLUS_DEVICE_DATA, port=1, updates={}, dry_run=False
+        )
+    assert result["sent"] is True
     write_calls = [c for c in responses_lib.calls if "addDevMode" in c.request.url]
-    assert len(write_calls) == 0
+    assert len(write_calls) == 1
+    sent_headers = write_calls[0].request.headers
+    assert sent_headers["minversion"] == "3.5"
+    # The three headers an earlier revision also sent were ablated and proven
+    # unnecessary; none of them should reach the wire.
+    assert sent_headers["User-Agent"] == "okhttp/3.10.0"
+    assert "phoneType" not in sent_headers
+    assert "appVersion" not in sent_headers
 
 
 # ============ Pre-write guard from device_data (Quirk 25 / Issue #133) ============

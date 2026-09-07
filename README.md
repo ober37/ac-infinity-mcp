@@ -33,7 +33,16 @@
 |---|---|---|---|
 | UIS Controller 69 Pro | ✅ | ✅ | Legacy protocol |
 | UIS Controller 69 Pro+ | ✅ | ✅ | Legacy protocol |
-| UIS Controller 89 AI+ | ✅ | ⚠️ v1 read-only | New AI+ protocol — write support planned for v2 |
+| UIS Controller 89 AI+ | ✅ | ✅ † | New AI+ protocol — port writes require the `minversion` header (Quirk 14) |
+
+† Per-port writes (on/off, speed, mode, temperature/humidity/VPD automation) all work —
+that is the scope of Quirk 14's `minversion` finding, which covers `addDevMode` only.
+Multi-port **Advance Automations** are only partly verified on AI+ (#290): reads work,
+creates time out on the controller this was developed against but have been seen to land
+on another, and enable/disable are unexercised. Separately,
+`apply_grow_stage_template` / `break_out_of_automation` are held back pending hardware
+verification (#316) — both refuse with an explanation instead of writing. See
+[AI+ controllers](docs/GUIDE.md#ai-controllers).
 
 ## Tools
 
