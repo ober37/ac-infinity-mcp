@@ -1251,9 +1251,6 @@ class ACInfinityClient:
         if controller_type == ControllerType.NEW_FRAMEWORK:
             # Quirk 36: on AI+, modeType == 15 is observed in three ordinary
             # non-automation modes (OFF, ON, AUTO), so it cannot mean ADVANCE here.
-            # Sharper still, from Quirk 17: an ADVANCE port reads modeType 15 with
-            # atType 1, and the table shows an OFF port (also atType 1) reads
-            # modeType 15 — so the two are indistinguishable on both fields.
             # (An earlier revision said "atType 15 IS ADVANCE"; that is false, 15 is
             # never an atType. Retracted in Quirk 36.) Requiring modeType == 15
             # would therefore gate the guard on a field that cannot make the

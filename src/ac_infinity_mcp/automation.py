@@ -500,7 +500,8 @@ async def _build_advance_conflict_response(
             "port": port,
             "human_summary": (
                 f"The controller rejected that write, and {port_display_early} reports "
-                "an open circuit — nothing is connected to it. Check the cable first. "
+                "an open circuit — most often that means nothing is connected. "
+                "Check the cable first. "
                 "If something is plugged in, then the port is under Advance Automation "
                 "control and needs releasing before it will take a manual change."
             ),
@@ -791,8 +792,8 @@ async def _build_advance_conflict_response(
         **({
             "advisory": (
                 f"{port_display} may also simply have nothing connected — it is "
-                "default-named and drawing no load. If the automation options below "
-                "don't apply, check the cable."
+                "default-named, and there is no open-circuit reading to confirm it "
+                "either way. If none of the automation options fit, check the cable."
             ),
             "likely_cause": "EMPTY_PORT_POSSIBLE",
         } if empty_confidence == "heuristic" else {}),

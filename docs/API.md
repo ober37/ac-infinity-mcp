@@ -867,21 +867,13 @@ automation — OFF, ON and AUTO. Therefore it cannot mean ADVANCE there, and the
 legacy guard that reads it that way is unsound on AI+. Everything below is
 evidence for that sentence; nothing below needs a causal story to hold.
 
-A sharper form of the same point, sourced entirely from data already in this
-document and needing no new hardware. Quirk 17 records a real ADVANCE port as
-`modeType 15` **with `atType 1`**. The table below records an OFF port — also
-`atType 1` — as `modeType 15`. So on AI+ an ADVANCE port and an OFF port are
-indistinguishable on **both** fields. A pair that cannot separate "under
-automation" from "switched off" is not usable as an automation flag.
-
-> **Retracted:** an earlier revision of this paragraph said "`atType = 15` **is**
+> **Retracted:** an earlier revision of this quirk said "`atType = 15` **is**
 > ADVANCE." That is false — `15` is a `modeType` and is never a value of
 > `atType`. Three places in this repo say so: Quirk 17's own table (`atType 1` on
 > an ADVANCE port), Quirk 17's note that writing `atType=15` returns `999999`,
 > and the `atType` enumeration in Quirk 35 (OFF 1, ON 2, AUTO 3, TIMER 4/5,
 > CYCLE 6, SCHEDULE 7, VPD 8 — no 15). The claim reached this document through
-> review and was not checked against the file it was being written into; the
-> Quirk 17 version above is both true and stronger.
+> review and was not checked against the file it was being written into.
 
 **Two retractions.** The first version of this quirk said `modeType`
 "alternates with port parity and tracks nothing about automation" — the parity

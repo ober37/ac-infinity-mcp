@@ -353,12 +353,12 @@ told why:
 
 - **Advance Automations** (the named programs governing several ports) are **partly
   verified** on AI+, and the honest summary is that we do not yet know where the line is.
-  Reading them back works. On the controller this was developed against, *creating* one
-  times out after 10 seconds instead of returning a useful error, and the fix for that is
-  in review (#290). But creates and in-place edits have both been observed to land on
-  another devType-20 controller — that is how #326 was found — so "creating doesn't work
-  on AI+" is too strong a claim to put in front of you. Enabling and disabling have never
-  been exercised on an AI+ at all.
+  Reading them back works. On a devType-20 controller, *creating* one and editing one in
+  place have both been observed to land — that is how #326 was found. On another AI+
+  controller, *creating* one times out after 10 seconds instead of returning a useful
+  error, and the fix for that is in review (#290). So "creating works on AI+" and
+  "creating doesn't" are both too strong to put in front of you. Enabling and disabling
+  have never been exercised on an AI+ at all.
 
   What that means in practice: set a program up in the AC Infinity app if this server
   gives you trouble, and check the app afterwards to confirm what actually landed.

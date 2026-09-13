@@ -37,9 +37,9 @@
 
 † Per-port writes (on/off, speed, mode, temperature/humidity/VPD automation) all work —
 that is the scope of Quirk 14's `minversion` finding, which covers `addDevMode` only.
-Multi-port **Advance Automations** are only partly verified on AI+ (#290): reads work,
-creates time out on the controller this was developed against but have been seen to land
-on another, and enable/disable are unexercised. Separately,
+Multi-port **Advance Automations** are only partly verified on AI+: reads work, creates
+and in-place edits have both landed on a devType 20 (#326), creates time out on a
+different AI+ controller (#290), and enable/disable are unexercised on any AI+. Separately,
 `apply_grow_stage_template` / `break_out_of_automation` are held back pending hardware
 verification (#316) — both refuse with an explanation instead of writing. See
 [AI+ controllers](docs/GUIDE.md#ai-controllers).
