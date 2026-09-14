@@ -745,10 +745,15 @@ class ACInfinityClient:
         self._write_lock = threading.Lock()
         self._auth_lock = threading.Lock()
         self._auth_error: ACInfinityAuthError | None = None
-        # devId -> devType, refreshed on every get_devices(). Lets the v2 header
-        # builder tell an AI+ from a legacy controller without threading device
-        # context through six call sites (see _v2_headers).
-        self._dev_types: dict[str, int] = {}
+        # devId -> ControllerType, upserted by get_devices() and never cleared.
+        #
+        # Classification goes through detect_controller_type rather than a local
+        # devType test, so this agrees with every other caller by construction. A
+        # second, looser rule here is exactly how "20" comes to be an AI+ on one
+        # write path and unusable on another, for the same device dict — and it
+        # also silently skipped newFrameworkDevice, which detect_controller_type
+        # treats as authoritative ahead of devType.
+        self._ctypes: dict[str, ControllerType] = {}
 
     def _raise_for_api_code(
         self,
@@ -971,9 +976,21 @@ class ACInfinityClient:
 
         devices = result.get("data", [])
         for _d in devices:
-            _dev_id, _dev_type = _d.get("devId"), _d.get("devType")
-            if _dev_id is not None and isinstance(_dev_type, int):
-                self._dev_types[str(_dev_id)] = _dev_type
+            _dev_id = _d.get("devId")
+            if _dev_id is None:
+                continue
+            try:
+                self._ctypes[str(_dev_id)] = detect_controller_type(_d)
+            except ACInfinityDeviceError as e:
+                # Leave it uncached, which falls back to legacy v2 headers. The
+                # try is required: detect_controller_type raises rather than
+                # guessing, and one malformed entry must not fail the whole
+                # device list.
+                logger.warning(
+                    "Cannot classify devId=%s (%s) — v2 writes to it will use "
+                    "legacy headers. Every other device in this response is "
+                    "unaffected.", _dev_id, e,
+                )
         logger.info("Fetched %d devices", len(devices))
         return devices
 
@@ -1493,27 +1510,42 @@ class ACInfinityClient:
 
     # ============ v2.0 Automation Management Methods ============
 
-    def _is_new_framework(self, dev_id: str | None) -> bool:
-        """True when dev_id is a known AI+ controller (devType >= 20).
+    def _is_new_framework(self, dev_id: str) -> bool:
+        """True when dev_id is a known NEW_FRAMEWORK (AI+) controller.
 
-        Falls back to False when the devType is unknown, which yields the legacy
-        header set — the behaviour every controller had before AI+ support. A
-        wrong False costs an AI+ write (recoverable, and loud: it times out); a
-        wrong True would send an unproven header to legacy hardware.
+        The classification is whatever detect_controller_type decided at
+        get_devices() time — including its newFrameworkDevice check, which it
+        applies ahead of devType. This function deliberately re-derives nothing.
+
+        Falls back to False when the device was never classified, which yields
+        the legacy header set: the behaviour every controller had before AI+
+        support. A wrong False costs an AI+ write; a wrong True would send an
+        unproven header to legacy hardware, so False is the safe default.
+
+        A wrong False is recoverable but NOT loud. The write dies on the 10s read
+        timeout, and requests.exceptions.Timeout is not caught by any typed
+        handler in the server layer, so the grower sees a generic error after a
+        ten-second stall. The WARNING below is the only specific signal, which is
+        why it is not INFO.
         """
-        if dev_id is None:
-            return False
-        dev_type = self._dev_types.get(str(dev_id))
-        if dev_type is None:
-            logger.info(
-                "devType unknown for devId=%s — using legacy v2 headers. Call "
-                "get_devices() first if an AI+ v2 write is expected.", dev_id,
+        ctype = self._ctypes.get(str(dev_id))
+        if ctype is None:
+            logger.warning(
+                "Controller class unknown for devId=%s — using legacy v2 "
+                "headers. If this is an AI+, the write will stall for 10s and "
+                "fail. Call get_devices() first.", dev_id,
             )
             return False
-        return dev_type >= 20
+        return ctype is ControllerType.NEW_FRAMEWORK
 
-    def _v2_headers(self, dev_id: str | None = None) -> dict[str, str]:
+    def _v2_headers(self, dev_id: str) -> dict[str, str]:
         """Build the additional headers required for v2.0 API endpoints.
+
+        ``dev_id`` is required, not optional. A defaulted argument means a future
+        seventh v2 endpoint that forgets it type-checks, passes mypy, and
+        silently gets legacy headers — reintroducing #290 on that path with no
+        signal. Required makes the omission a TypeError at the call site.
+
 
         The `version` and `requestId` headers are intentionally omitted (Issue #298):
         the server now rejects any v2 request that carries either one — absent a valid

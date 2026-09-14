@@ -608,10 +608,17 @@ def test_999999_speed_write_on_ai_plus_still_reroutes(ai_plus_device):
 
 
 def _client_with_devices(*devices):
+    """Seed the classification cache the way get_devices() would.
+
+    devId is a string here because Quirk 7 says the API sends it as one, and
+    tests/conftest.py:12-19 removed the int-shaped fixtures for that reason.
+    Classification goes through detect_controller_type so these fixtures cannot
+    drift from what the real populate path produces.
+    """
     c = ACInfinityClient("test@example.com", "pw")
     c.token = "tok"
     for dev_id, dev_type in devices:
-        c._dev_types[str(dev_id)] = dev_type
+        c._ctypes[str(dev_id)] = detect_controller_type({"devId": str(dev_id), "devType": dev_type})
     return c
 
 
@@ -626,15 +633,36 @@ def test_v2_headers_omit_minversion_for_legacy():
     assert "minversion" not in c._v2_headers("111")
 
 
-def test_v2_headers_omit_minversion_when_devtype_unknown():
-    """Unknown devType falls back to the legacy header set, not a guess.
+def test_v2_headers_omit_minversion_when_class_unknown():
+    """An unclassified device falls back to the legacy header set, not a guess.
 
-    A wrong "legacy" costs an AI+ write and fails loudly; a wrong "AI+" would
-    send an unproven header to hardware that currently works.
+    A wrong "legacy" costs an AI+ write; a wrong "AI+" would send an unproven
+    header to hardware that currently works, so the fallback is the safe one.
+    The cost is a 10s stall, not a loud failure — hence the WARNING in
+    _is_new_framework.
     """
     c = _client_with_devices()
     assert "minversion" not in c._v2_headers("not-in-cache")
-    assert "minversion" not in c._v2_headers(None)
+
+
+def test_v2_headers_requires_dev_id():
+    """dev_id is required so a new endpoint cannot silently get legacy headers."""
+    c = _client_with_devices((999, 20))
+    with pytest.raises(TypeError):
+        c._v2_headers()
+
+
+def test_new_framework_flag_beats_a_legacy_devtype():
+    """newFrameworkDevice is authoritative ahead of devType, as controller.py has it.
+
+    The previous devType-only rule classified this device LEGACY here while every
+    other caller saw NEW_FRAMEWORK.
+    """
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    c._ctypes["42"] = detect_controller_type({"devId": "42", "newFrameworkDevice": True})
+    assert c._is_new_framework("42") is True
+    assert c._v2_headers("42")["minversion"] == AI_PLUS_MINVERSION
 
 
 def test_v2_headers_legacy_set_is_otherwise_unchanged():
@@ -651,33 +679,13 @@ def test_is_new_framework_threshold(dev_type, expected):
     assert c._is_new_framework("7") is expected
 
 
-def test_get_devices_populates_the_devtype_cache():
+def test_get_devices_populates_the_class_cache():
     """The cache is what lets _v2_headers tell the controllers apart."""
     c = ACInfinityClient("test@example.com", "pw")
     c.token = "tok"
-    payload = {"code": 200, "data": [{"devId": 1, "devType": 20}, {"devId": 2, "devType": 11}]}
-
-    class _R:
-        def raise_for_status(self):
-            pass
-
-        def json(self):
-            return payload
-
-    with patch.object(c.session, "post", lambda *a, **k: _R()):
-        c.get_devices()
-    assert c._dev_types == {"1": 20, "2": 11}
-
-
-def test_get_devices_ignores_entries_with_unusable_devtype():
-    """A malformed entry must not poison the cache or raise."""
-    c = ACInfinityClient("test@example.com", "pw")
-    c.token = "tok"
     payload = {"code": 200, "data": [
-        {"devId": 1, "devType": 20},
-        {"devId": 2, "devType": "20"},   # string, not int
-        {"devId": 3},                    # missing
-        {"devType": 20},                 # no devId
+        {"devId": "1", "devType": 20},
+        {"devId": "2", "devType": 11},
     ]}
 
     class _R:
@@ -689,4 +697,47 @@ def test_get_devices_ignores_entries_with_unusable_devtype():
 
     with patch.object(c.session, "post", lambda *a, **k: _R()):
         c.get_devices()
-    assert c._dev_types == {"1": 20}
+    assert c._ctypes == {
+        "1": ControllerType.NEW_FRAMEWORK,
+        "2": ControllerType.LEGACY,
+    }
+
+
+def test_get_devices_ignores_entries_with_unusable_devtype():
+    """A malformed entry must not poison the cache or raise.
+
+    "20" as a string is NOT malformed — Quirk 7 says this API sends devId as a
+    string and devType as "20", and detect_controller_type coerces it. An earlier
+    version of this test asserted the string form was dropped, which contradicted
+    test_stringified_devtype_still_classifies 625 lines above it and would have
+    silently disabled the minversion header on exactly the controllers that need
+    it. Only genuinely unreadable shapes are skipped.
+    """
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    payload = {"code": 200, "data": [
+        {"devId": "1", "devType": 20},
+        {"devId": "2", "devType": "20"},    # string — a documented shape
+        {"devId": "3"},                     # devType missing -> defaults to 0
+        {"devType": 20},                    # no devId, unaddressable
+        {"devId": "5", "devType": "brick"}, # genuinely unreadable -> uncached
+    ]}
+
+    class _R:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return payload
+
+    with patch.object(c.session, "post", lambda *a, **k: _R()):
+        c.get_devices()
+
+    assert c._ctypes == {
+        "1": ControllerType.NEW_FRAMEWORK,
+        "2": ControllerType.NEW_FRAMEWORK,   # the string form classifies
+        "3": ControllerType.LEGACY,          # absent devType defaults to 0
+    }
+    # "brick" raises inside detect_controller_type and is left uncached, which
+    # falls back to legacy headers for that device only.
+    assert "5" not in c._ctypes
