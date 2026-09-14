@@ -348,8 +348,7 @@ on a 69 Pro, and so do live changes to any individual port — on/off, speed, mo
 temperature, humidity and VPD automations. AI+ controllers speak a newer protocol, which
 this server handles for you.
 
-Two things are not there yet. Neither one fails quietly — if you ask for either, you get
-told why:
+Two things aren't fully there yet:
 
 - **Advance Automations** (the named programs governing several ports) are **partly
   verified** on AI+, and the honest summary is that we do not yet know where the line is.
