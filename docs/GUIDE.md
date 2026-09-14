@@ -350,14 +350,18 @@ this server handles for you.
 
 Two things aren't fully there yet:
 
-- **Advance Automations** (the named programs governing several ports) are **partly
-  verified** on AI+, and the honest summary is that we do not yet know where the line is.
-  Reading them back works. On a devType-20 controller, *creating* one and editing one in
-  place have both been observed to land — that is how #326 was found. On another AI+
-  controller, *creating* one times out after 10 seconds instead of returning a useful
-  error, and the fix for that is in review (#290). So "creating works on AI+" and
-  "creating doesn't" are both too strong to put in front of you. Enabling and disabling
-  have never been exercised on an AI+ at all.
+- **Advance Automations** (the named programs governing several ports) now work on AI+,
+  and the line has moved since the last time this section was written. Every one of the
+  five endpoints has been exercised on a devType-20 controller: reading, creating,
+  editing in place, enabling/disabling, and deleting. The ten-second timeout on *create*
+  was a missing `minversion` header, and it is fixed.
+
+  Two caveats, both worth your attention. That verification ran on an **empty port**,
+  chosen so nothing could switch on during the test — so it establishes that the calls
+  succeed, not how they behave against a port with equipment on it. And #326 is a
+  reminder of what a wrong automation write does: a program created with the wrong mode
+  code drove a grow light to full power. Creating and enabling automations through this
+  server is no longer *unverified*, but it is still the sharpest tool here.
 
   What that means in practice: set a program up in the AC Infinity app if this server
   gives you trouble, and check the app afterwards to confirm what actually landed.
