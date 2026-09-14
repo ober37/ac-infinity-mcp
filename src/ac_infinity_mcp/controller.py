@@ -12,6 +12,8 @@ import logging
 from enum import Enum
 from typing import Any
 
+from ac_infinity_mcp.schema import ACInfinityDeviceError
+
 logger = logging.getLogger(__name__)
 
 
@@ -25,11 +27,102 @@ def detect_controller_type(device_data: dict[str, Any]) -> ControllerType:
 
     Legacy: devType in {11, 18} or newFrameworkDevice == False
     New framework: devType >= 20 or newFrameworkDevice == True
-    """
-    dev_type = device_data.get("devType", 0)
-    new_framework = device_data.get("newFrameworkDevice", False)
 
-    if new_framework or dev_type >= 20:
+    A numeric string ("20") is coerced and classified normally. An **absent**
+    devType still resolves to LEGACY via the ``0`` default — long-standing
+    behaviour, and what main's own ``_ctype`` does for a device that is missing
+    entirely. A devType that is *present but unreadable* raises
+    ``ACInfinityDeviceError``.
+
+    Raising rather than guessing is deliberate, and the reason is narrow and
+    specific. This function no longer only picks a payload shape: since #348 it
+    also selects the Groups ``currentMode`` table, and the two tables collide on
+    the wire — LEGACY ``off`` is 2, NEW_FRAMEWORK ``on`` is 2. Guessing LEGACY
+    for an AI+ whose devType did not parse would therefore encode a requested
+    *off* as a 2 that the hardware reads as *on*. That is #326 exactly: the
+    issue whose title is that ``mode="off"`` energized a grow light.
+
+    A wrong guess here energizes equipment; a raise is caught by the server
+    layer's existing handler and reaches the grower as a readable error. The
+    second reason the old ``TypeError`` was unacceptable still holds — it
+    escaped unhandled from gates sitting outside their tool's try/except — but
+    that is fixed by the exception being *typed*, not by returning a value.
+
+    Bools are rejected even though ``bool`` is an ``int`` subclass: ``True``
+    would otherwise coerce to devType 1 and classify LEGACY silently.
+
+    **The read path, stated rather than left implicit.** This function is reached from
+    read tools as well as write tools, and there a wrong class only mislabels a mode
+    string — it energizes nothing. So the argument above justifies a raise on writes and
+    does not, on its own, justify one on reads.
+
+    It is accepted anyway, because the alternative is worse and the cost is smaller than
+    it looks:
+
+    - On ``main`` this same input already fails. ``dev_type >= 20`` against ``None`` or
+      any non-numeric string raises ``TypeError`` — unhandled, from the same call sites.
+      A typed exception the server layer can answer is strictly better than that, so no
+      read path regresses relative to what shipped before.
+    - The telemetry tools do not call this at all, and ``get_port_status`` and
+      ``get_port_settings`` already wrap their call in a degrading ``try``/``except``
+      that logs and still returns the port data. The tools that do lose output —
+      ``list_advance_automations`` and ``get_advance_automation`` — surface a readable
+      ``ACInfinityDeviceError`` rather than crashing.
+    - Returning a guess *only* for reads would mean this function answers differently
+      depending on its caller, which is how a value picked for a harmless purpose ends
+      up encoding a mode integer somewhere else. #326 is that failure exactly.
+
+    Raises:
+        ACInfinityDeviceError: devType is present but cannot be read as an int.
+    """
+    # Hardened symmetrically with devType below, and for the same reason. This field
+    # is checked FIRST and devType cannot override it, so bare truthiness made it the
+    # softest way into a wrong controller class: the string "false" is truthy, and
+    # would have classified a legacy controller as new-framework — #326 in the other
+    # direction, silently. This is an API that sends devId as a string (Quirk 7) and
+    # devType as "20", so a string-shaped boolean is a shape it has form for.
+    #
+    # 0 and 1 are accepted because they are unambiguous. Strings are not: rejecting
+    # them is the whole point, since "false" is the dangerous case.
+    raw_flag = device_data.get("newFrameworkDevice", False)
+    if isinstance(raw_flag, bool) or (isinstance(raw_flag, int) and raw_flag in (0, 1)):
+        if raw_flag:
+            return ControllerType.NEW_FRAMEWORK
+    elif raw_flag is not None:
+        logger.error(
+            "Unreadable newFrameworkDevice %r — refusing to classify. Guessing here "
+            "can invert an on/off write on AI+ hardware (#326).", raw_flag,
+        )
+        raise ACInfinityDeviceError(
+            f"Controller reported newFrameworkDevice={raw_flag!r}, which is not a "
+            "boolean. Refusing to guess the controller class, because guessing wrong "
+            "can invert an on/off write (#326)."
+        )
+
+    raw_dev_type = device_data.get("devType", 0)
+    if isinstance(raw_dev_type, bool):
+        raise ACInfinityDeviceError(
+            f"Controller reported devType={raw_dev_type!r}, which is not a device "
+            "type. Refusing to guess the controller class, because guessing wrong "
+            "can invert an on/off write (#326)."
+        )
+    try:
+        dev_type = int(raw_dev_type)
+    except (TypeError, ValueError):
+        logger.error(
+            "Unreadable devType %r — refusing to classify. Guessing here can "
+            "invert an on/off write on AI+ hardware (#326), so this raises "
+            "instead. Every write to this device will fail until devType reads "
+            "as an integer.", raw_dev_type,
+        )
+        raise ACInfinityDeviceError(
+            f"Controller reported devType={raw_dev_type!r}, which cannot be read "
+            "as a device type. Refusing to guess the controller class, because "
+            "guessing wrong can invert an on/off write (#326). Re-run discovery; "
+            "if it persists, the device list response has changed shape."
+        ) from None
+
+    if dev_type >= 20:
         return ControllerType.NEW_FRAMEWORK
     return ControllerType.LEGACY
 

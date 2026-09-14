@@ -1421,7 +1421,7 @@ def test_dev_type_18_rule_c_named_port_zero_transitions_kept() -> None:
 def test_dev_type_22_bypasses_rules_vs_non_22(dev_type: int | None, expected_kept: bool) -> None:
     """devType=22 bypasses Rule D; devType=11 and None apply Rule D normally.
 
-    port_load_types={N: 0} ensures is_toggle_hardware is False (0 not in _TOGGLE_LOAD_TYPES).
+    port_load_types={N: 0} ensures is_toggle_hardware is False (0 not in TOGGLE_LOAD_TYPES).
     Readings use 50% uptime (on_count=12/24) so the toggle pattern (100% uptime + speed=1) is
     NOT triggered — data_quality for devType=22 is no_load_signal, not api_constant_speed.
     Rule D fires on non-22 devices: avg_speed=1.0, load=0, not is_toggle → port filtered.
@@ -1462,7 +1462,9 @@ def test_dev_type_22_no_load_signal_on_cycling_ports() -> None:
 def test_dev_type_22_api_constant_speed_on_toggle_pattern() -> None:
     """devType=22: toggle pattern detected via dev_type membership, not loadType.
 
-    loadType=129 is NOT in _TOGGLE_LOAD_TYPES={4, 128}, so is_toggle_hardware is False.
+    loadType=129 is NOT in schema.TOGGLE_LOAD_TYPES={4, 128}, so is_toggle_hardware is
+    False. 129 lives in NEW_FRAMEWORK_TOGGLE_LOAD_TYPES, which only the write guard
+    consults — analytics deliberately does not, so this premise holds on every class.
     The api_constant_speed caveat fires via: is_toggle_pattern AND dev_type in _ZERO_LOAD_DEV_TYPES.
     This exercises the live Q0KT4 scenario where loadType=129 (heat pad/lights) is non-standard.
     """

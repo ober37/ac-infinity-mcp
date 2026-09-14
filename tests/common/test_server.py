@@ -80,7 +80,7 @@ from ac_infinity_mcp.server import (
     update_automation_rule,
     vpd_troubleshooting,
 )
-from tests.conftest import MOCK_DEVICE_LEGACY
+from tests.conftest import MOCK_DEVICE_AI_PLUS, MOCK_DEVICE_LEGACY
 from tests.fixtures.advance_automation_fixtures import (
     MOCK_ADVANCE_AUTOMATIONS_LIST,
     MOCK_ADVANCE_AUTOMATIONS_SINGLE,
@@ -555,7 +555,6 @@ async def test_get_device_reading_human_summary(mock_client):
     assert "RH" in summary
     assert "kPa" in summary
     assert "Reading from" in summary
-
 
 
 async def test_get_device_reading_no_load_field_in_ports(mock_client):
@@ -2772,7 +2771,7 @@ MOCK_SET_PORT_MODE_DRY = {
     "dry_run": True,
     "controller_type": "legacy",
     "sent": False,
-    "prior_mode_type": 2,
+    "prior_at_type": 2,
 }
 
 MOCK_SET_PORT_MODE_LIVE = {
@@ -2780,7 +2779,7 @@ MOCK_SET_PORT_MODE_LIVE = {
     "dry_run": False,
     "controller_type": "legacy",
     "sent": True,
-    "prior_mode_type": 2,
+    "prior_at_type": 2,
 }
 
 
@@ -2883,7 +2882,7 @@ async def test_set_port_speed_uses_asyncio_to_thread(mock_client):
 
 async def test_set_port_speed_off_mode_warning_modeType_0(mock_client):
     """modeType=0 (uninitialised OFF) in prior state triggers a warning field."""
-    mock_result = {**MOCK_SET_PORT_MODE_DRY, "prior_mode_type": 0}
+    mock_result = {**MOCK_SET_PORT_MODE_DRY, "prior_at_type": 0}
     mock_client.set_port_mode.return_value = mock_result
     result = await set_port_speed("C58ZA", 2, 5, dry_run=True)
     data = json.loads(result)
@@ -2897,7 +2896,7 @@ async def test_set_port_speed_off_mode_warning_modeType_0(mock_client):
 
 async def test_set_port_speed_off_mode_warning_modeType_1(mock_client):
     """modeType=1 (explicit OFF) in prior state triggers a warning field."""
-    mock_result = {**MOCK_SET_PORT_MODE_DRY, "prior_mode_type": 1}
+    mock_result = {**MOCK_SET_PORT_MODE_DRY, "prior_at_type": 1}
     mock_client.set_port_mode.return_value = mock_result
     result = await set_port_speed("C58ZA", 2, 5, dry_run=True)
     data = json.loads(result)
@@ -2911,7 +2910,7 @@ async def test_set_port_speed_off_mode_warning_modeType_1(mock_client):
 
 async def test_set_port_speed_no_warning_when_on_mode(mock_client):
     """modeType=2 (ON) — no warning is included in the response."""
-    mock_client.set_port_mode.return_value = {**MOCK_SET_PORT_MODE_DRY, "prior_mode_type": 2}
+    mock_client.set_port_mode.return_value = {**MOCK_SET_PORT_MODE_DRY, "prior_at_type": 2}
     result = await set_port_speed("C58ZA", 2, 5, dry_run=True)
     data = json.loads(result)
     assert "warning" not in data
@@ -3211,14 +3210,6 @@ async def test_set_port_on_off_does_not_pass_require_variable_speed(mock_client,
 
 # ============ Guard rails — Phase 8 ============
 
-MOCK_AI_PLUS_UNSUPPORTED = {
-    "payload": {"onSpead": 5, "modeType": 2},
-    "dry_run": False,
-    "controller_type": "new_framework",
-    "sent": False,
-    "ai_plus_write_unsupported": True,
-}
-
 
 async def test_set_port_speed_rejects_load_type_4(mock_client):
     """set_port_speed rejects on/off devices (loadType=4) — guard fires in client layer."""
@@ -3318,41 +3309,6 @@ async def test_set_port_off_returns_conflict_for_modeType_15(mock_client):
     assert data["conflict"] == "ADVANCE_AUTOMATION"
     assert "summary" in data
     assert "error" not in data
-
-
-async def test_set_port_speed_ai_plus_live_write_returns_not_implemented(mock_client):
-    """AI+ dry_run=False returns a clear documented error, not a crash."""
-    mock_client.set_port_mode.return_value = MOCK_AI_PLUS_UNSUPPORTED
-    result = await set_port_speed("C58ZA", 1, 5, dry_run=False)
-    data = json.loads(result)
-    assert "error" in data
-    assert "AI+" in data["error"] or "devType=22" in data["error"]
-    assert data["controller_type"] == "new_framework"
-    assert "dry_run" not in data["error"]
-    assert "preview" in data["error"].lower()
-
-
-async def test_set_port_on_ai_plus_live_write_returns_not_implemented(mock_client):
-    """AI+ set_port_on dry_run=False returns documented error."""
-    mock_client.set_port_mode.return_value = MOCK_AI_PLUS_UNSUPPORTED
-    result = await set_port_on("C58ZA", 1, dry_run=False)
-    data = json.loads(result)
-    assert "error" in data
-    assert data["controller_type"] == "new_framework"
-    assert "dry_run" not in data["error"]
-    assert "preview" in data["error"].lower()
-
-
-async def test_set_port_off_ai_plus_live_write_returns_not_implemented(mock_client):
-    """AI+ set_port_off dry_run=False returns documented error."""
-    mock_client.set_port_mode.return_value = MOCK_AI_PLUS_UNSUPPORTED
-    result = await set_port_off("C58ZA", 1, dry_run=False)
-    data = json.loads(result)
-    assert "error" in data
-    assert data["controller_type"] == "new_framework"
-    assert "dry_run" not in data["error"]
-    assert "preview" in data["error"].lower()
-
 
 async def test_set_port_speed_passes_require_variable_speed_to_client(mock_client):
     """set_port_speed passes require_variable_speed=True; client layer enforces the guard."""
@@ -4507,7 +4463,6 @@ async def test_get_port_settings_advance_degraded_empty_port_note_concatenated(m
     assert "stale" not in data["human_summary"]
 
 
-
 async def test_get_port_settings_portresistance_custom_name_stale_note(mock_client):
     """portResistance=65535 + custom-named port → staleness advisory fires (core #183 fix).
 
@@ -4647,33 +4602,6 @@ async def test_set_vpd_automation_port_zero(mock_client):
     assert "port" in data["error"]
 
 
-async def test_set_vpd_automation_ai_plus_returns_not_implemented(mock_client):
-    mock_client.set_port_mode.return_value = {
-        "payload": {}, "dry_run": False,
-        "controller_type": "new_framework", "sent": False,
-        "ai_plus_write_unsupported": True,
-    }
-    result = await set_vpd_automation("C58ZA", 1, 1.4, dry_run=False)
-    data = json.loads(result)
-    assert "error" in data
-    assert "AI+" in data["error"]
-    assert data["controller_type"] == "new_framework"
-
-
-@pytest.mark.asyncio
-async def test_set_vpd_automation_ai_plus_no_dry_run_in_error(mock_client):
-    """AI+ error message contains no 'dry_run' text (grower-facing string clean)."""
-    mock_client.set_port_mode.return_value = {
-        "payload": {}, "dry_run": False,
-        "controller_type": "new_framework", "sent": False,
-        "ai_plus_write_unsupported": True,
-    }
-    result = await set_vpd_automation("C58ZA", 1, 1.4, dry_run=False)
-    data = json.loads(result)
-    assert "dry_run" not in data["error"]
-    assert "preview" in data["error"].lower()
-
-
 async def test_set_vpd_automation_api_error(mock_client):
     mock_client.set_port_mode.side_effect = ACInfinityAPIError("server error")
     result = await set_vpd_automation("C58ZA", 1, 1.4)
@@ -4784,19 +4712,6 @@ async def test_set_temperature_automation_port_zero(mock_client):
     data = json.loads(result)
     assert "error" in data
     assert "port" in data["error"]
-
-
-async def test_set_temperature_automation_ai_plus_returns_not_implemented(mock_client):
-    mock_client.set_port_mode.return_value = {
-        "payload": {}, "dry_run": False,
-        "controller_type": "new_framework", "sent": False,
-        "ai_plus_write_unsupported": True,
-    }
-    result = await set_temperature_automation("C58ZA", 1, 20.0, 28.0, dry_run=False)
-    data = json.loads(result)
-    assert "error" in data
-    assert "AI+" in data["error"]
-
 
 async def test_set_temperature_automation_api_error(mock_client):
     mock_client.set_port_mode.side_effect = ACInfinityAPIError("err")
@@ -4948,19 +4863,6 @@ async def test_set_humidity_automation_port_zero(mock_client):
     data = json.loads(result)
     assert "error" in data
     assert "port" in data["error"]
-
-
-async def test_set_humidity_automation_ai_plus_returns_not_implemented(mock_client):
-    mock_client.set_port_mode.return_value = {
-        "payload": {}, "dry_run": False,
-        "controller_type": "new_framework", "sent": False,
-        "ai_plus_write_unsupported": True,
-    }
-    result = await set_humidity_automation("C58ZA", 1, 50.0, 70.0, dry_run=False)
-    data = json.loads(result)
-    assert "error" in data
-    assert "AI+" in data["error"]
-
 
 async def test_set_humidity_automation_api_error(mock_client):
     mock_client.set_port_mode.side_effect = ACInfinityAPIError("err")
@@ -5204,19 +5106,6 @@ async def test_set_port_mode_port_zero(mock_client):
     assert "error" in data
     assert "port" in data["error"]
 
-
-async def test_set_port_mode_ai_plus_returns_not_implemented(mock_client):
-    mock_client.set_port_mode.return_value = {
-        "payload": {}, "dry_run": False,
-        "controller_type": "new_framework", "sent": False,
-        "ai_plus_write_unsupported": True,
-    }
-    result = await set_port_mode("C58ZA", 1, "OFF", dry_run=False)
-    data = json.loads(result)
-    assert "error" in data
-    assert "AI+" in data["error"]
-
-
 async def test_set_port_mode_device_error(mock_client):
     mock_client.set_port_mode.side_effect = ACInfinityDeviceError("smart mode")
     result = await set_port_mode("C58ZA", 1, "OFF")
@@ -5384,20 +5273,6 @@ async def test_apply_grow_stage_template_device_not_found(mock_client):
     data = json.loads(result)
     assert "error" in data
     assert "NOTFOUND" in data["error"]
-
-
-async def test_apply_grow_stage_template_ai_plus_live(mock_client):
-    mock_client.set_port_mode.return_value = {
-        "payload": {}, "dry_run": False,
-        "controller_type": "new_framework", "sent": False,
-        "ai_plus_write_unsupported": True,
-    }
-    result = await apply_grow_stage_template("C58ZA", 1, "veg", dry_run=False)
-    data = json.loads(result)
-    assert "error" in data
-    assert "AI+" in data["error"]
-    assert mock_client.set_port_mode.call_count == 1
-
 
 async def test_apply_grow_stage_template_ai_plus_dry_run(mock_client):
     mock_client.set_port_mode.return_value = _stage_dry_response()
@@ -9130,7 +9005,7 @@ MOCK_WRITE_DRY = {
     "dry_run": True,
     "controller_type": "legacy",
     "sent": False,
-    "prior_mode_type": 2,
+    "prior_at_type": 2,
 }
 
 MOCK_WRITE_DRY_SPEED = {
@@ -9138,7 +9013,7 @@ MOCK_WRITE_DRY_SPEED = {
     "dry_run": True,
     "controller_type": "legacy",
     "sent": False,
-    "prior_mode_type": 2,
+    "prior_at_type": 2,
 }
 
 
@@ -9202,7 +9077,7 @@ async def test_set_port_speed_connected_port_no_warning(mock_client):
 
 async def test_set_port_speed_off_mode_and_empty_port_both_warned(mock_client):
     """set_port_speed: OFF-mode warning and empty-port advisory are separate keys."""
-    off_mode_dry = {**MOCK_WRITE_DRY_SPEED, "prior_mode_type": 1}  # atType=1 = OFF
+    off_mode_dry = {**MOCK_WRITE_DRY_SPEED, "prior_at_type": 1}  # atType=1 = OFF
     mock_client.set_port_mode.return_value = off_mode_dry
     mock_client.get_devices.return_value = [_make_device_with_empty_port(7)]
     result = await set_port_speed("C58ZA", 7, 5)
@@ -11267,3 +11142,458 @@ async def test_get_all_device_readings_summary_unchanged_without_probes(mock_cli
     data = json.loads(await get_all_device_readings())
     assert data["readings"][0]["probes"] == []
     assert "Probe Sensor" not in data["human_summary"]
+
+
+# ============ AI+ holds (#316) ============
+#
+# #308 enabled AI+ writes generally but deliberately held two tools back. Both
+# write field combinations whose persistence on AI+ is unproven, and AI+
+# accepts mode-irrelevant fields with code 200 and silently discards them
+# (Quirk 37) — so reporting sent=true would be misleading rather than merely
+# incomplete. These tests pin the hold so it cannot be dropped by accident.
+
+# A real AI+ shape. The first version of this was MOCK_DEVICE_LEGACY with three
+# keys swapped, which kept devName "Test 69 Pro" and legacy firmware — so the
+# device-name assertion below was checking for a 69 Pro in a message whose whole
+# job is telling the grower the controller is an AI+. Port 1 is renamed because
+# the label assertion is about the custom-name path; a named port is a shape the
+# hardware does send, unlike a legacy device claiming newFrameworkDevice.
+_AI_PLUS_DEVICE_FOR_HOLD = copy.deepcopy(MOCK_DEVICE_AI_PLUS)
+_AI_PLUS_DEVICE_FOR_HOLD["deviceInfo"]["ports"][0]["portName"] = "Intake Fan"
+# Set the unit explicitly. MOCK_DEVICE_AI_PLUS carries no `unit` key, so the
+# Fahrenheit behaviour these tests rely on comes from _effective_unit(None)'s
+# default — the test would not say which branch it exercises, and would change
+# meaning silently if that default ever moved.
+# _effective_unit: 1 means Celsius, anything else (including absent) means F.
+_AI_PLUS_DEVICE_FOR_HOLD["deviceInfo"]["unit"] = 0  # 0 = Fahrenheit
+
+
+async def test_apply_grow_stage_template_held_on_ai_plus(mock_client):
+    """Live apply_grow_stage_template must refuse on AI+ rather than half-apply."""
+    mock_client.get_devices.return_value = [_AI_PLUS_DEVICE_FOR_HOLD]
+    result = await apply_grow_stage_template("D89XA", 1, "veg", dry_run=False)
+    data = json.loads(result)
+    assert "error" in data
+    assert "AI+" in data["error"]
+    assert data["controller_type"] == "new_framework"
+    assert data["tracking_issue"] == 316
+    mock_client.set_port_mode.assert_not_called()
+
+
+# The hold error is read by a grower, not by a developer. These pin the three ways
+# the earlier wording failed that reader: it printed the raw function name, it leaked
+# the "devType >= 20" range that defines AI+ internally instead of the name on the
+# box, and it never said which port it was refusing. The machine-readable identifiers
+# moved to their own keys rather than being dropped.
+
+_AI_PLUS_HOLD_TOOL_NAMES = (
+    "apply_grow_stage_template",
+    "break_out_of_automation",
+    "set_vpd_automation",
+    "set_temperature_automation",
+    "set_humidity_automation",
+)
+
+
+async def test_apply_grow_stage_template_hold_error_is_grower_readable(mock_client):
+    mock_client.get_devices.return_value = [_AI_PLUS_DEVICE_FOR_HOLD]
+    result = await apply_grow_stage_template("D89XA", 1, "veg", dry_run=False)
+    data = json.loads(result)
+    message = data["error"]
+
+    assert "Intake Fan (Port 1)" in message, "must name the port the grower named"
+    assert "Test 89 AI+" in message, "must name the controller"
+    assert "devType" not in message
+    assert ">= 20" not in message
+    for name in _AI_PLUS_HOLD_TOOL_NAMES:
+        assert name not in message, f"raw function name {name!r} leaked to the grower"
+
+    # Identifiers stay available to callers that want them.
+    assert data["tool"] == "apply_grow_stage_template"
+    assert data["controller_type"] == "new_framework"
+
+
+async def test_apply_grow_stage_template_hold_workaround_is_not_the_broken_chain(mock_client):
+    """The old advice — chain the three automation tools — reproduces the bug the
+    single atomic write fixed: the temperature and humidity tools each carry
+    atType=3, so the chain ends in AUTO, not VPD. Only the VPD target is offered."""
+    mock_client.get_devices.return_value = [_AI_PLUS_DEVICE_FOR_HOLD]
+    data = json.loads(await apply_grow_stage_template("D89XA", 1, "veg", dry_run=False))
+    message = data["error"].lower()
+    assert "vpd target" in message
+    assert "temperature" not in message.split("does stick")[-1], (
+        "the workaround must not offer the temperature/humidity tools as substitutes"
+    )
+
+
+async def test_break_out_of_automation_hold_error_is_grower_readable(mock_client):
+    mock_client.get_devices.return_value = [_AI_PLUS_DEVICE_FOR_HOLD]
+    result = await break_out_of_automation(
+        "D89XA", 1, dry_run=False, confirm_automation_name="Test Automation"
+    )
+    data = json.loads(result)
+    message = data["error"]
+
+    assert "Intake Fan (Port 1)" in message
+    assert "devType" not in message
+    for name in _AI_PLUS_HOLD_TOOL_NAMES:
+        assert name not in message
+    assert data["tool"] == "break_out_of_automation"
+
+
+async def test_apply_grow_stage_template_preview_still_works_on_ai_plus(mock_client):
+    """The hold is live-write only — dry_run previews stay available."""
+    mock_client.get_devices.return_value = [_AI_PLUS_DEVICE_FOR_HOLD]
+    mock_client.set_port_mode.return_value = {
+        "payload": {}, "dry_run": True, "controller_type": "new_framework", "sent": False,
+    }
+    result = await apply_grow_stage_template("D89XA", 1, "veg", dry_run=True)
+    data = json.loads(result)
+    assert "error" not in data
+    mock_client.set_port_mode.assert_called_once()
+
+
+async def test_apply_grow_stage_template_not_held_on_legacy(mock_client):
+    """Legacy controllers are unaffected by the AI+ hold."""
+    mock_client.set_port_mode.return_value = {
+        "payload": {}, "dry_run": False, "controller_type": "legacy", "sent": True,
+    }
+    result = await apply_grow_stage_template("C58ZA", 1, "veg", dry_run=False)
+    data = json.loads(result)
+    assert "tracking_issue" not in data
+    mock_client.set_port_mode.assert_called_once()
+
+
+async def test_break_out_of_automation_held_on_ai_plus(mock_client):
+    """break_out_of_automation must refuse on AI+ before any co-port write."""
+    mock_client.get_devices.return_value = [_AI_PLUS_DEVICE_FOR_HOLD]
+    result = await break_out_of_automation(
+        "D89XA", 1, dry_run=False, confirm_automation_name="Test Automation"
+    )
+    data = json.loads(result)
+    assert "error" in data
+    assert "AI+" in data["error"]
+    assert data["tracking_issue"] == 316
+    mock_client.set_port_mode.assert_not_called()
+
+
+# ============================================================================
+# AI+ server-layer write coverage (restored)
+#
+# Before this PR, each of these tools had exactly one AI+ server test, asserting
+# the live write returned the "not implemented on AI+" refusal. Enabling the
+# writes made those assertions false, and the first draft of this branch deleted
+# them — which left every one of these tools with NO AI+ server-layer test at
+# all, so nothing downstream of the client would catch a re-introduced refusal
+# branch, a controller_type that stopped propagating, or a tool quietly reverting
+# to sent=False on AI+.
+#
+# The right move was to invert them, not drop them. Each test below is the
+# deleted one with its assertion turned around: the same tool, the same AI+
+# device, dry_run=False, now asserting the write lands.
+# ============================================================================
+
+_AI_PLUS_WRITE_LIVE = {
+    "payload": {"onSpead": 5, "modeType": 2, "devId": 12345},
+    "dry_run": False,
+    "controller_type": "new_framework",
+    "sent": True,
+    "prior_at_type": 2,
+}
+
+# The first version of this guard listed refusal *vocabulary* — "not implemented",
+# "unsupported", "not yet enabled". None of it matched: the retired string was
+# "AI+ controllers live write path is not yet implemented.", and "not implemented"
+# is not a substring of "not yet implemented". A verbatim copy-paste of the deleted
+# refusal sailed straight through, and so did the current hold wording, so the
+# natural way to reintroduce a refusal was exactly the way that passed.
+#
+# Pin the shape instead. Every hold and refusal path sets tracking_issue, so its
+# absence is the discriminator that does not depend on how anyone words it.
+def _assert_not_a_refusal(data: dict) -> None:
+    assert "error" not in data, f"enabled tool refused: {data.get('error')}"
+    assert "tracking_issue" not in data, (
+        "response carries a tracking_issue — an enabled tool has started refusing"
+    )
+
+
+def _assert_ai_plus_write_landed(data: dict) -> None:
+    assert "error" not in data, f"AI+ write refused: {data.get('error')}"
+    assert data["sent"] is True
+    assert data["dry_run"] is False
+    assert data["controller_type"] == "new_framework"
+
+
+def _assert_wrote(mock_client, **expected) -> None:
+    """Assert the client was called, and with the fields the tool should send.
+
+    Without this the seven tests below shared one canned return describing an ON
+    write at speed 5, and asserted only on that return — so the set_port_off test
+    passed identically whether the tool sent an off payload or an on one.
+    """
+    assert mock_client.set_port_mode.called, "client was never called"
+    assert mock_client.set_port_mode.call_count == 1, (
+        f"expected exactly one write, got {mock_client.set_port_mode.call_count} — "
+        "call_args reads the LAST call, so extra writes would go unasserted"
+    )
+    # Positional-or-keyword: reading call_args[0][2] blind raises IndexError rather
+    # than failing readably if a caller ever passes updates= by keyword.
+    call = mock_client.set_port_mode.call_args
+    if len(call.args) > 2:
+        updates = call.args[2]
+    elif "updates" in call.kwargs:
+        updates = call.kwargs["updates"]
+    else:
+        raise AssertionError(f"could not find the updates dict in the call: {call}")
+    for key, value in expected.items():
+        assert updates.get(key) == value, (
+            f"expected {key}={value!r} on the wire, got {updates.get(key)!r} "
+            f"(full updates: {updates})"
+        )
+
+
+@pytest.fixture
+def ai_plus_write_client(mock_client):
+    """mock_client, but the device is an AI+ and set_port_mode reports a live write."""
+    mock_client.get_devices.return_value = [_AI_PLUS_DEVICE_FOR_HOLD]
+    mock_client.set_port_mode.return_value = _AI_PLUS_WRITE_LIVE
+    return mock_client
+
+
+async def test_set_port_speed_ai_plus_live_write_lands(ai_plus_write_client):
+    data = json.loads(await set_port_speed("D89XA", 1, 5, dry_run=False))
+    _assert_ai_plus_write_landed(data)
+    _assert_not_a_refusal(data)
+    ai_plus_write_client.set_port_mode.assert_called_once()
+    _assert_wrote(ai_plus_write_client, onSpead=5)
+
+
+async def test_set_port_on_ai_plus_live_write_lands(ai_plus_write_client):
+    data = json.loads(await set_port_on("D89XA", 1, dry_run=False))
+    _assert_ai_plus_write_landed(data)
+    _assert_not_a_refusal(data)
+    _assert_wrote(ai_plus_write_client, atType=2, onSpead=10)
+
+
+async def test_set_port_off_ai_plus_live_write_lands(ai_plus_write_client):
+    data = json.loads(await set_port_off("D89XA", 1, dry_run=False))
+    _assert_ai_plus_write_landed(data)
+    _assert_not_a_refusal(data)
+    # The whole point: this must fail if set_port_off ever sends an ON payload.
+    _assert_wrote(ai_plus_write_client, atType=1, onSpead=0)
+
+
+async def test_set_port_mode_ai_plus_live_write_lands(ai_plus_write_client):
+    data = json.loads(await set_port_mode("D89XA", 1, "off", dry_run=False))
+    _assert_ai_plus_write_landed(data)
+    _assert_not_a_refusal(data)
+    _assert_wrote(ai_plus_write_client, atType=1)
+
+
+async def test_set_vpd_automation_ai_plus_live_write_lands(ai_plus_write_client):
+    data = json.loads(await set_vpd_automation("D89XA", 1, 1.4, dry_run=False))
+    _assert_ai_plus_write_landed(data)
+    _assert_not_a_refusal(data)
+    # atType and targetVpd alone leave the two flags that make VPD actually engage
+    # unasserted.
+    _assert_wrote(
+        ai_plus_write_client,
+        atType=8,
+        vpdSettingMode=1,
+        targetVpd=14,          # 1.4 kPa x10
+        targetVpdSwitch=1,
+    )
+
+
+async def test_set_temperature_automation_ai_plus_live_write_lands(ai_plus_write_client):
+    # Degrees F: this fixture is a real AI+ shape and reports a F preference, so
+    # the 20-28 that the old legacy-derived fixture accepted is out of range here.
+    data = json.loads(
+        await set_temperature_automation("D89XA", 1, 68, 82, dry_run=False)
+    )
+    _assert_ai_plus_write_landed(data)
+    _assert_not_a_refusal(data)
+    # atType=3 is shared with the humidity tool and activeHt=1 is a constant, so the
+    # old pair asserted nothing the caller actually asked for: it passed with devLt
+    # and devHt swapped, with activeLt flipped, or with the F pair dropped entirely —
+    # and that F pair is the family this PR documents as a live defect elsewhere.
+    _assert_wrote(
+        ai_plus_write_client,
+        atType=3,
+        devLt=20,              # 68F -> 20C
+        devHt=28,              # 82F -> 28C
+        activeLt=1,
+        activeHt=1,
+        devLtf=68,             # F pair, present only on a F-preference device
+        devHtf=82,
+    )
+
+
+async def test_set_humidity_automation_ai_plus_live_write_lands(ai_plus_write_client):
+    data = json.loads(await set_humidity_automation("D89XA", 1, 50, 70, dry_run=False))
+    _assert_ai_plus_write_landed(data)
+    _assert_not_a_refusal(data)
+    _assert_wrote(ai_plus_write_client, atType=3, devLh=50, devHh=70)
+
+
+# ============================================================================
+# Item 1, extended: the empty-port cause must reach the grower on BOTH 999999
+# branches. Rewording the exception was not enough — every caller routes
+# ACInfinityAdvanceConflictError to _build_advance_conflict_response, which
+# builds its own response and discards the exception message. Before this, a
+# grower with an unplugged port was told to break out of, or disable, an
+# automation that need not exist.
+# ============================================================================
+
+def _device_with_empty_port(port: int = 7) -> dict:
+    """A device whose port reports the open-circuit sentinel (Quirk 38 / Quirk 27)."""
+    d = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    d["deviceInfo"]["ports"] = [
+        {"port": port, "portName": f"Port {port}", "speak": 0, "portsLoad": 0,
+         "loadState": 0, "curMode": 1, "remainTime": 0, "portResistance": 65535},
+    ]
+    return d
+
+
+async def test_empty_port_999999_names_the_cable_not_an_automation(mock_client):
+    """A 999999 on a port reporting the open-circuit sentinel leads with the cable."""
+    mock_client.get_devices.return_value = [_device_with_empty_port(7)]
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError(
+        "Port 7 rejected the write (code 999999).", api_code=999999
+    )
+    data = json.loads(await set_port_speed("C58ZA", 7, 5, dry_run=False))
+
+    assert data.get("likely_cause") == "EMPTY_PORT"
+    blob = json.dumps(data).lower()
+    assert "plugged" in blob or "connected" in blob
+    # The wrong instructions must not be the offered actions.
+    assert "1_break_out" not in data
+    assert "2_disable_automation" not in data
+
+
+async def test_empty_port_conflict_does_not_call_the_automation_api(mock_client):
+    """The empty-port branch returns before the secondary lookup."""
+    mock_client.get_devices.return_value = [_device_with_empty_port(7)]
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError(
+        "999999", api_code=999999
+    )
+    await set_port_speed("C58ZA", 7, 5, dry_run=False)
+    mock_client.get_advance_automations.assert_not_called()
+
+
+# The regression the first version of this caused: _build_advance_conflict_response
+# serves four raise sites, and only the 999999 one admits an empty-port reading. The
+# other three are positive isOpenAutomation detections made BEFORE any POST, where
+# the port provably IS under a program. These pin that separation.
+
+async def test_isopenautomation_conflict_keeps_options_on_an_empty_looking_port(mock_client):
+    """A pre-write ADVANCE detection must never be answered with "check the cable"."""
+    mock_client.get_devices.return_value = [_device_with_empty_port(7)]
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    # api_code=None — this is the isOpenAutomation path, not the 999999 code.
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError(
+        "Port 7 is under Advance Automation control (isOpenAutomation != 0)."
+    )
+    data = json.loads(await set_port_speed("C58ZA", 7, 5, dry_run=False))
+
+    assert data.get("likely_cause") != "EMPTY_PORT"
+    assert data["conflict"] == "ADVANCE_AUTOMATION"
+    assert "options" in data, "the grower lost every way to resolve a real conflict"
+
+
+async def test_weak_empty_signal_advises_but_keeps_the_automation_options(mock_client):
+    """Default-named zero-load port, no portResistance: advise, do not redirect.
+
+    This is the devType-18 shape. The name/load fallback fires for plenty of ports
+    that do have equipment attached, so it is not strong enough to replace the
+    conflict options — only to sit alongside them.
+    """
+    device = copy.deepcopy(MOCK_DEVICE_LEGACY)
+    device["devType"] = 18
+    device["deviceInfo"]["ports"] = [
+        {"port": 7, "portName": "Port 7", "speak": 0, "portsLoad": 0,
+         "loadState": 0, "curMode": 1, "remainTime": 0},
+    ]
+    mock_client.get_devices.return_value = [device]
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError(
+        "999999", api_code=999999
+    )
+    data = json.loads(await set_port_speed("C58ZA", 7, 5, dry_run=False))
+
+    assert data["conflict"] == "ADVANCE_AUTOMATION"
+    assert "options" in data, "weak empty-port signal must not remove the options"
+    assert data.get("likely_cause") == "EMPTY_PORT_POSSIBLE"
+    assert "advisory" in data
+
+
+async def test_populated_port_conflict_still_offers_automation_options(mock_client):
+    """A port with real resistance keeps the original ADVANCE conflict UX."""
+    mock_client.get_devices.return_value = [copy.deepcopy(MOCK_DEVICE_LEGACY)]
+    mock_client.get_advance_automations.return_value = MOCK_ADVANCE_AUTOMATIONS_LIST
+    mock_client.set_port_mode.side_effect = ACInfinityAdvanceConflictError("999999")
+    data = json.loads(await set_port_speed("C58ZA", 1, 5, dry_run=False))
+
+    assert data.get("likely_cause") != "EMPTY_PORT"
+    assert data["conflict"] == "ADVANCE_AUTOMATION"
+
+
+# ============================================================================
+# _unclassifiable_device_error — the one claim in this change that reading cannot
+# verify. Delete the helper and both try blocks and the suite was still green, so
+# "the raise reaches the grower instead of escaping" was asserted nowhere. It fires
+# only on dry_run=False, so the untested code sat entirely on the live-write path.
+#
+# "20.0" is the motivating value: int("20.0") raises, so a plausibly-correct string
+# would misclassify as quietly as obvious garbage. newFrameworkDevice must be falsy
+# or the flag short-circuits before devType is ever parsed.
+# ============================================================================
+
+_UNREADABLE_DEVICE = copy.deepcopy(MOCK_DEVICE_AI_PLUS)
+_UNREADABLE_DEVICE["devType"] = "20.0"
+_UNREADABLE_DEVICE["newFrameworkDevice"] = False
+
+
+async def test_apply_grow_stage_template_unreadable_devtype_is_answered(mock_client):
+    """The gate in the unguarded gap must return, not raise."""
+    mock_client.get_devices.return_value = [_UNREADABLE_DEVICE]
+    result = await apply_grow_stage_template("D89XA", 1, "veg", dry_run=False)
+    data = json.loads(result)
+
+    assert "error" in data
+    assert data["sent"] is False
+    assert "controller" in data["error"].lower()
+    mock_client.set_port_mode.assert_not_called()
+    # The maintainer-facing detail must not reach the grower.
+    assert "devType" not in data["error"]
+    assert "#326" not in data["error"]
+    assert "dry_run" not in data["error"]
+
+
+async def test_break_out_of_automation_unreadable_devtype_is_answered(mock_client):
+    """This gate sits inside an outer try, whose handler would return raw str(e).
+
+    Asserting the grower-readable wording is what pins the inner handler: without it
+    the test still passes via the outer `except ACInfinityDeviceError`, which surfaces
+    the exception text naming devType and an issue number.
+    """
+    mock_client.get_devices.return_value = [_UNREADABLE_DEVICE]
+    result = await break_out_of_automation(
+        "D89XA", 1, dry_run=False, confirm_automation_name="Test Automation"
+    )
+    data = json.loads(result)
+
+    assert data["sent"] is False
+    assert "re-run discovery" in data["error"]
+    assert "devType" not in data["error"]
+    mock_client.set_port_mode.assert_not_called()
+
+
+async def test_unreadable_devtype_preview_still_works(mock_client):
+    """The refusal is live-write only — previews are unaffected."""
+    mock_client.get_devices.return_value = [_UNREADABLE_DEVICE]
+    mock_client.set_port_mode.return_value = {
+        "payload": {}, "dry_run": True, "controller_type": "legacy", "sent": False,
+    }
+    data = json.loads(await apply_grow_stage_template("D89XA", 1, "veg", dry_run=True))
+    assert "error" not in data
