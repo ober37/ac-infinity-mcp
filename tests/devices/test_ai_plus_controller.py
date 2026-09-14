@@ -3,6 +3,7 @@
 from unittest.mock import patch
 
 import pytest
+import responses as responses_lib
 
 from ac_infinity_mcp.client import ACInfinityClient
 from ac_infinity_mcp.controller import ControllerType, build_write_payload, detect_controller_type
@@ -624,13 +625,13 @@ def _client_with_devices(*devices):
 
 def test_v2_headers_carry_minversion_for_ai_plus():
     c = _client_with_devices((999, 20))
-    assert c._v2_headers("999")["minversion"] == AI_PLUS_MINVERSION
+    assert c._v2_headers("999", minversion=True)["minversion"] == AI_PLUS_MINVERSION
 
 
 def test_v2_headers_omit_minversion_for_legacy():
     """devType 11 works without it — do not send an unproven header there."""
     c = _client_with_devices((111, 11))
-    assert "minversion" not in c._v2_headers("111")
+    assert "minversion" not in c._v2_headers("111", minversion=True)
 
 
 def test_v2_headers_omit_minversion_when_class_unknown():
@@ -642,7 +643,7 @@ def test_v2_headers_omit_minversion_when_class_unknown():
     _is_new_framework.
     """
     c = _client_with_devices()
-    assert "minversion" not in c._v2_headers("not-in-cache")
+    assert "minversion" not in c._v2_headers("not-in-cache", minversion=True)
 
 
 def test_v2_headers_requires_dev_id():
@@ -662,13 +663,13 @@ def test_new_framework_flag_beats_a_legacy_devtype():
     c.token = "tok"
     c._ctypes["42"] = detect_controller_type({"devId": "42", "newFrameworkDevice": True})
     assert c._is_new_framework("42") is True
-    assert c._v2_headers("42")["minversion"] == AI_PLUS_MINVERSION
+    assert c._v2_headers("42", minversion=True)["minversion"] == AI_PLUS_MINVERSION
 
 
 def test_v2_headers_legacy_set_is_otherwise_unchanged():
     """The AI+ path adds exactly one key and alters nothing else."""
     c = _client_with_devices((999, 20), (111, 11))
-    ai, legacy = c._v2_headers("999"), c._v2_headers("111")
+    ai, legacy = c._v2_headers("999", minversion=True), c._v2_headers("111", minversion=True)
     assert set(ai) - set(legacy) == {"minversion"}
     assert {k: v for k, v in ai.items() if k != "minversion"} == legacy
 
@@ -741,3 +742,89 @@ def test_get_devices_ignores_entries_with_unusable_devtype():
     # "brick" raises inside detect_controller_type and is left uncached, which
     # falls back to legacy headers for that device only.
     assert "5" not in c._ctypes
+
+
+# ===================== #290 round 1, finding 2 — wire-level guards =====================
+#
+# Ober's finding: "revert any single one of the six edits — say client.py:1745 back to
+# self._v2_headers() — and the whole suite stays green. addGroups is the one site your own
+# data proves is load-bearing, and it's the one with no test."
+#
+# Every assertion below is on the CAPTURED OUTGOING REQUEST, following the existing pattern
+# at test_client.py:1123. Reverting any single call site fails at least one of these.
+#
+# The expected values are measured, not assumed — live devType 20, identical payload, the
+# header the only variable (Quirk 39). See docs/API.md.
+
+V2 = "https://www.acinfinityserver.com/api/version=2.0/dev"
+_GET_GROUPS = f"{V2}/getGroups"
+_ADD_GROUPS = f"{V2}/addGroups"
+_UPDATE_BY_ID = f"{V2}/updateGroupsById"
+_IS_ON = f"{V2}/updateGroupsIsOn"
+_DEL_BY_ID = f"{V2}/delByid"
+
+# endpoint label -> (url, call, minversion expected on an AI+)
+#
+# True  = measured to FAIL without the header on devType 20.
+# False = measured to WORK without it, so it is not sent (minimal header surface).
+_V2_CALLS = {
+    "getGroups": (
+        _GET_GROUPS, lambda c, d: c.get_advance_automations(d), False,
+    ),
+    "updateGroupsById": (
+        _UPDATE_BY_ID, lambda c, d: c.update_advance_automation(d, {"advId": 5}), False,
+    ),
+    "addGroups": (
+        _ADD_GROUPS, lambda c, d: c.create_advance_automation(d, {"advName": "x"}), True,
+    ),
+    "updateGroupsIsOn/enable": (
+        _IS_ON, lambda c, d: c.enable_advance_automation(d, 5), True,
+    ),
+    "updateGroupsIsOn/disable": (
+        _IS_ON, lambda c, d: c.disable_advance_automation(d, 5), True,
+    ),
+    "delByid": (
+        _DEL_BY_ID, lambda c, d: c.delete_advance_automation(d, 5), True,
+    ),
+}
+
+
+def _v2_client(dev_id, dev_type):
+    c = _client_with_devices((dev_id, dev_type))
+    c.token = "tok"
+    c._last_write_time = 0.0
+    return c
+
+
+def _sent_header(url, call, c, dev_id):
+    """Run call against a mocked endpoint and return the outgoing minversion header."""
+    with responses_lib.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        rsps.add(responses_lib.POST, url,
+                 json={"code": 200, "msg": "success.", "data": []}, status=200)
+        try:
+            call(c, dev_id)
+        except Exception:
+            # The response body is a stub; only the OUTGOING request matters here.
+            pass
+        sent = rsps.calls[0].request
+    return sent.headers.get("minversion")
+
+
+@pytest.mark.parametrize("label", sorted(_V2_CALLS))
+def test_v2_endpoint_sends_minversion_only_where_measured_necessary(label):
+    """AI+ (devType 20): the header goes to the endpoints that reject without it, and no others."""
+    url, call, expected = _V2_CALLS[label]
+    got = _sent_header(url, call, _v2_client("999", 20), "999")
+    if expected:
+        assert got == AI_PLUS_MINVERSION, f"{label} must carry minversion on an AI+"
+    else:
+        assert got is None, f"{label} works without minversion — do not widen the header surface"
+
+
+@pytest.mark.parametrize("label", sorted(_V2_CALLS))
+def test_v2_endpoint_never_sends_minversion_to_legacy(label):
+    """devType 11 completes v2 writes without it; an unproven header there is risk, no upside."""
+    url, call, _ = _V2_CALLS[label]
+    assert _sent_header(url, call, _v2_client("111", 11), "111") is None, (
+        f"{label} must never send minversion to a legacy controller"
+    )
