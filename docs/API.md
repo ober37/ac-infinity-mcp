@@ -536,7 +536,7 @@ devId=REDACTED_DEV_ID&externalPort=1&onSpead=5&modeType=2&offSpead=0&...
 
 ---
 
-## All 38 Known API Quirks
+## All 39 Known API Quirks
 
 ### Quirk 1 — Auth typo: `appPasswordl`
 
@@ -827,7 +827,7 @@ on one controller and one account:
 | Ports exercised | **Port 6 only** for the header ablation — every row of both tables above is one port on one device. Port 8 carried a separate live write test; ports 1–8 were read |
 | Accounts | **1** |
 | Port state | The ablated port was **idle at `atType = 1` (OFF)** for every row. Quirk 37 establishes that this API branches on port mode, so "does the gate behave the same on a port in AUTO or VPD" is an open question, not a settled one |
-| Endpoints | **`addDevMode` only.** Reads were never ablated — they work without `minversion` and were not tested with it. The v2 Groups automation endpoints are separately unverified here; see #290 |
+| Endpoints | **`addDevMode` only.** Reads were never ablated — they work without `minversion` and were not tested with it. The v2 Groups endpoints are measured separately, with their own scope, in **Quirk 39** — and they do NOT all behave like this one |
 | `devType` 22 | **not verified** — no devType-22 hardware was available for the header ablation. Quirk 36's mode mapping agrees across 20 and 22, which is weak evidence the write gate is shared, but it is not a measurement of it |
 
 In the spirit of Quirk 33: this is a single-account, single-device result on a
@@ -846,12 +846,127 @@ the v2 endpoints.
 Treat "AI+ writes need `minversion`" as the strongest available
 reading of the evidence, not as a specification.
 
+**The gate covers part of the v2 surface too, and fails three different ways
+there.** That is a separate measurement with its own scope — see **Quirk 39**.
+Do not generalise this quirk's `addDevMode` result to the v2 Groups endpoints;
+two of the five do not need the header at all.
+
+**Legacy is deliberately not sent the header.** devType 11 completes v2 writes
+without it, so adding an unproven header there is risk with no upside.
+`_v2_headers(dev_id, minversion=...)` consults a devId→`ControllerType` map
+populated by `get_devices()` via `detect_controller_type`, so it classifies by
+exactly the same rule as every other caller — including `newFrameworkDevice`,
+which that function checks ahead of `devType`. An unclassified devId falls back
+to the legacy set, because a wrong "legacy" costs an AI+ write while a wrong
+"AI+" would send an untested header to hardware that currently works.
+
+A wrong "legacy" is recoverable but **not** loud. On `addGroups` it stalls for
+10s and `requests.exceptions.Timeout` is caught by no typed handler in the server
+layer, so the caller sees a generic error. The `WARNING` emitted when the class
+is unknown is the only specific signal. (An earlier version of this paragraph
+said it "fails loudly". It does not.)
+
 Detection:
 ```python
 from ac_infinity_mcp.controller import ControllerType, detect_controller_type
 ct = detect_controller_type(device_data)
 is_ai_plus = ct == ControllerType.NEW_FRAMEWORK  # devType >= 20 or newFrameworkDevice=True
 ```
+
+---
+
+### Quirk 39 — The v2 Groups surface is NOT uniform: three of five endpoints need `minversion`, and they fail three different ways without it
+
+Quirk 14 establishes that AI+ writes are gated by a `minversion: 3.5` header on
+`addDevMode`. That result does **not** transfer wholesale to the v2
+`/api/version=2.0/dev/*` Groups endpoints. Measured endpoint by endpoint, the
+surface splits three ways.
+
+| endpoint | without `minversion` | with `minversion` | header required? |
+|---|---|---|---|
+| `getGroups` (read) | `200` in **0.03s** | `200` in 0.03s | **no** |
+| `updateGroupsById` (edit) | ok in **1.51s** | ok in 1.55s | **no** |
+| `addGroups` (create) | **read timeout at 10.01s**, nothing created | ok in 1.44s | **YES** |
+| `updateGroupsIsOn` (toggle) | **`100001` in 7.09s** | `200` in 1.66s | **YES** |
+| `delByid` (delete) | **`100001` in 7.17s** | `200` in 1.69s | **YES** |
+
+**The three failure modes matter more than the table.**
+
+1. **Works** — `getGroups`, `updateGroupsById`. No header, no difference.
+2. **Loud reject, `100001`** — `updateGroupsIsOn`, `delByid`. This is the *same
+   body code* the v1 `addDevMode` path returns without the header (Quirk 14), so
+   the existing `100001` handler already names the right cause here.
+3. **Silent hang** — `addGroups` alone. No `100001`, no response, 10s read
+   timeout. This is the behaviour #290 recorded as "AI controllers may not
+   support the Groups/Advance-Automation API at all". They do.
+
+> **Correction.** An earlier version of this section said the gate "covers the v2
+> surface" and that a missing `minversion` there produces "no `100001`, no
+> response at all". Both are too broad. It covers three endpoints of five, and
+> two of those three *do* return `100001`. Only `addGroups` hangs.
+
+The hang is specific to a payload the server is willing to act on. The same
+endpoint answers instantly without `minversion` when it intends to reject:
+
+| v2 request on AI+, no `minversion` | Result |
+|---|---|
+| `addGroups`, malformed body (`devId` only) | `999999` in 0.1s |
+| `addGroups`, valid shape but `grouptDevType=0` (no ports) | `500` in 0.1s |
+| `addGroups`, valid with a real port mask | **timeout** |
+
+Only the create-with-real-ports path hangs, which is why the surface looked
+partly functional.
+
+The hardcoded `devType: "18"` in `_v2_headers()` is **not** the cause and is
+harmless — `minversion` alone decides it:
+
+| `addGroups` on AI+ | Result |
+|---|---|
+| `devType: 18`, no `minversion` | timeout |
+| `devType: 20`, no `minversion` | timeout |
+| `devType` header omitted entirely | timeout |
+| `devType: 18` + `minversion` | `200` in 0.6s |
+| `devType: 20` + `minversion` | `200` in 0.6s |
+
+**What the client does with this.** `_v2_headers(dev_id, *, minversion)` takes the
+gate per endpoint. The argument is keyword-only and required, so adding a sixth
+v2 endpoint forces a decision rather than inheriting one. `getGroups` and
+`updateGroupsById` pass `False`. They were measured **with** the header as well
+and were unaffected, so this is minimal header surface rather than risk
+avoidance, and widening it is a one-line change.
+
+**Verified scope — read this before generalising.**
+
+| | |
+|---|---|
+| Controller | `devType` **20** (89 AI+), 8 ports, classified `NEW_FRAMEWORK` |
+| Accounts | **1**, single session |
+| Ports exercised | **Port 8 only** |
+| Port state | **EMPTY** — `portResistance` 65535 (the Quirk 27 open-circuit sentinel), `loadState` 0, `speak` 0, asserted before every run |
+| Objects | automations created and deleted by the harness itself; two pre-existing automations were denylisted and never touched |
+| Endpoints | all five above |
+| State after | automation list byte-identical to before, on both runs |
+| `devType` 18 / 22 | **not verified** — no such hardware available |
+
+> **The port was empty, and that is the known weak spot.** Quirk 14's own
+> retraction records that an empty port invalidated AI+ conclusions *twice*
+> (see the retraction note in that section). The empty port was chosen
+> deliberately: this ran on a controller in a flowering room, and an automation
+> on a loaded port can energise equipment — #326 is that failure. So these rows
+> establish **API gating** — whether the request gets a response — and not
+> port-state-dependent behaviour. `addGroups` is the row most exposed to this,
+> because its failure mode is itself described as specific to "create with a real
+> port mask".
+
+**Reconciling with #326.** #326 records two `create_advance_automation(..., dry_run=False)`
+calls on this same devType 20 that *landed* and drove a light to full power —
+i.e. create-with-a-real-port-mask completing, which appears to contradict the
+`addGroups` timeout row. The two are not necessarily in conflict: #326 was
+recorded at firmware **12.8.15**, and this controller has since gone to
+**12.8.26** (Quirk 14 records that in-place update). It is also possible those
+creates ran with the header already present. **This has not been determined**,
+and it is stated here rather than resolved so the next reader does not take the
+timeout row as covering every firmware.
 
 ---
 
@@ -2232,6 +2347,13 @@ All endpoints below use the base URL `https://www.acinfinityserver.com/api` and 
 `Content-Type: application/x-www-form-urlencoded; charset=utf-8` plus `token: <appId>` header.
 They must **not** carry the `version`/`requestId` headers — the server rejects those with a
 misleading `403 "Login Expired"` body (see Quirk 33). All use HTTPS (TLSv1.3 — see Quirk 8).
+
+On an **AI+ controller** (`devType >= 20`), three of the Automation Management endpoints
+below additionally require `minversion: 3.5` — `addGroups`, `updateGroupsIsOn` and
+`delByid`. Without it `addGroups` never responds and the caller dies on a 10s read timeout,
+while the other two return `100001`. `getGroups` and `updateGroupsById` do not need it and
+are not sent it. Legacy controllers need it on no endpoint. See **Quirk 39** for the
+per-endpoint measurement and its scope, and Quirk 14 for the v1 `addDevMode` gate.
 
 ### Automation Management
 

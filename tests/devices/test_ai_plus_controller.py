@@ -3,6 +3,7 @@
 from unittest.mock import patch
 
 import pytest
+import responses as responses_lib
 
 from ac_infinity_mcp.client import ACInfinityClient
 from ac_infinity_mcp.controller import ControllerType, build_write_payload, detect_controller_type
@@ -589,3 +590,241 @@ def test_999999_speed_write_on_ai_plus_still_reroutes(ai_plus_device):
 
     assert "set_port_on" in str(exc.value)
     assert "on/off hardware" in str(exc.value)
+
+
+# ============ v2 Advance-Automation writes: the minversion gate (#290) ============
+#
+# Quirk 14 covers the v1 write path (addDevMode). It applies to the v2 surface
+# too, and the failure mode there is worse: without `minversion`, addGroups on an
+# AI+ never responds at all. The caller dies on the 10s read timeout, which is
+# what #290 recorded as "AI controllers may not support the Groups API".
+#
+# Measured on live devType-20 hardware, identical payload, one header differing:
+#
+#   no minversion   -> read timeout at 10.0s, nothing created
+#   + minversion    -> 200 success in 0.2s, automation created
+#
+# Legacy is deliberately NOT sent the header: devType 11 already works without
+# it, so adding an unproven header there is risk with no upside.
+
+
+def _client_with_devices(*devices):
+    """Seed the classification cache the way get_devices() would.
+
+    devId is a string here because Quirk 7 says the API sends it as one, and
+    tests/conftest.py:12-19 removed the int-shaped fixtures for that reason.
+    Classification goes through detect_controller_type so these fixtures cannot
+    drift from what the real populate path produces.
+    """
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    for dev_id, dev_type in devices:
+        c._ctypes[str(dev_id)] = detect_controller_type({"devId": str(dev_id), "devType": dev_type})
+    return c
+
+
+def test_v2_headers_carry_minversion_for_ai_plus():
+    c = _client_with_devices((999, 20))
+    assert c._v2_headers("999", minversion=True)["minversion"] == AI_PLUS_MINVERSION
+
+
+def test_v2_headers_omit_minversion_for_legacy():
+    """devType 11 works without it — do not send an unproven header there."""
+    c = _client_with_devices((111, 11))
+    assert "minversion" not in c._v2_headers("111", minversion=True)
+
+
+def test_v2_headers_omit_minversion_when_class_unknown():
+    """An unclassified device falls back to the legacy header set, not a guess.
+
+    A wrong "legacy" costs an AI+ write; a wrong "AI+" would send an unproven
+    header to hardware that currently works, so the fallback is the safe one.
+    The cost is a 10s stall, not a loud failure — hence the WARNING in
+    _is_new_framework.
+    """
+    c = _client_with_devices()
+    assert "minversion" not in c._v2_headers("not-in-cache", minversion=True)
+
+
+def test_v2_headers_requires_dev_id():
+    """dev_id is required so a new endpoint cannot silently get legacy headers."""
+    c = _client_with_devices((999, 20))
+    with pytest.raises(TypeError):
+        c._v2_headers()
+
+
+def test_new_framework_flag_beats_a_legacy_devtype():
+    """newFrameworkDevice is authoritative ahead of devType, as controller.py has it.
+
+    The previous devType-only rule classified this device LEGACY here while every
+    other caller saw NEW_FRAMEWORK.
+    """
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    c._ctypes["42"] = detect_controller_type({"devId": "42", "newFrameworkDevice": True})
+    assert c._is_new_framework("42") is True
+    assert c._v2_headers("42", minversion=True)["minversion"] == AI_PLUS_MINVERSION
+
+
+def test_v2_headers_legacy_set_is_otherwise_unchanged():
+    """The AI+ path adds exactly one key and alters nothing else."""
+    c = _client_with_devices((999, 20), (111, 11))
+    ai, legacy = c._v2_headers("999", minversion=True), c._v2_headers("111", minversion=True)
+    assert set(ai) - set(legacy) == {"minversion"}
+    assert {k: v for k, v in ai.items() if k != "minversion"} == legacy
+
+
+@pytest.mark.parametrize("dev_type,expected", [(11, False), (18, False), (20, True), (22, True)])
+def test_is_new_framework_threshold(dev_type, expected):
+    c = _client_with_devices((7, dev_type))
+    assert c._is_new_framework("7") is expected
+
+
+def test_get_devices_populates_the_class_cache():
+    """The cache is what lets _v2_headers tell the controllers apart."""
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    payload = {"code": 200, "data": [
+        {"devId": "1", "devType": 20},
+        {"devId": "2", "devType": 11},
+    ]}
+
+    class _R:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return payload
+
+    with patch.object(c.session, "post", lambda *a, **k: _R()):
+        c.get_devices()
+    assert c._ctypes == {
+        "1": ControllerType.NEW_FRAMEWORK,
+        "2": ControllerType.LEGACY,
+    }
+
+
+def test_get_devices_ignores_entries_with_unusable_devtype():
+    """A malformed entry must not poison the cache or raise.
+
+    "20" as a string is NOT malformed — Quirk 7 says this API sends devId as a
+    string and devType as "20", and detect_controller_type coerces it. An earlier
+    version of this test asserted the string form was dropped, which contradicted
+    test_stringified_devtype_still_classifies 625 lines above it and would have
+    silently disabled the minversion header on exactly the controllers that need
+    it. Only genuinely unreadable shapes are skipped.
+    """
+    c = ACInfinityClient("test@example.com", "pw")
+    c.token = "tok"
+    payload = {"code": 200, "data": [
+        {"devId": "1", "devType": 20},
+        {"devId": "2", "devType": "20"},    # string — a documented shape
+        {"devId": "3"},                     # devType missing -> defaults to 0
+        {"devType": 20},                    # no devId, unaddressable
+        {"devId": "5", "devType": "brick"}, # genuinely unreadable -> uncached
+    ]}
+
+    class _R:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return payload
+
+    with patch.object(c.session, "post", lambda *a, **k: _R()):
+        c.get_devices()
+
+    assert c._ctypes == {
+        "1": ControllerType.NEW_FRAMEWORK,
+        "2": ControllerType.NEW_FRAMEWORK,   # the string form classifies
+        "3": ControllerType.LEGACY,          # absent devType defaults to 0
+    }
+    # "brick" raises inside detect_controller_type and is left uncached, which
+    # falls back to legacy headers for that device only.
+    assert "5" not in c._ctypes
+
+
+# ===================== #290 round 1, finding 2 — wire-level guards =====================
+#
+# Ober's finding: "revert any single one of the six edits — say client.py:1745 back to
+# self._v2_headers() — and the whole suite stays green. addGroups is the one site your own
+# data proves is load-bearing, and it's the one with no test."
+#
+# Every assertion below is on the CAPTURED OUTGOING REQUEST, following the existing pattern
+# at test_client.py:1123. Reverting any single call site fails at least one of these.
+#
+# The expected values are measured, not assumed — live devType 20, identical payload, the
+# header the only variable (Quirk 39). See docs/API.md.
+
+V2 = "https://www.acinfinityserver.com/api/version=2.0/dev"
+_GET_GROUPS = f"{V2}/getGroups"
+_ADD_GROUPS = f"{V2}/addGroups"
+_UPDATE_BY_ID = f"{V2}/updateGroupsById"
+_IS_ON = f"{V2}/updateGroupsIsOn"
+_DEL_BY_ID = f"{V2}/delByid"
+
+# endpoint label -> (url, call, minversion expected on an AI+)
+#
+# True  = measured to FAIL without the header on devType 20.
+# False = measured to WORK without it, so it is not sent (minimal header surface).
+_V2_CALLS = {
+    "getGroups": (
+        _GET_GROUPS, lambda c, d: c.get_advance_automations(d), False,
+    ),
+    "updateGroupsById": (
+        _UPDATE_BY_ID, lambda c, d: c.update_advance_automation(d, {"advId": 5}), False,
+    ),
+    "addGroups": (
+        _ADD_GROUPS, lambda c, d: c.create_advance_automation(d, {"advName": "x"}), True,
+    ),
+    "updateGroupsIsOn/enable": (
+        _IS_ON, lambda c, d: c.enable_advance_automation(d, 5), True,
+    ),
+    "updateGroupsIsOn/disable": (
+        _IS_ON, lambda c, d: c.disable_advance_automation(d, 5), True,
+    ),
+    "delByid": (
+        _DEL_BY_ID, lambda c, d: c.delete_advance_automation(d, 5), True,
+    ),
+}
+
+
+def _v2_client(dev_id, dev_type):
+    c = _client_with_devices((dev_id, dev_type))
+    c.token = "tok"
+    c._last_write_time = 0.0
+    return c
+
+
+def _sent_header(url, call, c, dev_id):
+    """Run call against a mocked endpoint and return the outgoing minversion header."""
+    with responses_lib.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        rsps.add(responses_lib.POST, url,
+                 json={"code": 200, "msg": "success.", "data": []}, status=200)
+        try:
+            call(c, dev_id)
+        except Exception:
+            # The response body is a stub; only the OUTGOING request matters here.
+            pass
+        sent = rsps.calls[0].request
+    return sent.headers.get("minversion")
+
+
+@pytest.mark.parametrize("label", sorted(_V2_CALLS))
+def test_v2_endpoint_sends_minversion_only_where_measured_necessary(label):
+    """AI+ (devType 20): the header goes to the endpoints that reject without it, and no others."""
+    url, call, expected = _V2_CALLS[label]
+    got = _sent_header(url, call, _v2_client("999", 20), "999")
+    if expected:
+        assert got == AI_PLUS_MINVERSION, f"{label} must carry minversion on an AI+"
+    else:
+        assert got is None, f"{label} works without minversion — do not widen the header surface"
+
+
+@pytest.mark.parametrize("label", sorted(_V2_CALLS))
+def test_v2_endpoint_never_sends_minversion_to_legacy(label):
+    """devType 11 completes v2 writes without it; an unproven header there is risk, no upside."""
+    url, call, _ = _V2_CALLS[label]
+    assert _sent_header(url, call, _v2_client("111", 11), "111") is None, (
+        f"{label} must never send minversion to a legacy controller"
+    )

@@ -1112,7 +1112,7 @@ def test_get_devices_10003_refresh_failure_caches_and_short_circuits(authed_clie
 def test_v2_headers_omit_version_and_request_id(authed_client):
     """#298 — the server rejects any v2 request carrying `version` or `requestId`.
     Both must be absent from _v2_headers(); token/Host/User-Agent stay present."""
-    headers = authed_client._v2_headers()
+    headers = authed_client._v2_headers("12345", minversion=True)
     assert "version" not in headers
     assert "requestId" not in headers
     assert headers["token"] == authed_client.token

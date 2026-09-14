@@ -105,9 +105,15 @@ a vulnerability.
 
 The AI+ write path (`devType >= 20`) sends one additional spoofed header,
 `minversion: 3.5`, and **no** extra `User-Agent` — the table above is complete.
-That header is an opaque server-side gate rather than an app identity: without it
-`addDevMode` returns `100001`, and only the literal string `"3.5"` is accepted
-(see `docs/API.md` Quirk 14 for the ablation). Three further app-identity headers
+It is sent on `addDevMode` and on three of the five v2 Groups endpoints, not on
+every request.
+That header is an opaque server-side gate rather than an app identity, and only
+the literal string `"3.5"` is accepted. Without it, three distinct things happen
+depending on the endpoint: `addDevMode`, `updateGroupsIsOn` and `delByid` return
+`100001`; `addGroups` returns nothing at all and the caller dies on a 10s read
+timeout; `getGroups` and `updateGroupsById` are unaffected and are therefore not
+sent the header. See `docs/API.md` Quirk 14 for the v1 ablation and **Quirk 39**
+for the per-endpoint v2 measurement. Three further app-identity headers
 were tested and proven unnecessary, so they are deliberately not sent — every
 declared header is surface for the kind of upstream tightening that broke the v2
 endpoints in #298. The exact value is locked by a regression test mirroring the

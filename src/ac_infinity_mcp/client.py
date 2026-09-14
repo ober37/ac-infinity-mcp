@@ -745,6 +745,15 @@ class ACInfinityClient:
         self._write_lock = threading.Lock()
         self._auth_lock = threading.Lock()
         self._auth_error: ACInfinityAuthError | None = None
+        # devId -> ControllerType, upserted by get_devices() and never cleared.
+        #
+        # Classification goes through detect_controller_type rather than a local
+        # devType test, so this agrees with every other caller by construction. A
+        # second, looser rule here is exactly how "20" comes to be an AI+ on one
+        # write path and unusable on another, for the same device dict — and it
+        # also silently skipped newFrameworkDevice, which detect_controller_type
+        # treats as authoritative ahead of devType.
+        self._ctypes: dict[str, ControllerType] = {}
 
     def _raise_for_api_code(
         self,
@@ -966,6 +975,22 @@ class ACInfinityClient:
             self._raise_for_api_code(code, error_msg, "Devices")
 
         devices = result.get("data", [])
+        for _d in devices:
+            _dev_id = _d.get("devId")
+            if _dev_id is None:
+                continue
+            try:
+                self._ctypes[str(_dev_id)] = detect_controller_type(_d)
+            except ACInfinityDeviceError as e:
+                # Leave it uncached, which falls back to legacy v2 headers. The
+                # try is required: detect_controller_type raises rather than
+                # guessing, and one malformed entry must not fail the whole
+                # device list.
+                logger.warning(
+                    "Cannot classify devId=%s (%s) — v2 writes to it will use "
+                    "legacy headers. Every other device in this response is "
+                    "unaffected.", _dev_id, e,
+                )
         logger.info("Fetched %d devices", len(devices))
         return devices
 
@@ -1485,8 +1510,66 @@ class ACInfinityClient:
 
     # ============ v2.0 Automation Management Methods ============
 
-    def _v2_headers(self) -> dict[str, str]:
+    def _is_new_framework(self, dev_id: str) -> bool:
+        """True when dev_id is a known NEW_FRAMEWORK (AI+) controller.
+
+        The classification is whatever detect_controller_type decided at
+        get_devices() time — including its newFrameworkDevice check, which it
+        applies ahead of devType. This function deliberately re-derives nothing.
+
+        Falls back to False when the device was never classified, which yields
+        the legacy header set: the behaviour every controller had before AI+
+        support. A wrong False costs an AI+ write; a wrong True would send an
+        unproven header to legacy hardware, so False is the safe default.
+
+        A wrong False is recoverable but NOT loud. The write dies on the 10s read
+        timeout, and requests.exceptions.Timeout is not caught by any typed
+        handler in the server layer, so the grower sees a generic error after a
+        ten-second stall. The WARNING below is the only specific signal, which is
+        why it is not INFO.
+        """
+        ctype = self._ctypes.get(str(dev_id))
+        if ctype is None:
+            logger.warning(
+                "Controller class unknown for devId=%s — using legacy v2 "
+                "headers. If this is an AI+, the write will stall for 10s and "
+                "fail. Call get_devices() first.", dev_id,
+            )
+            return False
+        return ctype is ControllerType.NEW_FRAMEWORK
+
+    def _v2_headers(self, dev_id: str, *, minversion: bool) -> dict[str, str]:
         """Build the additional headers required for v2.0 API endpoints.
+
+        Both arguments are required, not defaulted. A defaulted argument means a
+        future seventh v2 endpoint that forgets it type-checks, passes mypy, and
+        silently gets the wrong header set — reintroducing #290 on that path with
+        no signal. Required makes the omission a TypeError at the call site, and
+        forces whoever adds an endpoint to decide which side of the gate it is on.
+
+        ``minversion`` says whether THIS endpoint needs the AI+ gate header. It is
+        per-endpoint because the v2 surface is not uniform — measured on a live
+        devType 20, identical payloads, header the only variable (Quirk 39):
+
+        ============================  =========================  ==============
+        endpoint                      without minversion         header needed
+        ============================  =========================  ==============
+        getGroups (read)              0.03s, code 200            no
+        updateGroupsById (edit)       1.51s, ok                  no
+        addGroups (create)            10.01s read timeout        YES
+        updateGroupsIsOn (toggle)     7.09s, API code 100001     YES
+        delByid (delete)              7.17s, API code 100001     YES
+        ============================  =========================  ==============
+
+        Note the three distinct failure modes. Only ``addGroups`` hangs silently;
+        ``updateGroupsIsOn`` and ``delByid`` reject loudly with 100001 — the same
+        code the v1 ``addDevMode`` path returns without the header (Quirk 14).
+
+        The two endpoints that do not need it are sent without it, per the
+        principle this module already applies across controller classes: keep the
+        header surface minimal. They were measured WITH it as well and were
+        unaffected, so flipping them is a one-line change, not a risk.
+
 
         The `version` and `requestId` headers are intentionally omitted (Issue #298):
         the server now rejects any v2 request that carries either one — absent a valid
@@ -1498,7 +1581,7 @@ class ACInfinityClient:
         header alone (the same posture the legacy v1 endpoints rely on). The remaining
         app-identity headers are accepted by the server and left in place.
         """
-        return {
+        headers = {
             "token": self.token or "",
             "Host": "www.acinfinityserver.com",
             "User-Agent": "okhttp/3.10.0",
@@ -1509,6 +1592,15 @@ class ACInfinityClient:
             "languageType": "en-US",
             "languageVersion": "idongle_pro_3",
         }
+        if minversion and self._is_new_framework(dev_id):
+            # Quirk 14 applies to part of the v2 surface. Without this header,
+            # addGroups on an AI+ does not reject — it never responds, and the
+            # caller dies on the 10s read timeout (#290); updateGroupsIsOn and
+            # delByid do reject, with 100001. Legacy controllers need it on no
+            # endpoint and are deliberately not sent it: they already work, so
+            # adding an unproven header there is risk without upside.
+            headers["minversion"] = _AI_PLUS_MINVERSION
+        return headers
 
     def get_advance_automations(self, dev_id: str) -> list[dict]:
         """Fetch all automation group entries for a device (with transparent 401 refresh).
@@ -1545,7 +1637,8 @@ class ACInfinityClient:
         resp = self.session.post(
             self.V2_GET_GROUPS_ENDPOINT,
             data={"devId": dev_id},
-            headers=self._v2_headers(),
+            # getGroups: measured 0.03s/200 without it
+            headers=self._v2_headers(dev_id, minversion=False),
             timeout=10,
         )
         resp.raise_for_status()
@@ -1597,7 +1690,8 @@ class ACInfinityClient:
             resp = self.session.post(
                 self.V2_UPDATE_GROUPS_IS_ON_ENDPOINT,
                 data={"advId": adv_id, "isDel": 0, "isflag": 1},
-                headers=self._v2_headers(),
+                # updateGroupsIsOn: API code 100001 without it
+                headers=self._v2_headers(dev_id, minversion=True),
                 timeout=10,
             )
         finally:
@@ -1652,7 +1746,8 @@ class ACInfinityClient:
             resp = self.session.post(
                 self.V2_UPDATE_GROUPS_IS_ON_ENDPOINT,
                 data={"advId": adv_id, "isDel": 0, "isflag": 1},
-                headers=self._v2_headers(),
+                # updateGroupsIsOn: API code 100001 without it
+                headers=self._v2_headers(dev_id, minversion=True),
                 timeout=10,
             )
         finally:
@@ -1707,7 +1802,8 @@ class ACInfinityClient:
             resp = self.session.post(
                 self.V2_ADD_GROUPS_ENDPOINT,
                 data=form_data,
-                headers=self._v2_headers(),
+                # addGroups: 10s silent hang without it (#290)
+                headers=self._v2_headers(dev_id, minversion=True),
                 timeout=10,
             )
         finally:
@@ -1762,7 +1858,8 @@ class ACInfinityClient:
             resp = self.session.post(
                 self.V2_UPDATE_GROUPS_BY_ID_ENDPOINT,
                 data=form_data,
-                headers=self._v2_headers(),
+                # updateGroupsById: measured ok without it
+                headers=self._v2_headers(dev_id, minversion=False),
                 timeout=10,
             )
         finally:
@@ -1824,7 +1921,8 @@ class ACInfinityClient:
             resp = self.session.post(
                 self.V2_DEL_BY_ID_ENDPOINT,
                 data={"advId": adv_id, "isDel": 1, "isflag": 1 if whole_program else 0},
-                headers=self._v2_headers(),
+                # delByid: API code 100001 without it
+                headers=self._v2_headers(dev_id, minversion=True),
                 timeout=10,
             )
         finally:
