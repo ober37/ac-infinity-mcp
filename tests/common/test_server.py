@@ -11597,3 +11597,93 @@ async def test_unreadable_devtype_preview_still_works(mock_client):
     }
     data = json.loads(await apply_grow_stage_template("D89XA", 1, "veg", dry_run=True))
     assert "error" not in data
+
+
+# ============ #322 — toggle ports must not be asserted as "on" ============
+#
+# Quirk 22: AC Infinity emits nibble 0xF (decoded speed 1) for toggle hardware even when
+# it is physically off. get_historical_readings used to present that as fact —
+# port_statistics reported min=avg=max=1.0, and every reading carried "on": true, a value
+# this project DERIVES as speed > 0 rather than receiving from the API.
+#
+# The caveat is keyed on the PATTERN, not on loadType. Measured 2026-09-14 on a live
+# devType 20: every port reported loadType 0, including two that were actively running at
+# speak 4 and 5. _TOGGLE_LOAD_TYPES cannot fire on that hardware, which is why keying on
+# the load signal would have left exactly the affected controllers unprotected.
+
+
+def _hist_stub(mock_client, port_series):
+    """port_series: {port_name: [speed, speed, ...]} — all lists the same length."""
+    n = len(next(iter(port_series.values())))
+    base = 1714000000
+    mock_client.get_historical_data.return_value = [
+        {"createTime": base + i * 3600} for i in range(n)
+    ]
+
+    def _parse(r, port_names=None):
+        i = (r["createTime"] - base) // 3600
+        return {
+            "timestamp": f"2024-04-25T{i:02d}:00:00Z",
+            "temperature_c": 24.0, "temperature_f": 75.2,
+            "humidity": 55.0, "vpd": 1.5,
+            "ports": [
+                {"port": n_ + 1, "name": name, "speed": speeds[i], "on": speeds[i] > 0}
+                for n_, (name, speeds) in enumerate(port_series.items())
+            ],
+        }
+
+    mock_client.parse_history_record.side_effect = _parse
+
+
+async def test_322_constant_speed_one_port_is_flagged(mock_client):
+    """A port flat at speed 1 gets the caveat; a genuinely varying one does not."""
+    _hist_stub(mock_client, {
+        "Exhaust": [4, 5, 4, 5, 4, 5],   # real, varying
+        "SupLights": [1, 1, 1, 1, 1, 1],  # the artifact
+    })
+    out = json.loads(
+        await get_historical_readings("C58ZA", "2024-04-25", "2024-04-25", "raw")
+    )
+    ps = out["statistics"]["port_statistics"]
+    assert ps["SupLights"]["data_quality"] == "api_constant_speed"
+    assert "may have been OFF" in ps["SupLights"]["caveat"]
+    assert "data_quality" not in ps["Exhaust"]
+
+
+async def test_322_caveat_is_lifted_to_the_envelope(mock_client):
+    """A caller reading only readings[] must still be warned — that is the whole issue."""
+    _hist_stub(mock_client, {
+        "Exhaust": [4, 5, 4, 5],
+        "SupLights": [1, 1, 1, 1],
+    })
+    out = json.loads(
+        await get_historical_readings("C58ZA", "2024-04-25", "2024-04-25", "raw")
+    )
+    assert "SupLights" in out["data_quality_warning"]
+    assert "Exhaust" not in out["data_quality_warning"]
+
+
+async def test_322_no_false_caveat_when_nothing_is_flat_at_one(mock_client):
+    """No warning when every port genuinely varies."""
+    _hist_stub(mock_client, {"Exhaust": [4, 5, 4, 5]})
+    out = json.loads(
+        await get_historical_readings("C58ZA", "2024-04-25", "2024-04-25", "raw")
+    )
+    assert "data_quality" not in out["statistics"]["port_statistics"]["Exhaust"]
+    assert "data_quality_warning" not in out
+
+
+async def test_322_caveat_names_the_derived_on_field(mock_client):
+    """The caveat must name "on" as derived — that is the false assertion #322 is about."""
+    _hist_stub(mock_client, {"UV": [1, 1, 1, 1]})
+    out = json.loads(
+        await get_historical_readings("C58ZA", "2024-04-25", "2024-04-25", "raw")
+    )
+    caveat = out["statistics"]["port_statistics"]["UV"]["caveat"]
+    assert '"on"' in caveat
+    assert "derived" in caveat
+    # the readings still carry on:true — that is exactly the artifact being flagged
+    assert all(
+        p["on"] is True
+        for r in out["readings"] for p in r["ports"] if p["name"] == "UV"
+    )
