@@ -1163,6 +1163,15 @@ async def get_historical_readings(
         ``"dropped_readings"`` (count) and ``"drop_reason"``. See docs/API.md for full
         shape.
 
+        A port whose speed is a flat 1 across the whole window carries
+        ``"data_quality": "api_constant_speed"`` and a ``"caveat"`` in its
+        ``port_statistics`` entry, and the response carries a top-level
+        ``"data_quality_warning"``. AC Infinity records toggle devices as always-on at
+        speed 1 regardless of real runtime (Quirk 22), so such a port may have been OFF
+        for the entire window. The per-reading ``"on"`` field is derived as
+        ``speed > 0``, not reported by the API, so it is unreliable for those ports —
+        do not compute runtime from it.
+
         On failure returns ``{"error": "...", "detail": "..."}``.
     """
     try:
@@ -1267,20 +1276,55 @@ async def get_historical_readings(
             vpds = [r.get("vpd", 0) for r in sampled if "vpd" in r]
 
             port_stats: dict = {}
+            flagged_ports: list[str] = []
             for r in sampled:
                 for port in r.get("ports", []):
                     name = port.get("name", f"Port {port.get('port')}")
                     port_stats.setdefault(name, []).append(port.get("speed", 0))
 
-            port_statistics = {
-                name: {
+            # Quirk 22 / #322. AC Infinity emits nibble 0xF (decoded speed 1) for toggle
+            # hardware even when it is physically off, so a port that reads a flat 1 for
+            # the whole window may never have run. This tool used to present that as
+            # fact: port_statistics reported min=avg=max=1.0, and every reading carried
+            # "on": true, which this project DERIVES as speed > 0 rather than receiving
+            # from the API.
+            #
+            # The caveat is keyed on the PATTERN, not on loadType, deliberately. The
+            # load signal is absent on exactly the controllers that need this: measured
+            # 2026-09-14 on a live devType 20, every port reports loadType 0 — including
+            # port 1 and port 2, which were actively running at speak 4 and 5. So
+            # _TOGGLE_LOAD_TYPES cannot fire there, and get_port_activity_report's
+            # existing guard silently misses AI+ for the same reason (filed separately).
+            #
+            # The pattern mirrors build_activity_report's is_toggle_pattern: zero
+            # transitions, 100% uptime, every running speed 1. In a history series with
+            # no zeros that reduces to "every speed is 1". Accepted trade-off, identical
+            # to the one analytics.py already documents: a variable-speed device
+            # genuinely pinned at 1 for the entire window is indistinguishable and will
+            # be flagged too. A caveat on a real port is cheaper than a false assertion
+            # about an idle one.
+            port_statistics = {}
+            for name, speeds in sorted(port_stats.items()):
+                if not any(s > 0 for s in speeds):
+                    continue
+                entry: dict = {
                     "min": round(min(speeds), 2),
                     "avg": round(sum(speeds) / len(speeds), 2),
                     "max": round(max(speeds), 2),
                 }
-                for name, speeds in sorted(port_stats.items())
-                if any(s > 0 for s in speeds)
-            }
+                if all(s == 1 for s in speeds):
+                    flagged_ports.append(name)
+                    entry["data_quality"] = "api_constant_speed"
+                    entry["caveat"] = (
+                        "This port read a constant speed of 1 for the whole window. "
+                        "AC Infinity records toggle devices (lights, heaters, "
+                        "humidifiers, anything on a switched outlet) as always-on at "
+                        "speed 1 regardless of actual runtime, so this port may have "
+                        "been OFF the entire time. The per-reading \"on\" field is "
+                        "derived from speed > 0 and is unreliable here. Do not compute "
+                        "runtime from it. Check live port state instead."
+                    )
+                port_statistics[name] = entry
 
             temps_preferred = [_to_preferred_temp(tc, unit) for tc in temps_c]
             stats = {
@@ -1310,12 +1354,22 @@ async def get_historical_readings(
             }
         else:
             stats = {"error": "No data available after sampling"}
+            flagged_ports = []
 
         response: dict = {
             "device_id": device_id,
             "readings": output_readings,
             "statistics": stats,
         }
+        # Lift the per-port caveat to the envelope. A caller that reads readings[] and
+        # never opens statistics.port_statistics would otherwise consume "on": true as
+        # a fact — which is the whole of #322.
+        if flagged_ports:
+            response["data_quality_warning"] = (
+                f"{', '.join(flagged_ports)}: constant speed 1 across the whole window. "
+                "May have been OFF throughout — see statistics.port_statistics for "
+                "detail. Runtime and \"on\" values for these ports are not reliable."
+            )
         if dropped_readings:
             response["dropped_readings"] = dropped_readings
             response["drop_reason"] = "malformed timestamp"
