@@ -2057,6 +2057,73 @@ def _decode_mode(mode_int: int | None) -> str:
 _MODE_AT_TYPES: dict[str, int] = {v: k for k, v in _MODE_LABELS.items()}
 
 
+def _temp_pair(low: object, high: object) -> tuple[float, float] | None:
+    """Coerce a stored (low, high) trigger pair to floats, or None if unusable.
+
+    Values arrive as ints on every capture we have, but the API is
+    inconsistently typed elsewhere (Quirk 20 sensors ship strings), so this
+    coerces rather than assuming and treats anything unparseable as absent.
+    """
+    if low is None or high is None:
+        return None
+    try:
+        return (float(low), float(high))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_temp_trigger(settings: dict, unit: str) -> tuple[float, float]:
+    """Return the (low, high) temperature triggers already in the device's unit.
+
+    The API stores each trigger twice — ``devLt``/``devHt`` in °C and
+    ``devLtf``/``devHtf`` in °F — and which pair carries the real value depends
+    on the controller (Quirk 40):
+
+    - devType 11 (legacy): both pairs populated and mutually consistent.
+    - devType 20 (AI+): ``devLt``/``devHt`` are always ``0``; only °F is real.
+
+    Reading the °C pair unconditionally therefore renders *every* AI+
+    temperature trigger as 0 °C / 32 °F, including ones the grower can watch
+    working in the app.
+
+    Prefer the pair matching the device's own display unit — that is the one the
+    grower set, so it is exact rather than round-tripped through a conversion (a
+    legacy port storing 27 °C / 80 °F should report 80 °F, not the 80.6 °F that
+    converting the °C value would give). Fall back to the other pair when the
+    preferred one is absent or still at its unset default, which is what makes
+    AI+ work: its °C pair is always the unset ``(0, 0)``.
+    """
+    pair_c = _temp_pair(settings.get("devLt"), settings.get("devHt"))
+    pair_f = _temp_pair(settings.get("devLtf"), settings.get("devHtf"))
+
+    # The unset default, expressed in each scale: 0 °C is exactly 32 °F.
+    unset_c = (0.0, 0.0)
+    unset_f = (32.0, 32.0)
+
+    if unit == "C":
+        if pair_c is not None and pair_c != unset_c:
+            lo, hi = pair_c
+        elif pair_f is not None:
+            lo = (pair_f[0] - 32) * 5 / 9
+            hi = (pair_f[1] - 32) * 5 / 9
+        elif pair_c is not None:
+            lo, hi = pair_c
+        else:
+            lo, hi = unset_c
+        return (round(lo, 1), round(hi, 1))
+
+    if pair_f is not None and pair_f != unset_f:
+        lo, hi = pair_f
+    elif pair_c is not None and pair_c != unset_c:
+        lo = pair_c[0] * 9 / 5 + 32
+        hi = pair_c[1] * 9 / 5 + 32
+    elif pair_f is not None:
+        lo, hi = pair_f
+    else:
+        lo, hi = unset_f
+    return (round(lo, 1), round(hi, 1))
+
+
 def _format_schedule_time(minutes: int | None) -> str | None:
     """Convert minutes-since-midnight to HH:MM string. Returns None when disabled.
 
@@ -2521,11 +2588,10 @@ async def get_port_settings(device_id: str, port: int) -> str:
 
         temp_range = None
         if settings.get("activeLt") or settings.get("activeHt"):
-            min_c_raw = settings.get("devLt", 0)
-            max_c_raw = settings.get("devHt", 0)
+            _t_lo, _t_hi = _resolve_temp_trigger(settings, _unit)
             temp_range = {
-                "min": _to_preferred_temp(float(min_c_raw), _unit),
-                "max": _to_preferred_temp(float(max_c_raw), _unit),
+                "min": _t_lo,
+                "max": _t_hi,
                 "unit": _unit_lbl,
             }
 
@@ -2552,21 +2618,75 @@ async def get_port_settings(device_id: str, port: int) -> str:
         _port_name_str = (
             port_data.get("portName", f"Port {port}") if port_data else f"Port {port}"
         )
-        if temp_range:
-            _t_min = temp_range["min"]
-            _t_max = temp_range["max"]
-            human_summary = (
-                f"Temperature automation: {_t_min}–{_t_max}{_unit_lbl}. "
-                f"Fan speeds up above {_t_max}{_unit_lbl} and slows below {_t_min}{_unit_lbl}."
-            )
-        elif vpd_target is not None:
-            human_summary = f"VPD automation: target {vpd_target} kPa."
-        elif humi_range:
-            human_summary = (
-                f"Humidity automation: {humi_range['min_pct']}–{humi_range['max_pct']}%."
-            )
+        # The summary must describe what the port is DOING, which is decided by
+        # atType — not by whichever stored threshold happens to be populated.
+        # Thresholds persist across mode changes, so a port sitting in OFF can
+        # still carry an active-looking temperature range from a previous
+        # configuration. Reporting that as behaviour ("Fan speeds up above
+        # 82.0°F") states something the controller is not doing.
+        #
+        # Only AUTO and VPD are trigger-driven. Within AUTO both the temperature
+        # and humidity families can be live at once, so they are joined rather
+        # than ranked — the previous first-match chain silently dropped whichever
+        # came second.
+        _clauses: list[str] = []
+        if mode_str == "AUTO":
+            # Each trigger is reported only if ITS OWN enable flag is set. temp_range
+            # and humi_range above are gated per FAMILY (low OR high), so a port with
+            # only its high trigger enabled still carries a stored low value — the
+            # 32°F unset default on AI+, but a real stored number on legacy (a live
+            # devType 11 exhaust holds 50°F with activeLt 0). Stating that as
+            # behaviour is the defect this block already fixes at the mode level,
+            # one level down: a bound the controller is not acting on.
+            if temp_range:
+                _lt_on = bool(settings.get("activeLt"))
+                _ht_on = bool(settings.get("activeHt"))
+                _t_min, _t_max = temp_range["min"], temp_range["max"]
+                if _lt_on and _ht_on:
+                    _clauses.append(
+                        f"Temperature automation: {_t_min}–{_t_max}{_unit_lbl}. "
+                        f"Fan speeds up above {_t_max}{_unit_lbl} and slows below "
+                        f"{_t_min}{_unit_lbl}."
+                    )
+                elif _ht_on:
+                    _clauses.append(
+                        f"Temperature automation: fan speeds up above {_t_max}{_unit_lbl}."
+                    )
+                elif _lt_on:
+                    _clauses.append(
+                        f"Temperature automation: fan slows below {_t_min}{_unit_lbl}."
+                    )
+            if humi_range:
+                _lh_on = bool(settings.get("activeLh"))
+                _hh_on = bool(settings.get("activeHh"))
+                if _lh_on and _hh_on:
+                    _clauses.append(
+                        f"Humidity automation: {humi_range['min_pct']}–"
+                        f"{humi_range['max_pct']}%."
+                    )
+                elif _hh_on:
+                    _clauses.append(
+                        f"Humidity automation: high trigger at {humi_range['max_pct']}%."
+                    )
+                elif _lh_on:
+                    _clauses.append(
+                        f"Humidity automation: low trigger at {humi_range['min_pct']}%."
+                    )
+        elif mode_str == "VPD" and vpd_target is not None:
+            _clauses.append(f"VPD automation: target {vpd_target} kPa.")
+
+        if _clauses:
+            human_summary = " ".join(_clauses)
         else:
             human_summary = f"Port is in {mode_str} mode."
+            # Stored thresholds a mode change left behind are still worth
+            # surfacing — they are what the port would use if switched back —
+            # but as stored config, not as current behaviour.
+            if temp_range or humi_range or vpd_target is not None:
+                human_summary += (
+                    " It has stored automation settings, but they are not active "
+                    f"in {mode_str} mode."
+                )
 
         _cycle_on = settings.get("activeCycleOn") or 0
         _cycle_off = settings.get("activeCycleOff") or 0
