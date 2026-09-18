@@ -1,5 +1,6 @@
 """Unit tests for ACInfinityClient — data parsing and HTTP methods."""
 
+import math
 from unittest.mock import patch
 
 import pytest
@@ -7,6 +8,7 @@ import requests
 import responses as responses_lib
 
 from ac_infinity_mcp.client import ACInfinityClient
+from ac_infinity_mcp.formatting import _to_preferred_temp
 from ac_infinity_mcp.schema import (
     ACInfinityAdvanceConflictError,
     ACInfinityAPIError,
@@ -2439,6 +2441,45 @@ def test_parse_device_data_probe_sensor_unit_flag_fahrenheit(client):
     probe = _probe_group(port=2, temp=6630, sensorUnit=0)
     probes = client.parse_device_data(_probe_device(_onboard_group() + probe))["probes"]
     assert probes[0]["temperature_c"] == pytest.approx(19.1, abs=0.05)
+
+
+# ---- probe precision (Issue #324) ----
+#
+# A plug-in probe's native scale is usually Fahrenheit, so a rounded Celsius
+# intermediate is not reversible: 66.30 F came back out as 66.4 F, and a probe
+# reading exactly 0 F rendered as -0.0. temperature_c now carries full precision
+# and _to_preferred_temp does the single rounding at the render edge.
+
+
+def test_parse_device_data_probe_fahrenheit_survives_the_round_trip(client):
+    """66.30 F must render as 66.3 F, not 66.4 F."""
+    device = _probe_device(_onboard_group() + _probe_group(port=2, temp=6630, sensorUnit=0))
+    probe = client.parse_device_data(device)["probes"][0]
+    assert probe["temperature_c"] == pytest.approx((66.30 - 32) * 5 / 9, abs=1e-9)
+    assert _to_preferred_temp(probe["temperature_c"], "F") == 66.3
+
+
+def test_parse_device_data_probe_zero_fahrenheit_is_not_negative_zero(client):
+    """0 F renders as 0.0, not -0.0.
+
+    The humidity and VPD entries are non-zero so this is a real reading rather
+    than the all-zero Quirk 20 phantom the next test covers.
+    """
+    device = _probe_device(
+        _onboard_group() + _probe_group(port=2, temp=0, hum=8160, vpd=39, sensorUnit=0)
+    )
+    probe = client.parse_device_data(device)["probes"][0]
+    rendered = _to_preferred_temp(probe["temperature_c"], "F")
+    assert rendered == 0.0
+    assert math.copysign(1.0, rendered) == 1.0  # 0.0, not -0.0
+
+
+def test_parse_device_data_probe_celsius_probe_unaffected(client):
+    """A probe already reporting Celsius is stored as sent — no conversion, no drift."""
+    device = _probe_device(_onboard_group() + _probe_group(port=2, temp=1906, sensorUnit=1))
+    probe = client.parse_device_data(device)["probes"][0]
+    assert probe["temperature_c"] == pytest.approx(19.06, abs=1e-9)
+    assert _to_preferred_temp(probe["temperature_c"], "C") == 19.1
 
 
 def test_parse_device_data_all_zero_triplet_is_phantom(client):

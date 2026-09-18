@@ -183,7 +183,9 @@ def _extract_probes(sensors: list[dict] | None) -> list[dict]:
     Temperature is normalised to Celsius here so the conversion happens once, in
     one direction, matching every other temperature in this module. The per-entry
     ``sensorUnit`` flag decides the raw scale (>0 means already Celsius); when it
-    is absent the sensorType itself disambiguates (0 = °F, 1 = °C).
+    is absent the sensorType itself disambiguates (0 = °F, 1 = °C). It is stored
+    at full precision — rounding happens once at the render edge, in
+    ``_to_preferred_temp`` (Issue #324).
     """
     by_port: dict[int, dict[int, dict]] = {}
     for s in sensors or []:
@@ -227,7 +229,12 @@ def _extract_probes(sensors: list[dict] | None) -> list[dict]:
         )
         probes.append({
             "sensor_port": port,
-            "temperature_c": round(raw if is_celsius else (raw - 32) * 5 / 9, 1),
+            # Not rounded here (Issue #324). A probe's native scale is often
+            # Fahrenheit, so rounding the Celsius intermediate is not reversible:
+            # 66.30 F came back out as 66.4 F, and 0 F rendered as -0.0. Every
+            # consumer goes through _to_preferred_temp, which rounds once at the
+            # edge, so the displayed shape is unchanged.
+            "temperature_c": raw if is_celsius else (raw - 32) * 5 / 9,
             "humidity_pct": round(_sensor_value(humidity_entry), 1),
             "vpd_kpa": round(_sensor_value(vpd_entry), 2),
         })
