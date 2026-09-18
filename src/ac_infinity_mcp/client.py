@@ -15,6 +15,7 @@ from ac_infinity_mcp.controller import (
 )
 from ac_infinity_mcp.schema import (
     NEW_FRAMEWORK_TOGGLE_LOAD_TYPES,
+    PORT_EMPTY_RESISTANCE,
     TOGGLE_LOAD_TYPES,
     ACInfinityAdvanceConflictError,
     ACInfinityAPIError,
@@ -1970,10 +1971,36 @@ class ACInfinityClient:
                     "name": port_name,
                     "speed": p.get("speak", 0),  # 0-10 scale from API
                 }
-                # Only flag default-named ports as "not powered" — a user-renamed port
-                # implies a device was intentionally connected, and loadState=0 alone
-                # can't distinguish "nothing plugged in" from "device is off".
-                if (
+                # Two different claims, kept apart (Issue #323):
+                #
+                #   "nothing connected" — portResistance is the open-circuit sentinel,
+                #     which is conclusive regardless of the port's name (Quirk 27).
+                #   "not powered" — no current is being drawn. Also true of a connected
+                #     device that is switched off, so it stays restricted to
+                #     default-named ports: loadState=0 alone cannot tell "nothing
+                #     plugged in" from "device is off", and a renamed port implies
+                #     something was connected on purpose.
+                #
+                # Before this, the readings path never read portResistance, so a
+                # renamed empty port (e.g. "Fan" on port 5) was silent here while
+                # get_port_settings — which routes through _is_port_empty — said it
+                # had nothing connected. Same port, two answers.
+                #
+                # Inherited tradeoff: an LED light with its own power switch can read
+                # 65535 while still physically plugged in. Already accepted for
+                # _is_port_empty. The speed guard below keeps the contradiction out of
+                # a single response — a port being commanded to run is not described
+                # as empty, whatever the resistance says.
+                _resistance = p.get("portResistance")
+                _empty_by_resistance = False
+                if _resistance is not None:
+                    try:
+                        _empty_by_resistance = int(_resistance) == PORT_EMPTY_RESISTANCE
+                    except (ValueError, TypeError, OverflowError):
+                        _empty_by_resistance = False  # malformed → fall back below
+                if _empty_by_resistance and not p.get("speak", 0):
+                    port_entry["plug_status"] = "nothing connected"
+                elif (
                     not p.get("loadState", 0)
                     and not p.get("speak", 0)
                     and port_name == f"Port {port_num}"

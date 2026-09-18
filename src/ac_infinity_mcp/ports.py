@@ -1,9 +1,5 @@
 from ac_infinity_mcp.analytics import _ZERO_LOAD_DEV_TYPES
-
-# portResistance == 65535 (0xFFFF) is the hardware open-circuit sentinel: nothing connected.
-# The controller measures electrical resistance across each port; connected devices present
-# real values (e.g. 400Ω light, 7500Ω fan, 15800Ω heater). Confirmed via ProxyMan 2026-05-26.
-_PORT_EMPTY_RESISTANCE: int = 65535
+from ac_infinity_mcp.schema import PORT_EMPTY_RESISTANCE as _PORT_EMPTY_RESISTANCE
 
 
 def _is_port_empty(port_data: dict | None, port: int, device: dict | None) -> bool:

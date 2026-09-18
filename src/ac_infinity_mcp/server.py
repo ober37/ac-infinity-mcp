@@ -1057,12 +1057,20 @@ async def get_device_reading(device_id: str) -> str:
         it is already the top-level ``temperature``/``humidity``/``vpd``. Each entry
         carries ``sensor_port``, ``temperature``, ``unit``, ``humidity`` and ``vpd``,
         in the same unit as the top-level reading. Empty when no probe is attached.
-        ``plug_status`` is only present on a port entry when no current is detected,
-        the port is not running (speed 0 and no load), **and the port still has its
-        default name** (``"Port N"``). Custom-named ports are assumed to have a device
-        intentionally connected — ``loadState=0`` alone cannot distinguish "nothing
-        plugged in" from "device is off" for on/off devices. This matches the signal
-        used in ``get_port_status``.
+        ``plug_status`` carries one of two values, and they are different claims:
+
+        - ``"nothing connected"`` — ``portResistance`` reads the open-circuit
+          sentinel (Quirk 27). Conclusive, so it applies whatever the port is named.
+          Not reported while the port is being commanded to run.
+        - ``"not powered"`` — no current is detected: speed 0, no load, **and the
+          port still has its default name** (``"Port N"``). Custom-named ports are
+          assumed to have a device intentionally connected, because ``loadState=0``
+          alone cannot distinguish "nothing plugged in" from "device is off" for
+          on/off devices.
+
+        Absent when neither holds. An LED light with its own power switch can read
+        the sentinel while still plugged in — the same tradeoff ``get_port_settings``
+        already carries.
         On failure returns ``{"error": "...", "detail": "..."}``.
     """
     try:

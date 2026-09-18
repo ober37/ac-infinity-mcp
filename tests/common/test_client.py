@@ -208,11 +208,17 @@ def test_parse_device_data_ports(client):
     assert "plug_status" not in result["ports"][1]
 
 
-def _port_device(load_state, speak=0, port_name="Port 1"):
-    """Build a minimal device dict with one port for plug_status edge-case tests."""
+def _port_device(load_state, speak=0, port_name="Port 1", port_resistance=None):
+    """Build a minimal device dict with one port for plug_status edge-case tests.
+
+    ``port_resistance`` defaults to absent, which is the old-firmware shape the
+    name/loadState heuristic was written for.
+    """
     port: dict = {"port": 1, "portName": port_name, "speak": speak, "portsLoad": 0}
     if load_state is not None:
         port["loadState"] = load_state
+    if port_resistance is not None:
+        port["portResistance"] = port_resistance
     return {
         "devCode": "C58ZA",
         "devName": "Test",
@@ -241,6 +247,71 @@ def test_parse_device_data_port_plug_status(client, load_state, speak, port_name
         assert result["ports"][0].get("plug_status") == "not powered"
     else:
         assert "plug_status" not in result["ports"][0]
+
+
+# ---- portResistance answers it outright (Issue #323) ----
+#
+# The readings path never read portResistance, so a renamed empty port was silent
+# here while get_port_settings — which routes through _is_port_empty — said it had
+# nothing connected. Port 5 on the AI+ this was found on is named "Fan", reads
+# portResistance 65535, and has nothing plugged into it.
+#
+# The two values are different claims and the tests keep them apart:
+# "nothing connected" is the hardware sentinel; "not powered" is "no current
+# drawn", which is also true of a connected device that is switched off.
+
+
+@pytest.mark.parametrize("resistance,name,load_state,speak,expected", [
+    # the reported case: renamed, empty, and previously silent
+    (65535, "Fan", 0, 0, "nothing connected"),
+    # the sentinel is conclusive, so the name does not matter either way
+    (65535, "Port 1", 0, 0, "nothing connected"),
+    (65535, "Port 1", 1, 0, "nothing connected"),   # beats a stale loadState
+    ("65535", "Fan", 0, 0, "nothing connected"),    # Quirk 7 shape: number as string
+    # a real resistance means something IS connected — fall through to the heuristic
+    (15800, "Port 1", 0, 0, "not powered"),         # default-named, idle
+    (15800, "Heater", 0, 0, None),                  # renamed, idle → no claim
+    (15800, "Port 1", 0, 5, None),                  # running
+    # malformed resistance must not be read as a sentinel
+    ("N/A", "Port 1", 0, 0, "not powered"),
+    ("N/A", "Fan", 0, 0, None),
+    # absent resistance: unchanged behaviour
+    (None, "Port 1", 0, 0, "not powered"),
+    (None, "Fan", 0, 0, None),
+])
+def test_parse_device_data_plug_status_consults_resistance(
+    client, resistance, name, load_state, speak, expected
+):
+    device = _port_device(load_state, speak, name, port_resistance=resistance)
+    port = client.parse_device_data(device)["ports"][0]
+    if expected is None:
+        assert "plug_status" not in port
+    else:
+        assert port["plug_status"] == expected
+
+
+def test_parse_device_data_running_port_is_never_called_empty(client):
+    """A port being commanded to run is not described as empty in the same dict.
+
+    An LED light with its own power switch can read the sentinel while plugged in
+    (the tradeoff _is_port_empty already carries). Reporting "nothing connected"
+    next to "speed": 5 would contradict itself inside one response.
+    """
+    port = client.parse_device_data(
+        _port_device(0, speak=5, port_name="Light", port_resistance=65535)
+    )["ports"][0]
+    assert port["speed"] == 5
+    assert "plug_status" not in port
+
+
+def test_parse_device_data_plug_status_matches_is_port_empty_on_the_sentinel(client):
+    """The readings path and _is_port_empty stop disagreeing about the same port."""
+    from ac_infinity_mcp.ports import _is_port_empty
+
+    device = _port_device(0, speak=0, port_name="Fan", port_resistance=65535)
+    port_data = device["deviceInfo"]["ports"][0]
+    assert _is_port_empty(port_data, 1, device) is True
+    assert client.parse_device_data(device)["ports"][0]["plug_status"] == "nothing connected"
 
 
 def test_parse_device_data_no_sensors(client):

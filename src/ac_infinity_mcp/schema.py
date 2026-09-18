@@ -25,6 +25,13 @@ import math
 # a genuinely variable-speed port, which is unfalsifiable from the write path.
 TOGGLE_LOAD_TYPES: frozenset[int] = frozenset({4, 128})
 
+# Shared by ports.py (empty-port decision) and client.py (readings path).
+# portResistance == 65535 (0xFFFF) is the hardware open-circuit sentinel: the
+# controller measures resistance across each port, and connected devices present
+# real values (400 light, 5100 fan, 15800 heater) even when switched off.
+# Confirmed via ProxyMan 2026-05-26; Quirk 27.
+PORT_EMPTY_RESISTANCE: int = 65535
+
 # Write-guard set for NEW_FRAMEWORK only. Not used by analytics: applying
 # AI+-gathered values to legacy history interpretation is exactly the
 # out-of-scope change this split exists to avoid.
