@@ -1,9 +1,16 @@
+from typing import Literal
+
 from ac_infinity_mcp.analytics import _ZERO_LOAD_DEV_TYPES
 
 # portResistance == 65535 (0xFFFF) is the hardware open-circuit sentinel: nothing connected.
 # The controller measures electrical resistance across each port; connected devices present
 # real values (e.g. 400Ω light, 7500Ω fan, 15800Ω heater). Confirmed via ProxyMan 2026-05-26.
 _PORT_EMPTY_RESISTANCE: int = 65535
+
+# Both call sites compare against these string literals, so a typo currently
+# type-checks cleanly and disables the branch for good. Naming the type makes
+# mypy catch that.
+PortEmptyConfidence = Literal["sentinel", "heuristic", "no"]
 
 
 def _is_port_empty(port_data: dict | None, port: int, device: dict | None) -> bool:
@@ -27,24 +34,11 @@ def _is_port_empty(port_data: dict | None, port: int, device: dict | None) -> bo
     affected — their resistance is measurable regardless of a device-level switch.
 
     Returns False when ``port_data`` is None (port not found) or ``device`` is None.
+
+    Derived from :func:`_port_empty_confidence` rather than deciding the same fact
+    a second time (Issue #352).
     """
-    if port_data is None or device is None:
-        return False
-
-    port_resistance = port_data.get("portResistance")
-    if port_resistance is not None:
-        try:
-            return int(port_resistance) == _PORT_EMPTY_RESISTANCE
-        except (ValueError, TypeError, OverflowError):
-            return False  # treat as connected on malformed API data
-
-    # Fallback for firmware that omits portResistance: preserve dual-signal heuristic.
-    port_name = port_data.get("portName", f"Port {port}")
-    if port_name and port_name != f"Port {port}":
-        return False  # custom-named → assumed connected
-    ports_load = port_data.get("portsLoad", 0) or 0
-    dev_type = device.get("devType")
-    return ports_load == 0 or dev_type in _ZERO_LOAD_DEV_TYPES
+    return _port_empty_confidence(port_data, port, device) != "no"
 
 
 def _empty_port_advisory(port_label: str) -> str:
@@ -55,11 +49,20 @@ def _empty_port_advisory(port_label: str) -> str:
     )
 
 
-def _port_empty_confidence(port_data: dict | None, port: int, device: dict | None) -> str:
+def _port_empty_confidence(
+    port_data: dict | None, port: int, device: dict | None
+) -> PortEmptyConfidence:
     """Return "sentinel", "heuristic" or "no" for the empty-port signal.
 
-    ``_is_port_empty`` collapses two very different signals into one bool, which is
-    right for an advisory but not for control flow:
+    This is where the empty-port question is decided; ``_is_port_empty`` is this
+    answer collapsed to a bool. The two used to compare ``portResistance``
+    differently — one coerced with ``int()``, one compared raw — so a stringified
+    ``"65535"`` was a sentinel to one and a heuristic to the other (Issue #352).
+    That mattered because the heuristic wording tells the grower the port is
+    "default-named and drawing no load", and via that path neither clause had been
+    evaluated.
+
+    The two signals it separates:
 
     - ``"sentinel"`` — ``portResistance == 65535``, the hardware open-circuit value
       (Quirk 27). Direct evidence.
@@ -70,9 +73,28 @@ def _port_empty_confidence(port_data: dict | None, port: int, device: dict | Non
 
     Only "sentinel" is strong enough to redirect a grower away from an automation
     conflict; "heuristic" may be added as an advisory alongside one.
+
+    Returns "no" when ``port_data`` is None (port not found) or ``device`` is None.
     """
-    if not _is_port_empty(port_data, port, device):
+    if port_data is None or device is None:
         return "no"
-    if port_data is not None and port_data.get("portResistance") == _PORT_EMPTY_RESISTANCE:
-        return "sentinel"
-    return "heuristic"
+
+    port_resistance = port_data.get("portResistance")
+    if port_resistance is not None:
+        # Coerced, because this API sends numbers as strings elsewhere (devId per
+        # Quirk 7, devType as "20").
+        try:
+            coerced = int(port_resistance)
+        except (ValueError, TypeError, OverflowError):
+            return "no"  # treat as connected on malformed API data
+        return "sentinel" if coerced == _PORT_EMPTY_RESISTANCE else "no"
+
+    # Fallback for firmware that omits portResistance: preserve dual-signal heuristic.
+    port_name = port_data.get("portName", f"Port {port}")
+    if port_name and port_name != f"Port {port}":
+        return "no"  # custom-named → assumed connected
+    ports_load = port_data.get("portsLoad", 0) or 0
+    dev_type = device.get("devType")
+    if ports_load == 0 or dev_type in _ZERO_LOAD_DEV_TYPES:
+        return "heuristic"
+    return "no"

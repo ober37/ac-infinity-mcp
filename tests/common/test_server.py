@@ -4,6 +4,7 @@ import asyncio
 import copy
 import json
 import time
+import typing
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
@@ -11,6 +12,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from ac_infinity_mcp.controller import ControllerType
+from ac_infinity_mcp.ports import PortEmptyConfidence, _port_empty_confidence
 from ac_infinity_mcp.schema import (
     _ADVANCE_MODE_TYPE,
     ACInfinityAdvanceConflictError,
@@ -8893,6 +8895,76 @@ def test_empty_port_advisory_text_no_dry_run():
     assert "dry_run" not in msg
     assert "Port 7" in msg
     assert "connected" in msg
+
+
+# ============ _port_empty_confidence agrees with _is_port_empty (issue #352) ============
+#
+# The two used to compare portResistance differently: _is_port_empty coerced with
+# int(), _port_empty_confidence compared raw. A stringified "65535" was therefore
+# empty AND only "heuristic" — and the heuristic advisory tells the grower the port
+# is "default-named and drawing no load", neither of which had been evaluated on
+# that path. No committed capture sends a string, so these pin robustness, not a
+# live defect. This API does send numbers as strings elsewhere (Quirk 7).
+
+_CONFIDENCE_CASES = [
+    # (port_resistance, name, ports_load, dev_type, expected_confidence)
+    (65535, "Humidifier", 0, 11, "sentinel"),
+    (65535.0, "Humidifier", 0, 11, "sentinel"),
+    ("65535", "Humidifier", 0, 11, "sentinel"),      # the divergence
+    (" 65535 ", "Humidifier", 0, 11, "sentinel"),    # int() tolerates surrounding space
+    (7500, "Filter", 0, 18, "no"),
+    ("7500", "Port 4", 0, 11, "no"),                 # real resistance wins over the name
+    (0, "Port 7", 0, 11, "no"),
+    ("N/A", "Port 3", 0, 11, "no"),                  # malformed → treat as connected
+    (None, "Port 4", 0, 11, "heuristic"),            # fallback: default name + zero load
+    (None, "Grow Light", 0, 11, "no"),               # fallback: custom name
+    (None, "Port 4", 5, 11, "no"),                   # fallback: load present
+    (None, "Port 4", 5, 18, "heuristic"),            # devType reports no load signal
+]
+
+
+@pytest.mark.parametrize("resistance,name,load,dev_type,expected", _CONFIDENCE_CASES)
+def test_port_empty_confidence_value(resistance, name, load, dev_type, expected):
+    port_data = _make_port_data(4, name=name, ports_load=load)
+    if resistance is not None:
+        port_data["portResistance"] = resistance
+    assert _port_empty_confidence(port_data, 4, _make_device(dev_type)) == expected
+
+
+@pytest.mark.parametrize("resistance,name,load,dev_type,expected", _CONFIDENCE_CASES)
+def test_is_port_empty_never_disagrees_with_the_confidence(
+    resistance, name, load, dev_type, expected
+):
+    """The bool is the confidence collapsed — they cannot drift apart again."""
+    port_data = _make_port_data(4, name=name, ports_load=load)
+    if resistance is not None:
+        port_data["portResistance"] = resistance
+    device = _make_device(dev_type)
+    assert _is_port_empty(port_data, 4, device) is (expected != "no")
+
+
+def test_port_empty_confidence_string_sentinel_is_not_heuristic():
+    """A stringified sentinel must not reach the heuristic advisory.
+
+    "heuristic" claims the port is default-named AND drawing no load. Here it is
+    custom-named and the resistance branch answered, so neither clause was ever
+    evaluated.
+    """
+    port_data = _make_port_data(3, name="Grow Light", ports_load=5)
+    port_data["portResistance"] = "65535"
+    assert _port_empty_confidence(port_data, 3, _make_device(11)) == "sentinel"
+
+
+def test_port_empty_confidence_missing_inputs():
+    assert _port_empty_confidence(None, 5, _make_device(11)) == "no"
+    assert _port_empty_confidence(_make_port_data(5, name="Port 5"), 5, None) == "no"
+
+
+def test_port_empty_confidence_return_type_is_the_literal():
+    """The return annotation is the named Literal, so a typo'd branch fails mypy."""
+    hints = typing.get_type_hints(_port_empty_confidence)
+    assert hints["return"] is PortEmptyConfidence
+    assert set(typing.get_args(PortEmptyConfidence)) == {"sentinel", "heuristic", "no"}
 
 
 # ============ _get_device() helper (issue #201) ============
