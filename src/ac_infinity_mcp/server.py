@@ -3112,6 +3112,22 @@ async def set_vpd_automation(
         })
 
 
+def _low_temp_trigger_flag(c_lo: int) -> int:
+    """Return ``activeLt`` for a low threshold of ``c_lo`` °C (Issue #336).
+
+    A threshold sitting on its rail means "no low trigger": the controller stores
+    an unset low trigger as ``devLt 0`` / ``devLtf 32`` with ``activeLt 0``
+    (docs/API.md, getdevModeSettingList capture), and 32 °F is 0 °C, so one check
+    covers both unit paths.
+
+    This is the only place in the project that writes ``activeLt 0``. Before it,
+    both writers hardcoded 1, so any call — including one that only wanted to move
+    the high trigger — switched the low trigger on permanently as far as this
+    server was concerned, with no tool able to switch it back.
+    """
+    return 0 if c_lo <= _RAIL_TEMP_LOW_C else 1
+
+
 @mcp_server.tool()
 async def set_temperature_automation(
     device_id: str,
@@ -3126,6 +3142,12 @@ async def set_temperature_automation(
     The controller speeds up when temperature exceeds max_temp and slows down below
     min_temp. Uses read-before-write. Defaults to dry_run=True.
 
+    The low trigger follows the value you pass: ``min_temp`` at its rail (32°F /
+    0°C) writes ``activeLt 0``, which is how the controller stores "no low
+    trigger". Anything higher enables it. The high trigger is always enabled —
+    the accepted range stops well below the 194°F / 90°C high rail, so there is no
+    way to express "no high trigger" through this tool.
+
     Pass values in the device's preferred unit (°F or °C). Call ``discover_devices``
     first to check ``temp_unit``. Valid range: 32–122°F or 0–50°C (device API cap = 50°C).
 
@@ -3133,7 +3155,9 @@ async def set_temperature_automation(
         device_id: Device code from discover_devices (e.g. "C58ZA").
         port: 1-based port number.
         min_temp: Minimum temperature threshold in the device's preferred unit.
-            Sub-degree values are rounded to the nearest integer.
+            Sub-degree values are rounded to the nearest integer. Pass the rail —
+            32°F or 0°C — to leave the low trigger OFF; any higher value enables
+            it (Issue #336).
         max_temp: Maximum temperature threshold in the device's preferred unit.
             Must exceed min_temp. Sub-degree values are rounded to the nearest integer.
         dry_run: If True (default), returns the payload that would be sent
@@ -3191,7 +3215,16 @@ async def set_temperature_automation(
             # the collapse guard above.
             "devLt": c_lo,
             "devHt": c_hi,
-            "activeLt": 1,
+            # Derived, not hardcoded (Issue #336): a min on the rail means the
+            # caller does not want a low trigger. min_temp is required, so before
+            # this every caller who wanted a maximum also got a minimum they could
+            # not clear — on an exhaust fan, "turn on below 32 °F", inert in
+            # September and live in January.
+            "activeLt": _low_temp_trigger_flag(c_lo),
+            # The accepted range stops at 122 °F / 50 °C, well below the 194 °F /
+            # 90 °C high rail, so there is no value that means "no high trigger"
+            # here. Clearing it still needs the app, or the explicit off path
+            # discussed on #336.
             "activeHt": 1,
         }
         # When °F device, also send the F values for informational storage
@@ -3215,7 +3248,17 @@ async def set_temperature_automation(
             "dry_run": write_result["dry_run"],
             "controller_type": write_result["controller_type"],
             "sent": write_result["sent"],
+            "triggers": {
+                "low_temp": bool(updates["activeLt"]),
+                "high_temp": bool(updates["activeHt"]),
+            },
         }
+        if not updates["activeLt"]:
+            response["note"] = (
+                f"Low temperature trigger left OFF because min_temp is the "
+                f"{_RAIL_TEMP_LOW_F}{_unit_label('F')} / 0{_unit_label('C')} rail, which the "
+                f"controller stores as 'no low trigger'. Pass a higher min_temp to enable it."
+            )
         if write_result["dry_run"]:
             response["payload"] = write_result["payload"]
         if _is_port_empty(port_data, port, device):
@@ -3651,7 +3694,10 @@ async def apply_grow_stage_template(
         "targetVpdSwitch": 1,
         "devLt": int(temp_min + 0.5),
         "devHt": int(temp_max + 0.5),
-        "activeLt": 1,
+        # Same rule as set_temperature_automation (Issue #336). No stage target
+        # sits on the rail, so this is identical in behaviour today — it is here so
+        # the two writers cannot drift into disagreeing about what the flag means.
+        "activeLt": _low_temp_trigger_flag(int(temp_min + 0.5)),
         "activeHt": 1,
         "devLh": int(humi_min + 0.5),
         "devHh": int(humi_max + 0.5),

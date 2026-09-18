@@ -38,6 +38,7 @@ from ac_infinity_mcp.server import (
     _invalidate_device_cache,
     _is_port_empty,
     _is_port_not_powered,
+    _low_temp_trigger_flag,
     _parse_duration_seconds,
     _parse_schedule_time,
     _sanitize_api_string,
@@ -4672,6 +4673,96 @@ async def test_set_temperature_automation_payload_encoding(mock_client):
     assert call_updates["devHt"] == 28
     assert call_updates["activeLt"] == 1
     assert call_updates["activeHt"] == 1
+
+
+# ---- the low trigger follows the value, it is not hardcoded (Issue #336) ----
+#
+# Both writers used to send activeLt 1 unconditionally, and nothing in the
+# project ever wrote 0. min_temp is required, so a caller who only wanted to move
+# the high trigger also switched on a low trigger they could not switch back —
+# on an exhaust fan, "turn on below 32 °F", inert in September and live in
+# January.
+
+_F_DEVICE = copy.deepcopy(MOCK_DEVICE_LEGACY)
+_F_DEVICE["deviceInfo"]["unit"] = 0  # 0 = Fahrenheit
+
+
+async def test_set_temperature_automation_low_rail_disables_low_trigger_c(mock_client):
+    """0 °C is the rail: write activeLt 0, and say so in the response."""
+    mock_client.set_port_mode.return_value = MOCK_TEMP_DRY
+    result = await set_temperature_automation("C58ZA", 1, 0.0, 28.0)
+    updates = mock_client.set_port_mode.call_args[0][2]
+    assert updates["activeLt"] == 0
+    assert updates["activeHt"] == 1
+    assert updates["devLt"] == 0  # the rail value is still stored
+    data = json.loads(result)
+    assert data["triggers"] == {"low_temp": False, "high_temp": True}
+    assert "note" in data
+
+
+async def test_set_temperature_automation_above_rail_enables_low_trigger_c(mock_client):
+    """Any value above the rail keeps the low trigger on."""
+    mock_client.set_port_mode.return_value = MOCK_TEMP_DRY
+    result = await set_temperature_automation("C58ZA", 1, 1.0, 28.0)
+    updates = mock_client.set_port_mode.call_args[0][2]
+    assert updates["activeLt"] == 1
+    data = json.loads(result)
+    assert data["triggers"] == {"low_temp": True, "high_temp": True}
+    assert "note" not in data
+
+
+async def test_set_temperature_automation_low_rail_disables_low_trigger_f(mock_client):
+    """32 °F is the same rail as 0 °C — one check covers both unit paths."""
+    mock_client.get_devices.return_value = [copy.deepcopy(_F_DEVICE)]
+    mock_client.set_port_mode.return_value = MOCK_TEMP_DRY
+    await set_temperature_automation("C58ZA", 1, 32.0, 80.0)
+    updates = mock_client.set_port_mode.call_args[0][2]
+    assert updates["activeLt"] == 0
+    assert updates["devLtf"] == 32
+    assert updates["devHtf"] == 80
+    assert updates["activeHt"] == 1
+
+
+async def test_set_temperature_automation_above_rail_enables_low_trigger_f(mock_client):
+    mock_client.get_devices.return_value = [copy.deepcopy(_F_DEVICE)]
+    mock_client.set_port_mode.return_value = MOCK_TEMP_DRY
+    await set_temperature_automation("C58ZA", 1, 60.0, 80.0)
+    updates = mock_client.set_port_mode.call_args[0][2]
+    assert updates["activeLt"] == 1
+
+
+async def test_set_temperature_automation_repairs_a_stuck_flag(mock_client):
+    """A port already carrying activeLt 1 at the rail is repaired by the next write.
+
+    This is what makes the fix reach ports that are already in the state the issue
+    describes: the flag is written explicitly, so read-before-write cannot carry
+    the stale 1 through.
+    """
+    stuck = copy.deepcopy(_F_DEVICE)
+    stuck["deviceInfo"]["ports"][0]["activeLt"] = 1
+    mock_client.get_devices.return_value = [stuck]
+    mock_client.set_port_mode.return_value = MOCK_TEMP_DRY
+    await set_temperature_automation("C58ZA", 1, 32.0, 81.0)
+    assert mock_client.set_port_mode.call_args[0][2]["activeLt"] == 0
+
+
+def test_low_temp_trigger_flag_helper():
+    """The rail check itself, the one place activeLt 0 comes from."""
+    assert _low_temp_trigger_flag(0) == 0
+    assert _low_temp_trigger_flag(-1) == 0   # below the rail cannot mean "set"
+    assert _low_temp_trigger_flag(1) == 1
+    assert _low_temp_trigger_flag(20) == 1
+
+
+async def test_apply_grow_stage_template_keeps_low_trigger_on(mock_client):
+    """No stage target sits on the rail, so the template's flag is unchanged at 1."""
+    mock_client.set_port_mode.return_value = {
+        "payload": {}, "dry_run": True, "controller_type": "legacy", "sent": False,
+    }
+    await apply_grow_stage_template("C58ZA", 1, "veg", dry_run=True)
+    updates = mock_client.set_port_mode.call_args[0][2]
+    assert updates["activeLt"] == 1
+    assert updates["activeHt"] == 1
 
 
 async def test_set_temperature_automation_min_ge_max(mock_client):
