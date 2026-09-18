@@ -2726,7 +2726,7 @@ async def set_port_speed(
         return await _build_advance_conflict_response(
             _client(), device_id, dev_id, port, port_name,
             controller_type=_ctype(device, "set_port_speed"), device=device, requested_speed=speed,
-            conflict_code=getattr(conflict_exc, "api_code", None),
+            conflict_code=conflict_exc.api_code,
         )
     except ACInfinityDeviceError as e:
         logger.warning("Device error in set_port_speed (device=%s port=%s): %s", device_id, port, e)
@@ -2812,7 +2812,7 @@ async def set_port_on(
         return await _build_advance_conflict_response(
             _client(), device_id, dev_id, port, port_name,
             controller_type=_ctype(device, "set_port_on"), device=device,
-            conflict_code=getattr(conflict_exc, "api_code", None),
+            conflict_code=conflict_exc.api_code,
         )
     except ACInfinityDeviceError as e:
         logger.warning("Device error in set_port_on (device=%s port=%s): %s", device_id, port, e)
@@ -2899,7 +2899,7 @@ async def set_port_off(
         return await _build_advance_conflict_response(
             _client(), device_id, dev_id, port, port_name,
             controller_type=_ctype(device, "set_port_off"), device=device,
-            conflict_code=getattr(conflict_exc, "api_code", None),
+            conflict_code=conflict_exc.api_code,
         )
     except ACInfinityDeviceError as e:
         logger.warning("Device error in set_port_off (device=%s port=%s): %s", device_id, port, e)
@@ -3096,7 +3096,7 @@ async def set_vpd_automation(
         return await _build_advance_conflict_response(
             _client(), device_id, dev_id, port, port_name,
             controller_type=_ctype(device, "set_vpd_automation"), device=device,
-            conflict_code=getattr(conflict_exc, "api_code", None),
+            conflict_code=conflict_exc.api_code,
         )
     except ACInfinityDeviceError as e:
         logger.warning(
@@ -3243,7 +3243,7 @@ async def set_temperature_automation(
         return await _build_advance_conflict_response(
             _client(), device_id, dev_id, port, port_name,
             controller_type=_ctype(device, "set_temperature_automation"), device=device,
-            conflict_code=getattr(conflict_exc, "api_code", None),
+            conflict_code=conflict_exc.api_code,
         )
     except ACInfinityDeviceError as e:
         logger.warning(
@@ -3353,7 +3353,7 @@ async def set_humidity_automation(
         return await _build_advance_conflict_response(
             _client(), device_id, dev_id, port, port_name,
             controller_type=_ctype(device, "set_humidity_automation"), device=device,
-            conflict_code=getattr(conflict_exc, "api_code", None),
+            conflict_code=conflict_exc.api_code,
         )
     except ACInfinityDeviceError as e:
         logger.warning(
@@ -3516,7 +3516,7 @@ async def set_port_mode(
         return await _build_advance_conflict_response(
             _client(), device_id, dev_id, port, port_name,
             controller_type=_ctype(device, "set_port_mode"), device=device,
-            conflict_code=getattr(conflict_exc, "api_code", None),
+            conflict_code=conflict_exc.api_code,
         )
     except ACInfinityDeviceError as e:
         logger.warning("Device error in set_port_mode (device=%s port=%s): %s", device_id, port, e)
@@ -3684,7 +3684,7 @@ async def apply_grow_stage_template(
         return await _build_advance_conflict_response(
             _client(), device_id, dev_id, port, port_name,
             controller_type=_ctype(device, "apply_grow_stage_template"), device=device,
-            conflict_code=getattr(conflict_exc, "api_code", None),
+            conflict_code=conflict_exc.api_code,
         )
     except ACInfinityDeviceError as e:
         logger.warning(

@@ -497,8 +497,9 @@ def test_ai_plus_999999_on_mode_write_still_reports_automation_conflict(ai_plus_
          patch.object(c, "_enforce_write_rate_limit"), \
          patch.object(c, "get_mode_settings", autospec=True,
                       return_value=dict(AI_PLUS_SETTINGS)):
-        with pytest.raises(ACInfinityAdvanceConflictError):
+        with pytest.raises(ACInfinityAdvanceConflictError) as exc_info:
             c.set_port_mode(ai_plus_device, port=1, updates={"atType": 2}, dry_run=False)
+    assert exc_info.value.api_code == 999999  # API rejection, not a detection (#351)
 
 
 # ============ AI+ ADVANCE guard (Quirk 36) ============
@@ -530,9 +531,10 @@ def test_ai_plus_advance_guard_fires_on_is_open_automation(ai_plus_device, setti
     with patch.object(c.session, "post") as post, \
          patch.object(c, "_enforce_write_rate_limit"), \
          patch.object(c, "get_mode_settings", autospec=True, return_value=settings):
-        with pytest.raises(ACInfinityAdvanceConflictError):
+        with pytest.raises(ACInfinityAdvanceConflictError) as exc_info:
             c.set_port_mode(ai_plus_device, port=1, updates={"onSpead": 5}, dry_run=False)
     post.assert_not_called()
+    assert exc_info.value.api_code is None  # pre-write detection (#351)
 
 
 def test_legacy_advance_guard_still_requires_mode_type_15(legacy_11_device):

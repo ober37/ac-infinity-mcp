@@ -2033,6 +2033,9 @@ def test_set_port_mode_raises_on_modeType_15(authed_client):
         authed_client.set_port_mode(LEGACY_DEVICE_DATA, port=1, updates={}, dry_run=True)
     assert "smart automation" in str(exc_info.value).lower()
     assert "1" in str(exc_info.value)  # port number appears in message
+    # Producer assertion (#351): a pre-write detection carries no API code. The
+    # empty-port branch in the server turns on this value, and nothing pinned it.
+    assert exc_info.value.api_code is None
 
 
 @responses_lib.activate
@@ -2233,6 +2236,7 @@ def test_set_port_mode_pre_write_guard_fires_when_isOpenAutomation_1(authed_clie
             LEGACY_DEVICE_DATA_WITH_OPEN_AUTOMATION, port=1, updates={}, dry_run=True
         )
     assert "isOpenAutomation=1" in str(exc_info.value)
+    assert exc_info.value.api_code is None  # pre-write detection (#351)
     # Confirm no HTTP call was made (get_mode_settings not reached)
     mode_calls = [c for c in responses_lib.calls if "getdevModeSettingList" in c.request.url]
     assert len(mode_calls) == 0
@@ -2287,6 +2291,10 @@ def test_set_port_mode_write_code_999999_raises_advance_conflict(authed_client):
         with pytest.raises(ACInfinityAdvanceConflictError) as exc_info:
             authed_client.set_port_mode(LEGACY_DEVICE_DATA, port=1, updates={}, dry_run=False)
     assert "999999" in str(exc_info.value)
+    # Producer assertion (#351). This is the only raise site that sets the code,
+    # and it is what lets the server lead with "check the cable" (Quirk 38)
+    # instead of offering to release an automation that may not exist.
+    assert exc_info.value.api_code == 999999
 
 # ============ parse_device_data — plug-in probe readings (`probes`) ============
 #
